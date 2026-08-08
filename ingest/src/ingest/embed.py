@@ -27,7 +27,12 @@ class TransientEmbedError(RuntimeError):
     pass
 
 
+from functools import lru_cache
+
+
+@lru_cache(maxsize=1)
 def _client():
+    """Shared client — see transcribe._client for why this must be cached."""
     from google import genai
 
     return genai.Client(api_key=CONFIG.google_api_key)
@@ -56,7 +61,7 @@ def _embed_batch(texts: list[str], task: str) -> list[list[float]]:
                 output_dimensionality=CONFIG.embed_dim,
             ),
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         message = str(exc)
         if any(m in message for m in ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE")):
             raise TransientEmbedError(message) from exc

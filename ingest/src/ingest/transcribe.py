@@ -80,7 +80,14 @@ class PageText:
     has_japanese: bool
 
 
+from functools import lru_cache
+
+
+@lru_cache(maxsize=1)
 def _client():
+    """One shared client. Constructing a client per request lets the garbage
+    collector close the underlying httpx transport mid-flight, which surfaces
+    as 'Cannot send a request, as the client has been closed'."""
     from google import genai
 
     return genai.Client(api_key=CONFIG.google_api_key)
@@ -101,9 +108,7 @@ def _call(images: list[Path], count: int) -> list[dict]:
 
     parts: list = [PROMPT % count]
     for image in images:
-        parts.append(
-            types.Part.from_bytes(data=image.read_bytes(), mime_type="image/png")
-        )
+        parts.append(types.Part.from_bytes(data=image.read_bytes(), mime_type="image/png"))
 
     try:
         response = _client().models.generate_content(
@@ -116,7 +121,7 @@ def _call(images: list[Path], count: int) -> list[dict]:
                 temperature=0.0,
             ),
         )
-    except Exception as exc:  # noqa: BLE001 - SDK raises varied transport errors
+    except Exception as exc:
         message = str(exc)
         if any(m in message for m in ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE")):
             raise TransientVisionError(message) from exc
@@ -125,9 +130,7 @@ def _call(images: list[Path], count: int) -> list[dict]:
     payload = json.loads(response.text)
     pages = payload.get("pages", [])
     if len(pages) != count:
-        raise TransientVisionError(
-            f"model returned {len(pages)} pages for {count} images"
-        )
+        raise TransientVisionError(f"model returned {len(pages)} pages for {count} images")
     return pages
 
 
@@ -147,9 +150,7 @@ def transcribe(images: list[Path], start_page: int = 1) -> list[PageText]:
                     pdf_page=start_page + offset + i,
                     markdown=page.get("markdown", "").strip(),
                     book_page=str(book_page).strip() if book_page else None,
-                    grammar_points=[
-                        g.strip() for g in page.get("grammar_points", []) if g.strip()
-                    ],
+                    grammar_points=[g.strip() for g in page.get("grammar_points", []) if g.strip()],
                     has_japanese=bool(page.get("has_japanese")),
                 )
             )

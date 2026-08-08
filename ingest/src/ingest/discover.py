@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -36,12 +36,12 @@ _READING_MARKERS = ("reading", "readings", "読み物", "読解")
 
 @dataclass
 class SourceDoc:
-    path: str            # relative to materials_root, forward slashes
+    path: str  # relative to materials_root, forward slashes
     title: str
-    level: str | None    # F2 | F3 | INT
-    topic: str | None    # primary topic, T6 .. T17
-    topics: list[str]    # every topic covered; review sheets span several
-    doc_type: str        # textbook | answer_key | kanji | reading | slides | grammar
+    level: str | None  # F2 | F3 | INT
+    topic: str | None  # primary topic, T6 .. T17
+    topics: list[str]  # every topic covered; review sheets span several
+    doc_type: str  # textbook | answer_key | kanji | reading | slides | grammar
     is_citable: bool
     grammar_point: str | None
     needs_conversion: bool

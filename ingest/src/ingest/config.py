@@ -16,9 +16,7 @@ load_dotenv(_REPO_ROOT / ".env")
 def _req(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
-        raise RuntimeError(
-            f"{name} is not set. Copy .env.example to .env and fill it in."
-        )
+        raise RuntimeError(f"{name} is not set. Copy .env.example to .env and fill it in.")
     return value
 
 

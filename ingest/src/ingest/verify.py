@@ -41,17 +41,14 @@ def check_chunks(records: list[dict]) -> list[Check]:
     )
 
     empty = [r for r in records if not r.get("content", "").strip()]
-    checks.append(
-        Check("no_empty_chunks", not empty, f"{len(empty)} empty chunks")
-    )
+    checks.append(Check("no_empty_chunks", not empty, f"{len(empty)} empty chunks"))
 
     no_tokens = [r for r in records if not (r.get("tokens_text") or "").strip()]
     checks.append(
         Check(
             "tokens_present",
             not no_tokens,
-            f"{len(no_tokens)} chunks have no morphemes; lexical search would "
-            f"miss them entirely",
+            f"{len(no_tokens)} chunks have no morphemes; lexical search would miss them entirely",
         )
     )
 

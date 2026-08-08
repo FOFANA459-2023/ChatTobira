@@ -95,7 +95,9 @@ def cmd_transcribe(
         manifest.mark("transcribe", doc.path, doc.content_sha, pages=len(pages))
 
         japanese = sum(1 for p in pages if p.has_japanese)
-        console.print(f"[green]done[/green]    {doc.path}: {japanese}/{len(pages)} pages with Japanese")
+        console.print(
+            f"[green]done[/green]    {doc.path}: {japanese}/{len(pages)} pages with Japanese"
+        )
 
 
 @app.command("push")
