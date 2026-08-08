@@ -96,7 +96,15 @@ def cmd_transcribe(
             continue
 
         console.print(f"[cyan]render[/cyan]  {doc.path}")
-        pdf = render.to_pdf(doc)
+        try:
+            pdf = render.to_pdf(doc)
+        except RuntimeError as exc:
+            if "LibreOffice" in str(exc):
+                # No converter on this machine: do every PDF now, leave the
+                # Office files for a machine that has LibreOffice.
+                console.print(f"[yellow]skip[/yellow]    {doc.path} (needs LibreOffice)")
+                continue
+            raise
         images = render.render_pages(doc, pdf)
 
         # Resume a partially transcribed document from its checkpoint file:
