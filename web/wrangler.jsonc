@@ -17,7 +17,9 @@
   // anything here is readable by anyone with dashboard access.
   "vars": {
     "CHAT_MODEL": "llama-3.3-70b-versatile",
-    "FALLBACK_MODEL": "gemini-3.6-flash",
+    // 3.6-flash free tier allows only 20 requests/day — useless as a fallback.
+    // 3.5-flash-lite has a real daily budget and is plenty for fallback duty.
+    "FALLBACK_MODEL": "gemini-3.5-flash-lite",
     "EMBED_MODEL": "gemini-embedding-001",
     "STT_MODEL": "whisper-large-v3-turbo",
     "CITATION_QUOTE_CHARS": "200"
