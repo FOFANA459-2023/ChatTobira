@@ -13,6 +13,22 @@ test("login page explains the invite-only policy", async ({ page }) => {
   await expect(
     page.getByRole("button", { name: /send sign-in link/i }),
   ).toBeVisible();
+  await expect(page.getByRole("link", { name: /teacher sign-in/i })).toBeVisible();
+});
+
+test("admin page offers the teacher password sign-in when signed out", async ({
+  page,
+}) => {
+  await page.goto("/admin");
+  await expect(page.getByPlaceholder(/password/i)).toBeVisible();
+  await expect(page.getByRole("button", { name: /^sign in$/i })).toBeVisible();
+});
+
+test("invite API rejects unauthenticated requests", async ({ request }) => {
+  const response = await request.post("/api/invite", {
+    data: { email: "someone@example.com" },
+  });
+  expect(response.status()).toBe(401);
 });
 
 test("chat API rejects unauthenticated requests", async ({ request }) => {

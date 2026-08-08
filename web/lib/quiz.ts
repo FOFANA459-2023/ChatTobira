@@ -8,6 +8,9 @@ export const QuizItemSchema = z.object({
   sentence: z.string().optional(),
   choices: z.array(z.string()).length(4).optional(),
   answer: z.string().min(1),
+  // The answer written entirely in hiragana, when answer contains kanji.
+  // Grading accepts either script — see isCorrect.
+  answer_kana: z.string().optional(),
   explanation: z.string().min(1),
   grammar_point: z.string().optional(),
 });
@@ -53,9 +56,7 @@ export function scoreQuiz(
 
  * Students type the same answer many ways: full-width vs half-width, stray
  * whitespace, trailing punctuation. Grading must not mark 食べます。 wrong
- * against 食べます. Kanji vs kana variants are NOT normalised — knowing the
- * kanji is often the point of the drill, so that stays a human judgement and
- * the UI shows the expected answer on mismatch.
+ * against 食べます.
  */
 export function normalizeAnswer(text: string): string {
   return text
@@ -65,8 +66,26 @@ export function normalizeAnswer(text: string): string {
     .toLowerCase();
 }
 
+/** Strip furigana readings from an answer: 食べます（たべます）,
+ * 食べます(たべます), or the transcript style 食《た》べます all reduce to
+ * 食べます. Only kana inside the brackets is treated as a reading — bracketed
+ * kanji is content, not furigana. */
+function stripReadings(text: string): string {
+  return text.replace(/[（(][ぁ-ゖャ-ンゝゞー]+[）)]/g, "").replace(/《[^》]*》/g, "");
+}
+
+/** A written answer is correct in any script the student knows it in:
+ * the kanji form, the all-hiragana reading (answer_kana, supplied by the
+ * generator), or kanji with furigana attached. Without answer_kana the exact
+ * form is required — the reading of a kanji answer cannot be inferred client-
+ * side, and the UI shows the expected answer on mismatch. */
 export function isCorrect(item: QuizItem, given: string): boolean {
-  return normalizeAnswer(given) === normalizeAnswer(item.answer);
+  const accepted = new Set(
+    [item.answer, item.answer_kana]
+      .filter((form): form is string => Boolean(form))
+      .map((form) => normalizeAnswer(stripReadings(form))),
+  );
+  return accepted.has(normalizeAnswer(stripReadings(given)));
 }
 
 /** A chunk as fetched for quiz generation. */

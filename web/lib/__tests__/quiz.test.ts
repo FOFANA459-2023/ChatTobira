@@ -11,11 +11,12 @@ import {
   type QuizItem,
 } from "../quiz";
 
-function item(answer: string): QuizItem {
+function item(answer: string, answer_kana?: string): QuizItem {
   return {
     type: "fill_blank",
     question: "q",
     answer,
+    answer_kana,
     explanation: "e",
   };
 }
@@ -43,7 +44,23 @@ describe("isCorrect", () => {
     expect(isCorrect(item("読んでおきます"), "読んでいます")).toBe(false);
   });
 
-  it("does not equate kana with kanji — that distinction is the drill", () => {
+  it("accepts the hiragana reading when the generator provides it", () => {
+    expect(isCorrect(item("見える", "みえる"), "みえる")).toBe(true);
+    expect(isCorrect(item("食べました", "たべました"), "たべました")).toBe(true);
+  });
+
+  it("accepts kanji with furigana attached, in either bracket style", () => {
+    const target = item("食べました", "たべました");
+    expect(isCorrect(target, "食べました（たべました）")).toBe(true);
+    expect(isCorrect(target, "食べました(たべました)")).toBe(true);
+    expect(isCorrect(target, "食《た》べました")).toBe(true);
+  });
+
+  it("still rejects a wrong reading even with answer_kana present", () => {
+    expect(isCorrect(item("見える", "みえる"), "きこえる")).toBe(false);
+  });
+
+  it("requires the exact form when no reading was provided", () => {
     expect(isCorrect(item("見える"), "みえる")).toBe(false);
   });
 });

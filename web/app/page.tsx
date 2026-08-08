@@ -1,4 +1,5 @@
 import { Chat } from "@/components/chat";
+import { NameGate } from "@/components/name-gate";
 import { firstNameFrom } from "@/lib/name";
 import { createClient } from "@/lib/supabase/server";
 
@@ -9,9 +10,16 @@ export default async function Home() {
   const {
     data: { user },
   } = await supabase.auth.getUser();
+
+  // A name is required before studying: metadata only, no email guessing —
+  // an invited student's first visit must actually ask.
   const firstName = firstNameFrom(
     user?.user_metadata as Record<string, unknown> | undefined,
-    user?.email,
+    null,
   );
+  if (user && !firstName) {
+    return <NameGate />;
+  }
+
   return <Chat firstName={firstName} />;
 }

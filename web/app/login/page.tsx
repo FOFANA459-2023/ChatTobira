@@ -1,13 +1,16 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 
 type Status = "idle" | "sending" | "sent" | "not_invited" | "error";
 
+/** Student sign-in is by invitation: the teacher sends the first link from
+ * the admin page. This page exists for returning students whose session
+ * expired — an invited email can always request a fresh link. */
 export default function LoginPage() {
   const [email, setEmail] = useState("");
-  const [firstName, setFirstName] = useState("");
   const [status, setStatus] = useState<Status>("idle");
 
   const configured = Boolean(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
@@ -20,11 +23,7 @@ export default function LoginPage() {
       const supabase = createClient();
       const { error } = await supabase.auth.signInWithOtp({
         email: email.trim(),
-        options: {
-          emailRedirectTo: `${window.location.origin}/auth/confirm`,
-          // Stored as user_metadata on first sign-up; the chat greets by it.
-          data: firstName.trim() ? { first_name: firstName.trim() } : undefined,
-        },
+        options: { emailRedirectTo: `${window.location.origin}/auth/confirm` },
       });
 
       if (!error) {
@@ -49,8 +48,9 @@ export default function LoginPage() {
           <span className="text-base font-normal text-stone-500">とびら</span>
         </h1>
         <p className="mt-2 text-sm text-stone-600">
-          Sign in with your university email. Access is limited to invited
-          students.
+          Access is limited to invited students — your teacher sends the invite
+          to your email. Already invited? Enter that email to get a fresh
+          sign-in link.
         </p>
 
         {!configured && (
@@ -67,15 +67,6 @@ export default function LoginPage() {
         )}
 
         <form onSubmit={sendLink} className="mt-6 space-y-3">
-          <input
-            type="text"
-            autoComplete="given-name"
-            disabled={!configured}
-            value={firstName}
-            onChange={(e) => setFirstName(e.target.value)}
-            placeholder="First name (optional)"
-            className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm outline-none focus:border-stone-500 disabled:bg-stone-100"
-          />
           <input
             type="email"
             required
@@ -102,8 +93,8 @@ export default function LoginPage() {
         )}
         {status === "not_invited" && (
           <p className="mt-4 text-sm text-amber-700">
-            This email is not on the invite list. Ask the person who runs
-            ChatTobira for your class to add you.
+            This email has not been invited yet. Ask your teacher to invite
+            you, then check your inbox.
           </p>
         )}
         {status === "error" && (
@@ -111,6 +102,12 @@ export default function LoginPage() {
             Something went wrong. Please try again in a moment.
           </p>
         )}
+
+        <p className="mt-6 border-t border-stone-200 pt-4 text-center text-xs text-stone-400">
+          <Link href="/admin" className="underline hover:text-stone-600">
+            Teacher sign-in
+          </Link>
+        </p>
       </div>
     </main>
   );

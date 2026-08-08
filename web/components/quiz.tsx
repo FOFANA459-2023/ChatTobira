@@ -259,6 +259,12 @@ export function QuizView({ initialKind = "grammar" }: { initialKind?: QuizKind }
                       </span>
                     </p>
                     <p className="mt-0.5 text-xs text-stone-500">{section.instruction_en}</p>
+                    {section.items.some((item) => item.type === "fill_blank") && (
+                      <p className="mt-0.5 text-xs text-stone-400">
+                        Answers are accepted in hiragana, kanji, or kanji with
+                        furigana — any correct form counts.
+                      </p>
+                    )}
                   </div>
                   <div className="mt-4 space-y-4">
                     {section.items.map((item, itemIndex) => {
@@ -476,7 +482,13 @@ function QuizItemView({
         >
           {!correct && (
             <p>
-              Answer: <span lang="ja">{item.answer}</span>
+              Answer:{" "}
+              <span lang="ja">
+                {item.answer}
+                {item.answer_kana && item.answer_kana !== item.answer
+                  ? `（${item.answer_kana}）`
+                  : ""}
+              </span>
             </p>
           )}
           <p className={correct ? "" : "mt-1"}>{item.explanation}</p>

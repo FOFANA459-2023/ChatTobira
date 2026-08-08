@@ -31,7 +31,11 @@ provided course material, in the format of the course's own test papers. Rules:
   real learner confusions (wrong particle, wrong conjugation, wrong register,
   similar-looking kanji, similar-sounding readings).
 - fill_blank: the question shows a sentence with ＿＿ and asks for the missing
-  form; the answer is the exact text that fills the blank.
+  form; the answer is the exact text that fills the blank. When the answer
+  contains kanji, ALSO provide answer_kana: the same answer written entirely
+  in hiragana — students may answer in either script.
+- Spread the questions across as many different grammar points and words from
+  the material as possible; never drill the same point twice in one paper.
 - explanation: one or two sentences on WHY, in simple English with the
   Japanese pattern or word named.
 - scope_description: 1–2 sentences in English telling the student what this

@@ -9,7 +9,12 @@ export async function middleware(request: NextRequest) {
   let response = NextResponse.next({ request });
 
   const path = request.nextUrl.pathname;
-  const isPublic = path.startsWith("/login") || path.startsWith("/auth");
+  // /admin is public because it IS the teacher's sign-in page; the invite
+  // API behind it still requires an authenticated admin session.
+  const isPublic =
+    path.startsWith("/login") ||
+    path.startsWith("/auth") ||
+    path.startsWith("/admin");
 
   // Missing Supabase config must fail CLOSED but render something: everyone
   // is treated as signed out and lands on /login, not on a 500 stack trace.
