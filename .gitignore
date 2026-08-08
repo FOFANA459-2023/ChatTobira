@@ -61,3 +61,7 @@ Thumbs.db
 desktop.ini
 .idea/
 .vscode/
+
+# Playwright artifacts
+test-results/
+playwright-report/

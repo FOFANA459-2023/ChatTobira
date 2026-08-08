@@ -56,12 +56,10 @@ class Config:
         return _req("GOOGLE_API_KEY")
 
     @property
-    def supabase_url(self) -> str:
-        return _req("SUPABASE_URL")
-
-    @property
-    def supabase_key(self) -> str:
-        return _req("SUPABASE_SERVICE_ROLE_KEY")
+    def database_url(self) -> str:
+        """Direct Postgres connection. Remember: an '@' in the password must be
+        URL-encoded as %40 or everything after it parses as the hostname."""
+        return _req("DATABASE_URL")
 
     # Derived working directories -------------------------------------------
 

@@ -1,84 +1,128 @@
-"""Write documents and chunks to Supabase using the service role key."""
+"""Write documents and chunks straight to Postgres via DATABASE_URL.
+
+Direct connection rather than the PostgREST API: ingestion is a trusted batch
+process with the database password, so routing through the API layer would add
+a dependency on the service-role key for zero benefit. RLS does not apply to
+the postgres role; the API keys matter only for the web app.
+"""
 
 from __future__ import annotations
 
-from functools import lru_cache
+import json
 from typing import Any
+
+import psycopg
 
 from .chunker import Chunk
 from .config import CONFIG
 from .discover import SourceDoc
 
-INSERT_BATCH = 100
 
-
-@lru_cache(maxsize=1)
-def client():
-    from supabase import create_client
-
-    return create_client(CONFIG.supabase_url, CONFIG.supabase_key)
+def connect() -> psycopg.Connection:
+    return psycopg.connect(CONFIG.database_url, connect_timeout=15)
 
 
 def _vector_literal(values: list[float]) -> str:
-    """pgvector's text input format.
-
-    PostgREST serialises a Python list as a Postgres *array* literal, which does
-    not cast to vector. The bracketed form does.
-    """
+    """pgvector's text input format; cast with ::vector in SQL."""
     return "[" + ",".join(f"{v:.7g}" for v in values) + "]"
 
 
-def upsert_document(doc: SourceDoc, page_count: int) -> int:
-    row: dict[str, Any] = {
-        "path": doc.path,
-        "title": doc.title,
-        "level": doc.level,
-        "topic": doc.topic,
-        "topics": doc.topics,
-        "doc_type": doc.doc_type,
-        "is_citable": doc.is_citable,
-        "page_count": page_count,
-        "content_sha": doc.content_sha,
-        "ingested_at": "now()",
-    }
-    result = client().table("documents").upsert(row, on_conflict="path").execute()
-    return result.data[0]["id"]
+def upsert_document(conn: psycopg.Connection, doc: SourceDoc, page_count: int) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            insert into documents
+              (path, title, level, topic, topics, doc_type, is_citable,
+               page_count, content_sha, ingested_at)
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+            on conflict (path) do update set
+              title = excluded.title,
+              level = excluded.level,
+              topic = excluded.topic,
+              topics = excluded.topics,
+              doc_type = excluded.doc_type,
+              is_citable = excluded.is_citable,
+              page_count = excluded.page_count,
+              content_sha = excluded.content_sha,
+              ingested_at = now()
+            returning id
+            """,
+            (
+                doc.path,
+                doc.title,
+                doc.level,
+                doc.topic,
+                doc.topics,
+                doc.doc_type,
+                doc.is_citable,
+                page_count,
+                doc.content_sha,
+            ),
+        )
+        return cur.fetchone()[0]
 
 
-def replace_chunks(document_id: int, chunks: list[Chunk], embeddings: list[list[float]]) -> int:
+def replace_chunks(
+    conn: psycopg.Connection,
+    document_id: int,
+    chunks: list[Chunk],
+    embeddings: list[list[float]],
+) -> int:
     if len(chunks) != len(embeddings):
         raise ValueError(f"{len(chunks)} chunks but {len(embeddings)} embeddings")
 
-    # Full replace keeps re-ingestion idempotent: an edited handout must not
-    # leave stale chunks behind that would still surface in retrieval.
-    client().table("chunks").delete().eq("document_id", document_id).execute()
+    with conn.cursor() as cur:
+        # Full replace keeps re-ingestion idempotent: an edited handout must not
+        # leave stale chunks behind that would still surface in retrieval.
+        cur.execute("delete from chunks where document_id = %s", (document_id,))
+        cur.executemany(
+            """
+            insert into chunks
+              (document_id, pdf_page, book_page, ord, content, tokens_text,
+               reading, embedding, metadata)
+            values (%s, %s, %s, %s, %s, %s, %s, %s::vector, %s)
+            """,
+            [
+                (
+                    document_id,
+                    c.pdf_page,
+                    c.book_page,
+                    c.ord,
+                    c.content,
+                    c.tokens,
+                    c.reading,
+                    _vector_literal(v),
+                    json.dumps(c.metadata, ensure_ascii=False),
+                )
+                for c, v in zip(chunks, embeddings, strict=True)
+            ],
+        )
+    return len(chunks)
 
-    rows = [
-        {
-            "document_id": document_id,
-            "pdf_page": chunk.pdf_page,
-            "book_page": chunk.book_page,
-            "ord": chunk.ord,
-            "content": chunk.content,
-            "tokens_text": chunk.tokens,
-            "reading": chunk.reading,
-            "embedding": _vector_literal(vector),
-            "metadata": chunk.metadata,
-        }
-        for chunk, vector in zip(chunks, embeddings, strict=True)
-    ]
 
-    for i in range(0, len(rows), INSERT_BATCH):
-        client().table("chunks").insert(rows[i : i + INSERT_BATCH]).execute()
-
-    return len(rows)
+def fetch_documents(conn: psycopg.Connection) -> list[dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("select id, path, is_citable, page_count from documents order by id")
+        cols = [d.name for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-def corpus_stats() -> dict[str, Any]:
-    docs = client().table("documents").select("id,path,is_citable,page_count").execute()
-    chunks = client().table("chunks").select("id", count="exact").limit(1).execute()
-    return {
-        "documents": len(docs.data),
-        "citable_documents": sum(1 for d in docs.data if d["is_citable"]),
-        "chunks": chunks.count,
-    }
+def fetch_chunk_fields(conn: psycopg.Connection) -> list[dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute("select id, document_id, content, tokens_text, book_page from chunks")
+        cols = [d.name for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def corpus_stats(conn: psycopg.Connection) -> dict[str, Any]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select
+              (select count(*) from documents),
+              (select count(*) from documents where is_citable),
+              (select count(*) from chunks)
+            """
+        )
+        docs, citable, chunks = cur.fetchone()
+    return {"documents": docs, "citable_documents": citable, "chunks": chunks}

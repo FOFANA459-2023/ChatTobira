@@ -122,8 +122,10 @@ def cmd_push(
         console.print(f"[cyan]embed[/cyan]   {doc.path} ({len(chunks)} chunks)")
         vectors = embed_documents([c.metadata["embed_text"] for c in chunks])
 
-        document_id = store.upsert_document(doc, page_count=len(pages))
-        written = store.replace_chunks(document_id, chunks, vectors)
+        with store.connect() as conn:
+            document_id = store.upsert_document(conn, doc, page_count=len(pages))
+            written = store.replace_chunks(conn, document_id, chunks, vectors)
+            conn.commit()
         total += written
         console.print(f"[green]stored[/green]  {doc.path}: {written} chunks")
 
@@ -133,14 +135,10 @@ def cmd_push(
 @app.command("verify")
 def cmd_verify() -> None:
     """Run corpus health checks. Exits non-zero on failure."""
-    docs = store.client().table("documents").select("*").execute().data
-    chunks = (
-        store.client()
-        .table("chunks")
-        .select("id,document_id,content,tokens_text,book_page")
-        .execute()
-        .data
-    )
+    with store.connect() as conn:
+        docs = store.fetch_documents(conn)
+        chunks = store.fetch_chunk_fields(conn)
+        stats = store.corpus_stats(conn)
 
     counts: dict[int, int] = {}
     book_pages: dict[int, int] = {}
@@ -152,7 +150,7 @@ def cmd_verify() -> None:
         d["_has_book_pages"] = book_pages.get(d["id"], 0) > 0
 
     ok = verify.report(verify.check_chunks(chunks) + verify.check_documents(docs, counts))
-    console.print(f"\n{store.corpus_stats()}")
+    console.print(f"\n{stats}")
     raise typer.Exit(0 if ok else 1)
 
 
