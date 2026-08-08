@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
 
 import { MagicLinkForm } from "@/components/magic-link-form";
 
@@ -10,14 +9,6 @@ import { MagicLinkForm } from "@/components/magic-link-form";
  * expired — an invited email can always request a fresh link. */
 export default function LoginPage() {
   const configured = Boolean(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
-
-  // /auth/confirm lands here with ?link=invalid when a sign-in link fails.
-  // Read via window.location: a useSearchParams hook would force a Suspense
-  // boundary for no gain on a fully client page.
-  const [linkFailed, setLinkFailed] = useState(false);
-  useEffect(() => {
-    setLinkFailed(new URLSearchParams(window.location.search).get("link") === "invalid");
-  }, []);
 
   return (
     <main className="flex min-h-screen items-center justify-center p-6">
@@ -31,13 +22,6 @@ export default function LoginPage() {
           Already invited? Enter that email to get a fresh sign-in link.
         </p>
 
-        {linkFailed && (
-          <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
-            That sign-in link did not work — it may have expired or already
-            been used. Enter your email below and we will send you a fresh
-            one.
-          </p>
-        )}
 
         {!configured && (
           <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
