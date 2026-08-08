@@ -191,7 +191,6 @@ export default function AdminPage() {
 
           {session === "signed_out" && (
             <>
-              <p className="mt-2 text-sm text-stone-600">ChatTobira Admin sign-in.</p>
               <form onSubmit={signIn} className="mt-6 space-y-3">
                 <input
                   type="password"
