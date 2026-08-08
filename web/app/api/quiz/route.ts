@@ -92,6 +92,10 @@ export async function POST(request: Request) {
     .map((c, i) => `--- Material ${i + 1} ---\n${c.content}`)
     .join("\n\n");
 
+  if (!process.env.GOOGLE_API_KEY || !process.env.GROQ_API_KEY) {
+    return Response.json({ error: "model_keys_not_configured" }, { status: 503 });
+  }
+
   const prompt = `Create ${count} drill items from this material.\n\n${sample}`;
   const google = createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY });
   const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });

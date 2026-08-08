@@ -117,7 +117,17 @@ export async function POST(request: Request) {
     );
   }
 
-  const embedding = await embedQuery(question);
+  if (!process.env.GOOGLE_API_KEY || !process.env.GROQ_API_KEY) {
+    // Misconfiguration must be nameable from the outside, not a bare 500.
+    return Response.json({ error: "model_keys_not_configured" }, { status: 503 });
+  }
+
+  let embedding: number[];
+  try {
+    embedding = await embedQuery(question);
+  } catch {
+    return Response.json({ error: "embedding_failed" }, { status: 502 });
+  }
   const vectorLiteral = `[${embedding.join(",")}]`;
 
   // Semantic cache: 100 students ask the same ~30 grammar questions, and a hit
@@ -132,7 +142,12 @@ export async function POST(request: Request) {
     return cachedAnswerResponse(hit.answer, hit.citations, conversationId);
   }
 
-  const chunks = await retrieve(supabase, embedding, tokensForQuery(question), scope);
+  let chunks;
+  try {
+    chunks = await retrieve(supabase, embedding, tokensForQuery(question), scope);
+  } catch {
+    return Response.json({ error: "retrieval_failed" }, { status: 502 });
+  }
   const citations = buildCitations(chunks);
 
   const system = `${systemPrompt(scope as StudyScope)}\n\n=== SOURCE MATERIAL ===\n${contextBlock(chunks)}`;
