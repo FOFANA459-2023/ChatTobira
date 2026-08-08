@@ -186,10 +186,12 @@ jobs:
   deploy:
     name: Deploy / Cloudflare Workers
     needs: [ci-ok, web-detect]
+    # Skips cleanly until the CLOUDFLARE_* repo secrets are configured.
     if: >
       github.ref == 'refs/heads/main' &&
       github.event_name == 'push' &&
-      needs.web-detect.outputs.exists == 'true'
+      needs.web-detect.outputs.exists == 'true' &&
+      secrets.CLOUDFLARE_API_TOKEN != ''
     runs-on: ubuntu-latest
     environment: production
     defaults:
