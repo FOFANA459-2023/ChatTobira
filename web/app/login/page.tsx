@@ -50,9 +50,14 @@ export default function LoginPage() {
 
         {!configured && (
           <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
-            Setup incomplete: the Supabase anon key has not been configured, so
-            sign-in is disabled. Add NEXT_PUBLIC_SUPABASE_ANON_KEY to
-            web/.env.local and restart the server.
+            Sign-in is temporarily unavailable while this site finishes setup.
+            Please check back shortly.
+            <span className="mt-1 block text-amber-700">
+              Administrator: this deployment was built without
+              NEXT_PUBLIC_SUPABASE_ANON_KEY. Add it as a build variable and
+              redeploy — these keys are compiled in at build time, so a runtime
+              secret will not work.
+            </span>
           </p>
         )}
 
@@ -60,14 +65,16 @@ export default function LoginPage() {
           <input
             type="email"
             required
+            disabled={!configured}
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             placeholder="you@ed.ritsumei.ac.jp"
-            className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm outline-none focus:border-stone-500"
+            className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm outline-none focus:border-stone-500 disabled:bg-stone-100"
           />
           <button
             type="submit"
-            disabled={status === "sending"}
+            // Unconfigured: fail visibly up front rather than after a click.
+            disabled={!configured || status === "sending"}
             className="w-full rounded-lg bg-stone-900 px-3 py-2 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
           >
             {status === "sending" ? "Sending…" : "Send sign-in link"}
