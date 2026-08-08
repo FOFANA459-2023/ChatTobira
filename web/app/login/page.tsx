@@ -7,6 +7,7 @@ type Status = "idle" | "sending" | "sent" | "not_invited" | "error";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
+  const [firstName, setFirstName] = useState("");
   const [status, setStatus] = useState<Status>("idle");
 
   const configured = Boolean(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
@@ -19,7 +20,11 @@ export default function LoginPage() {
       const supabase = createClient();
       const { error } = await supabase.auth.signInWithOtp({
         email: email.trim(),
-        options: { emailRedirectTo: `${window.location.origin}/auth/confirm` },
+        options: {
+          emailRedirectTo: `${window.location.origin}/auth/confirm`,
+          // Stored as user_metadata on first sign-up; the chat greets by it.
+          data: firstName.trim() ? { first_name: firstName.trim() } : undefined,
+        },
       });
 
       if (!error) {
@@ -62,6 +67,15 @@ export default function LoginPage() {
         )}
 
         <form onSubmit={sendLink} className="mt-6 space-y-3">
+          <input
+            type="text"
+            autoComplete="given-name"
+            disabled={!configured}
+            value={firstName}
+            onChange={(e) => setFirstName(e.target.value)}
+            placeholder="First name (optional)"
+            className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm outline-none focus:border-stone-500 disabled:bg-stone-100"
+          />
           <input
             type="email"
             required

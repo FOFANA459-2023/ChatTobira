@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { isCorrect, normalizeAnswer, type QuizItem } from "../quiz";
+import {
+  flattenItems,
+  isCorrect,
+  normalizeAnswer,
+  scoreQuiz,
+  type Quiz,
+  type QuizItem,
+} from "../quiz";
 
 function item(answer: string): QuizItem {
   return {
@@ -36,5 +43,38 @@ describe("isCorrect", () => {
 
   it("does not equate kana with kanji — that distinction is the drill", () => {
     expect(isCorrect(item("見える"), "みえる")).toBe(false);
+  });
+});
+
+describe("scoreQuiz", () => {
+  const paper: Quiz = {
+    title: "文法もんだい",
+    sections: [
+      {
+        instruction_ja: "適切なことばを選んでください。",
+        instruction_en: "Choose the appropriate word.",
+        items: [item("が"), item("を")],
+      },
+      {
+        instruction_ja: "正しい形にしてください。",
+        instruction_en: "Write the correct form.",
+        items: [item("食べた")],
+      },
+    ],
+  };
+
+  it("numbers answers across sections in paper order", () => {
+    expect(flattenItems(paper).map((i) => i.answer)).toEqual(["が", "を", "食べた"]);
+  });
+
+  it("scores across all sections", () => {
+    expect(scoreQuiz(paper, { 0: "が", 1: "に", 2: "食べた" })).toEqual({
+      correct: 2,
+      total: 3,
+    });
+  });
+
+  it("treats missing answers as wrong, not as errors", () => {
+    expect(scoreQuiz(paper, {})).toEqual({ correct: 0, total: 3 });
   });
 });

@@ -2,12 +2,12 @@
 
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
-import Link from "next/link";
 import { useRef, useState } from "react";
 
 import { Citations } from "@/components/citations";
 import { FeedbackButtons } from "@/components/feedback-buttons";
 import { MicButton } from "@/components/mic-button";
+import { NavBar } from "@/components/nav";
 import { ScopePicker } from "@/components/scope-picker";
 import type { Citation, StudyScope } from "@/lib/retrieval";
 
@@ -17,7 +17,7 @@ interface MessageMeta {
   conversationId?: number;
 }
 
-export function Chat() {
+export function Chat({ firstName }: { firstName?: string | null }) {
   const [scope, setScope] = useState<StudyScope>({});
   const [input, setInput] = useState("");
   const scopeRef = useRef(scope);
@@ -53,26 +53,15 @@ export function Chat() {
 
   return (
     <div className="mx-auto flex h-screen max-w-3xl flex-col">
-      <header className="flex items-center justify-between gap-4 border-b border-stone-200 px-4 py-3">
-        <h1 className="text-lg font-semibold tracking-tight">
-          ChatTobira <span className="font-normal text-stone-400">とびら</span>
-        </h1>
-        <div className="flex items-center gap-3">
-          <ScopePicker scope={scope} onChange={setScope} />
-          <Link
-            href="/quiz"
-            className="text-sm text-stone-500 hover:text-stone-900"
-          >
-            Practice
-          </Link>
-        </div>
-      </header>
+      <NavBar active="chat">
+        <ScopePicker scope={scope} onChange={setScope} />
+      </NavBar>
 
       <div className="flex-1 space-y-4 overflow-y-auto px-4 py-6">
         {messages.length === 0 && (
           <div className="mt-16 text-center text-stone-500">
             <p lang="ja" className="text-xl">
-              何を勉強しますか？
+              {firstName ? `${firstName}さん、何を勉強しますか？` : "何を勉強しますか？"}
             </p>
             <p className="mt-2 text-sm">
               Ask about grammar, vocabulary, or kanji from your course. Answers
