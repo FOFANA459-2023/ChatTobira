@@ -5,6 +5,7 @@ import { DefaultChatTransport } from "ai";
 import { useRef, useState } from "react";
 
 import { Citations } from "@/components/citations";
+import { MicButton } from "@/components/mic-button";
 import { ScopePicker } from "@/components/scope-picker";
 import type { Citation, StudyScope } from "@/lib/retrieval";
 
@@ -102,6 +103,12 @@ export function Chat() {
           onChange={(e) => setInput(e.target.value)}
           placeholder="質問をどうぞ — ask in Japanese or English"
           className="flex-1 rounded-xl border border-stone-300 px-4 py-2.5 text-sm outline-none focus:border-stone-500"
+        />
+        <MicButton
+          disabled={busy}
+          onTranscript={(text) =>
+            setInput((current) => (current ? `${current} ${text}` : text))
+          }
         />
         <button
           type="submit"

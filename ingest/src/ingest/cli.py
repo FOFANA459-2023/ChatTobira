@@ -196,6 +196,36 @@ def cmd_verify() -> None:
     raise typer.Exit(0 if ok else 1)
 
 
+@app.command("invite")
+def cmd_invite(
+    emails: list[str] = typer.Argument(..., help="Email addresses to invite"),
+    note: str = typer.Option("", help="Optional note, e.g. 'F3 spring cohort'"),
+    remove: bool = typer.Option(False, "--remove", help="Remove instead of add"),
+    show: bool = typer.Option(False, "--list", help="List the allowlist and exit"),
+) -> None:
+    """Manage which students can sign up. Signup is blocked for anyone else."""
+    from . import invite
+
+    if show:
+        rows = invite.list_all()
+        for row in rows:
+            console.print(f"{row['email']}  [dim]{row['note'] or ''}[/dim]")
+        console.print(f"[bold]{len(rows)} invited[/bold]")
+        return
+
+    if remove:
+        for email in emails:
+            gone = invite.remove(email)
+            console.print(f"{'removed' if gone else 'not found'}: {email}")
+        return
+
+    added = invite.add(emails, note=note or None)
+    skipped = len(emails) - len(added)
+    console.print(
+        f"[green]{len(added)} invited[/green]" + (f", {skipped} already present" if skipped else "")
+    )
+
+
 @app.command("all")
 def cmd_all(
     only: str = typer.Option("", help="Substring filter on the document path"),
