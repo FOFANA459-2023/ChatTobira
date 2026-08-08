@@ -92,8 +92,8 @@ export default function LoginPage() {
         )}
         {status === "not_invited" && (
           <p className="mt-4 text-sm text-amber-700">
-            This email has not been invited yet. Ask your teacher to invite
-            you, then check your inbox.
+            This email has not been invited yet. Ask the admin to invite you,
+            then check your inbox.
           </p>
         )}
         {status === "error" && (
