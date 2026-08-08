@@ -7,6 +7,7 @@ import { useRef, useState } from "react";
 
 import { Citations } from "@/components/citations";
 import { FeedbackButtons } from "@/components/feedback-buttons";
+import { MagicLinkForm } from "@/components/magic-link-form";
 import { MicButton } from "@/components/mic-button";
 import { NavBar } from "@/components/nav";
 import type { Citation } from "@/lib/retrieval";
@@ -20,9 +21,11 @@ interface MessageMeta {
 export function Chat({
   firstName,
   isAdmin = false,
+  authenticated = true,
 }: {
   firstName?: string | null;
   isAdmin?: boolean;
+  authenticated?: boolean;
 }) {
   const [input, setInput] = useState("");
   // Set by the first answer's metadata; later turns append to the same
@@ -44,6 +47,8 @@ export function Chat({
   });
 
   const busy = status === "submitted" || status === "streaming";
+  const trialExhausted =
+    !authenticated && /trial_exhausted/.test(error?.message ?? "");
 
   function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -76,6 +81,12 @@ export function Chat({
               Ask about grammar, vocabulary, or kanji from your course. Answers
               cite the textbook page they come from.
             </p>
+            {!authenticated && (
+              <p className="mt-3 text-xs text-stone-400">
+                You can try 3 questions free — after that, sign in with your
+                invited email.
+              </p>
+            )}
           </div>
         )}
 
@@ -109,7 +120,7 @@ export function Chat({
           );
         })}
 
-        {error && (
+        {error && !trialExhausted && (
           <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
             {/quota/i.test(error.message)
               ? "You have reached today's question limit. It resets at midnight, Japan time."
@@ -118,30 +129,46 @@ export function Chat({
         )}
       </div>
 
-      <form
-        onSubmit={submit}
-        className="flex gap-2 border-t border-stone-200 bg-white px-4 py-3"
-      >
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="質問をどうぞ — ask in Japanese or English"
-          className="flex-1 rounded-xl border border-stone-300 px-4 py-2.5 text-sm outline-none focus:border-stone-500"
-        />
-        <MicButton
-          disabled={busy}
-          onTranscript={(text) =>
-            setInput((current) => (current ? `${current} ${text}` : text))
-          }
-        />
-        <button
-          type="submit"
-          disabled={busy || input.trim() === ""}
-          className="rounded-xl bg-stone-900 px-5 py-2.5 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
+      {trialExhausted ? (
+        <div className="border-t border-stone-200 bg-white px-4 py-5">
+          <div className="mx-auto max-w-sm">
+            <p className="text-sm font-medium text-stone-800">
+              You are out of trial questions — sign in with a link to keep
+              studying.
+            </p>
+            <div className="mt-3">
+              <MagicLinkForm />
+            </div>
+          </div>
+        </div>
+      ) : (
+        <form
+          onSubmit={submit}
+          className="flex gap-2 border-t border-stone-200 bg-white px-4 py-3"
         >
-          {busy ? "…" : "Send"}
-        </button>
-      </form>
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="質問をどうぞ — ask in Japanese or English"
+            className="flex-1 rounded-xl border border-stone-300 px-4 py-2.5 text-sm outline-none focus:border-stone-500"
+          />
+          {authenticated && (
+            <MicButton
+              disabled={busy}
+              onTranscript={(text) =>
+                setInput((current) => (current ? `${current} ${text}` : text))
+              }
+            />
+          )}
+          <button
+            type="submit"
+            disabled={busy || input.trim() === ""}
+            className="rounded-xl bg-stone-900 px-5 py-2.5 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
+          >
+            {busy ? "…" : "Send"}
+          </button>
+        </form>
+      )}
     </div>
   );
 }

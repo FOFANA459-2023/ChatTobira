@@ -17,9 +17,6 @@ export default function AdminPage() {
   const [session, setSession] = useState<Session>("checking");
   const [password, setPassword] = useState("");
   const [signInError, setSignInError] = useState("");
-  const [linkStatus, setLinkStatus] = useState<"idle" | "sending" | "sent" | "failed">(
-    "idle",
-  );
   const [busy, setBusy] = useState(false);
 
   const [inviteEmail, setInviteEmail] = useState("");
@@ -83,23 +80,6 @@ export default function AdminPage() {
     }
   }
 
-  /** Escape hatch for the first visit (and any forgotten password): the
-   * admin magic-links in like a student, then sets the password while
-   * signed in. */
-  async function emailSignInLink() {
-    setLinkStatus("sending");
-    try {
-      const supabase = createClient();
-      const { error } = await supabase.auth.signInWithOtp({
-        email: ADMIN_EMAIL,
-        options: { emailRedirectTo: `${window.location.origin}/auth/confirm` },
-      });
-      setLinkStatus(error ? "failed" : "sent");
-    } catch {
-      setLinkStatus("failed");
-    }
-  }
-
   async function invite(event: React.FormEvent) {
     event.preventDefault();
     const email = inviteEmail.trim().toLowerCase();
@@ -135,6 +115,29 @@ export default function AdminPage() {
       }
     } catch {
       setInviteNote({ ok: false, text: "Could not send the invite. Please try again." });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Pull the invite and suspend any existing account for that email. */
+  async function revoke(email: string) {
+    setBusy(true);
+    setInviteNote(null);
+    try {
+      const response = await fetch("/api/invite", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      if (response.ok) {
+        setInviteNote({ ok: true, text: `${email} can no longer sign in.` });
+        loadInvites();
+      } else {
+        setInviteNote({ ok: false, text: `Could not revoke ${email}. Try again.` });
+      }
+    } catch {
+      setInviteNote({ ok: false, text: `Could not revoke ${email}. Try again.` });
     } finally {
       setBusy(false);
     }
@@ -232,28 +235,6 @@ export default function AdminPage() {
               {signInError && (
                 <p className="mt-3 text-sm text-red-700">{signInError}</p>
               )}
-              <div className="mt-4 border-t border-stone-200 pt-3 text-center">
-                <button
-                  onClick={emailSignInLink}
-                  disabled={linkStatus === "sending"}
-                  className="text-xs text-stone-500 underline hover:text-stone-900 disabled:opacity-50"
-                >
-                  {linkStatus === "sending"
-                    ? "Sending…"
-                    : "No password yet, or forgot it? Email me a sign-in link"}
-                </button>
-                {linkStatus === "sent" && (
-                  <p className="mt-2 text-xs text-green-700">
-                    Check the admin inbox for the link, then come back here to
-                    set a password.
-                  </p>
-                )}
-                {linkStatus === "failed" && (
-                  <p className="mt-2 text-xs text-red-700">
-                    Could not send the link. Try again in a minute.
-                  </p>
-                )}
-              </div>
             </>
           )}
 
@@ -326,15 +307,25 @@ export default function AdminPage() {
                   <p className="text-xs font-medium uppercase tracking-wide text-stone-400">
                     Invited students
                   </p>
-                  <ul className="mt-2 max-h-64 space-y-1 overflow-y-auto text-sm">
+                  <ul className="mt-2 max-h-64 space-y-1.5 overflow-y-auto text-sm">
                     {invites.map((invite) => (
                       <li
                         key={invite.email}
-                        className="flex justify-between gap-2 text-stone-700"
+                        className="flex items-center justify-between gap-2 text-stone-700"
                       >
                         <span className="truncate">{invite.email}</span>
-                        <span className="shrink-0 text-xs text-stone-400">
-                          {new Date(invite.created_at).toLocaleDateString()}
+                        <span className="flex shrink-0 items-center gap-2">
+                          <span className="text-xs text-stone-400">
+                            {new Date(invite.created_at).toLocaleDateString()}
+                          </span>
+                          <button
+                            onClick={() => revoke(invite.email)}
+                            disabled={busy}
+                            title="Remove the invite and suspend the account"
+                            className="rounded border border-stone-300 px-2 py-0.5 text-xs text-stone-600 hover:border-red-400 hover:bg-red-50 hover:text-red-700 disabled:opacity-50"
+                          >
+                            Revoke
+                          </button>
                         </span>
                       </li>
                     ))}

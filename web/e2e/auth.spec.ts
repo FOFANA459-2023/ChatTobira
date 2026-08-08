@@ -1,9 +1,17 @@
 import { expect, test } from "@playwright/test";
 
-test("unauthenticated visitor is redirected to login", async ({ page }) => {
+test("unauthenticated visitor gets the trial chat, not a redirect", async ({
+  page,
+}) => {
   await page.goto("/");
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByPlaceholder(/ask in Japanese or English/)).toBeVisible();
+  await expect(page.getByText(/3 questions free/)).toBeVisible();
+});
+
+test("quiz still requires sign-in", async ({ page }) => {
+  await page.goto("/quiz");
   await expect(page).toHaveURL(/\/login/);
-  await expect(page.getByRole("heading", { name: /ChatTobira/ })).toBeVisible();
 });
 
 test("login page explains the invite-only policy", async ({ page }) => {
@@ -31,11 +39,16 @@ test("invite API rejects unauthenticated requests", async ({ request }) => {
   expect(response.status()).toBe(401);
 });
 
-test("chat API rejects unauthenticated requests", async ({ request }) => {
+test("chat API admits anonymous trial requests past the auth gate", async ({
+  request,
+}) => {
+  // Not 401: the trial cookie meters anonymous use inside the route. (This
+  // environment has no model keys, so the request fails later with 4xx/5xx —
+  // the point is the gate, not the answer.)
   const response = await request.post("/api/chat", {
     data: { messages: [], scope: {} },
   });
-  expect(response.status()).toBe(401);
+  expect(response.status()).not.toBe(401);
 });
 
 test("quiz API rejects unauthenticated requests", async ({ request }) => {

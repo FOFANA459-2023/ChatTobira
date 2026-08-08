@@ -37,8 +37,10 @@ export async function GET(request: NextRequest) {
   redirect("/login");
 }
 
-/** The admin's link lands on the admin page — that is where they were headed;
- * students land on the chat. */
+/** Students land on the chat. The admin account must NEVER get a session
+ * from an emailed link — a leaked or intercepted URL would be an admin
+ * session — so a link that verifies as the admin is signed straight back
+ * out and sent to the password page. */
 async function landingPath(
   supabase: Awaited<ReturnType<typeof createClient>>,
 ): Promise<string> {
@@ -46,7 +48,11 @@ async function landingPath(
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    return isAdminEmail(user?.email) ? "/admin" : "/";
+    if (isAdminEmail(user?.email)) {
+      await supabase.auth.signOut();
+      return "/admin";
+    }
+    return "/";
   } catch {
     return "/";
   }
