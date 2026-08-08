@@ -65,3 +65,6 @@ desktop.ini
 # Playwright artifacts
 test-results/
 playwright-report/
+
+# Wrangler local preview log
+web/.wrangler-preview.log

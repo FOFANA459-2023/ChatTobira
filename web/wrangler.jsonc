@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "chattobira",
+  "main": ".open-next/worker.js",
+  // nodejs_compat is required by @opennextjs/cloudflare; the date must be
+  // 2024-09-23 or later for the v2 implementation.
+  "compatibility_date": "2025-03-25",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "observability": {
+    "enabled": true
+  },
+  // Non-secret configuration. API keys are Worker SECRETS, never vars —
+  // anything here is readable by anyone with dashboard access.
+  "vars": {
+    "CHAT_MODEL": "llama-3.3-70b-versatile",
+    "FALLBACK_MODEL": "gemini-3.6-flash",
+    "EMBED_MODEL": "gemini-embedding-001",
+    "STT_MODEL": "whisper-large-v3-turbo",
+    "CITATION_QUOTE_CHARS": "200"
+  }
+}
