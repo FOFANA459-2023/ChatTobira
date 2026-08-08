@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   flattenItems,
+  focusTokens,
   isCorrect,
   normalizeAnswer,
+  rankChunksByFocus,
   scoreQuiz,
   type Quiz,
   type QuizItem,
@@ -48,7 +50,7 @@ describe("isCorrect", () => {
 
 describe("scoreQuiz", () => {
   const paper: Quiz = {
-    title: "文法もんだい",
+    scope_description: "Particles and past-tense forms from Topic 6.",
     sections: [
       {
         instruction_ja: "適切なことばを選んでください。",
@@ -76,5 +78,54 @@ describe("scoreQuiz", () => {
 
   it("treats missing answers as wrong, not as errors", () => {
     expect(scoreQuiz(paper, {})).toEqual({ correct: 0, total: 3 });
+  });
+});
+
+describe("focusTokens", () => {
+  it("normalises topic markers in either spelling", () => {
+    expect(focusTokens("Topic 13")).toEqual(["t13"]);
+    expect(focusTokens("T7")).toEqual(["t7"]);
+  });
+
+  it("strips the tilde from grammar-pattern labels", () => {
+    expect(focusTokens("〜ておく")).toEqual(["ておく"]);
+  });
+
+  it("drops bare digits that would match page numbers", () => {
+    expect(focusTokens("13")).toEqual([]);
+  });
+
+  it("splits mixed focus text into topic and content tokens", () => {
+    expect(focusTokens("Topic 13、〜ところ te-form")).toEqual([
+      "t13",
+      "ところ",
+      "te-form",
+    ]);
+  });
+});
+
+describe("rankChunksByFocus", () => {
+  const chunks = [
+    { content: "〜ておく：前もって何かをする。", metadata: { topic: "T14" } },
+    { content: "〜ところ：ちょうど今。", metadata: { topic: "T13" } },
+    { content: "た形の練習。", metadata: null },
+  ];
+
+  it("puts chunks that mention the focus first", () => {
+    const picked = rankChunksByFocus(chunks, "〜ておく", 1);
+    expect(picked[0].content).toContain("ておく");
+  });
+
+  it("matches topic markers against chunk metadata", () => {
+    const picked = rankChunksByFocus(chunks, "Topic 13", 1);
+    expect(picked[0].metadata?.topic).toBe("T13");
+  });
+
+  it("falls back to the whole book when nothing matches", () => {
+    expect(rankChunksByFocus(chunks, "存在しない文法", 2)).toHaveLength(2);
+  });
+
+  it("pads a narrow focus with other material to fill the sample", () => {
+    expect(rankChunksByFocus(chunks, "〜ておく", 3)).toHaveLength(3);
   });
 });

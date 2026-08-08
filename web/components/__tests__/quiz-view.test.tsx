@@ -9,13 +9,11 @@ vi.mock("next/navigation", () => ({
 }));
 
 const BOOKS = {
-  books: [
-    { id: 1, title: "Foundation 1 & 2", level: "F2", doc_type: "textbook", topics: ["T6"] },
-  ],
+  books: [{ id: 1, title: "Foundation 1 & 2" }],
 };
 
 const PAPER: Quiz = {
-  title: "文法もんだい T6",
+  scope_description: "Particles and polite past-tense forms from Topic 6.",
   sections: [
     {
       instruction_ja: "（　）に入る適切なことばを選んでください。",
@@ -68,13 +66,20 @@ describe("QuizView", () => {
     window.scrollTo = vi.fn();
     render(<QuizView initialKind="grammar" />);
 
-    // Pick the book once the list loads, then start the test.
-    const select = await screen.findByLabelText(/Book \/ material/);
+    // Pick the textbook once the list loads, give a focus, start the test.
+    const select = await screen.findByLabelText(/Textbook/);
     fireEvent.change(select, { target: { value: "1" } });
-    fireEvent.click(screen.getByRole("button", { name: /Start a grammar test/ }));
+    fireEvent.change(screen.getByPlaceholderText(/Topic 13/), {
+      target: { value: "particles" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Start the Grammar Practice Test/ }));
 
-    // Paper renders with numbered sections and instructions from the model.
-    expect(await screen.findByText("文法もんだい T6")).toBeInTheDocument();
+    // Paper renders with the fixed title, the scope note, and numbered
+    // sections with instructions from the model.
+    expect(await screen.findByText("Grammar Practice Test")).toBeInTheDocument();
+    expect(
+      screen.getByText("Particles and polite past-tense forms from Topic 6."),
+    ).toBeInTheDocument();
     // 問題I and 問題II — the I-prefix regex matches both headers.
     expect(screen.getAllByText(/問題I/)).toHaveLength(2);
     expect(screen.getByText(/問題II/)).toBeInTheDocument();
@@ -83,6 +88,8 @@ describe("QuizView", () => {
 
     const body = JSON.parse(String(fetchMock.mock.calls.at(-1)?.[1]?.body));
     expect(body.kind).toBe("grammar");
+    expect(body.focus).toBe("particles");
+    expect(body.count).toBe(15);
 
     // Checking is locked until every question is answered.
     const check = screen.getByRole("button", { name: /Check answers/ });
@@ -108,7 +115,7 @@ describe("QuizView", () => {
     mockFetch();
     render(<QuizView initialKind="kanji" />);
     expect(
-      await screen.findByRole("button", { name: /Start a kanji & vocabulary test/i }),
+      await screen.findByRole("button", { name: /Start the Kanji Practice Test/ }),
     ).toBeInTheDocument();
   });
 });

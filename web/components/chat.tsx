@@ -8,8 +8,7 @@ import { Citations } from "@/components/citations";
 import { FeedbackButtons } from "@/components/feedback-buttons";
 import { MicButton } from "@/components/mic-button";
 import { NavBar } from "@/components/nav";
-import { ScopePicker } from "@/components/scope-picker";
-import type { Citation, StudyScope } from "@/lib/retrieval";
+import type { Citation } from "@/lib/retrieval";
 
 interface MessageMeta {
   citations?: Citation[];
@@ -18,10 +17,7 @@ interface MessageMeta {
 }
 
 export function Chat({ firstName }: { firstName?: string | null }) {
-  const [scope, setScope] = useState<StudyScope>({});
   const [input, setInput] = useState("");
-  const scopeRef = useRef(scope);
-  scopeRef.current = scope;
   // Set by the first answer's metadata; later turns append to the same
   // conversation row so history and feedback attach correctly.
   const conversationRef = useRef<number | undefined>(undefined);
@@ -29,9 +25,8 @@ export function Chat({ firstName }: { firstName?: string | null }) {
   const { messages, sendMessage, status, error } = useChat({
     transport: new DefaultChatTransport({
       api: "/api/chat",
-      // Read from refs so mid-conversation changes apply immediately.
+      // Read from a ref so the id set mid-conversation applies immediately.
       body: () => ({
-        scope: scopeRef.current,
         conversationId: conversationRef.current,
       }),
     }),
@@ -53,9 +48,7 @@ export function Chat({ firstName }: { firstName?: string | null }) {
 
   return (
     <div className="mx-auto flex h-screen max-w-3xl flex-col">
-      <NavBar active="chat">
-        <ScopePicker scope={scope} onChange={setScope} />
-      </NavBar>
+      <NavBar active="chat" />
 
       <div className="flex-1 space-y-4 overflow-y-auto px-4 py-6">
         {messages.length === 0 && (

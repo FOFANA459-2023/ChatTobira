@@ -3,18 +3,19 @@ import { createGroq } from "@ai-sdk/groq";
 import { generateObject } from "ai";
 import { z } from "zod";
 
-import { QuizSchema } from "@/lib/quiz";
+import { QuizSchema, rankChunksByFocus } from "@/lib/quiz";
 import { createClient } from "@/lib/supabase/server";
 
 export const maxDuration = 60;
 
 const BodySchema = z.object({
-  // The student picks a specific source: quizzes from "everything" produced
+  // The student picks a specific textbook: quizzes from "everything" produced
   // vague drills and slow generation over an unfocused sample.
   documentId: z.number().int().positive(),
-  topic: z.string().regex(/^T\d{1,2}$/).optional(),
+  // Free text: which topic / grammar the test should focus on, if any.
+  focus: z.string().trim().max(200).optional(),
   kind: z.enum(["grammar", "kanji"]).default("grammar"),
-  count: z.number().int().min(3).max(12).default(9),
+  count: z.number().int().min(9).max(21).default(15),
 });
 
 const SYSTEM = `You create Japanese practice tests for university students from
@@ -33,8 +34,9 @@ provided course material, in the format of the course's own test papers. Rules:
   form; the answer is the exact text that fills the blank.
 - explanation: one or two sentences on WHY, in simple English with the
   Japanese pattern or word named.
-- title: a short paper title such as 文法もんだい or 漢字・語彙もんだい plus
-  the topic covered.
+- scope_description: 1–2 sentences in English telling the student what this
+  test covers — name the specific grammar points or vocabulary drilled, and
+  the textbook or lesson area they come from.
 - Never reference "the source", file names, or page numbers in questions.`;
 
 // Section plans mirror the papers students actually sit: the 文法復習シート
@@ -74,7 +76,12 @@ async function requireUser() {
   }
 }
 
-/** Books and topics available for quizzing, for the picker UI. */
+/** Textbooks available for quizzing, for the picker UI.
+ *
+ * Citable textbooks only: class handouts and answer sheets stay retrievable
+ * for chat grounding, but tests are always drawn from a book the student can
+ * open. When Foundation 1 & 2 is ingested it appears here automatically.
+ */
 export async function GET() {
   const { supabase, user } = await requireUser();
   if (!user) {
@@ -83,8 +90,8 @@ export async function GET() {
 
   const { data, error } = await supabase
     .from("documents")
-    .select("id, title, level, doc_type, topics, is_citable")
-    .order("is_citable", { ascending: false })
+    .select("id, title, is_citable")
+    .eq("is_citable", true)
     .order("title");
   if (error) {
     return Response.json({ error: "lookup_failed" }, { status: 500 });
@@ -93,9 +100,6 @@ export async function GET() {
   const books = (data ?? []).map((d) => ({
     id: d.id as number,
     title: d.title as string,
-    level: d.level as string | null,
-    doc_type: d.doc_type as string,
-    topics: (d.topics ?? []) as string[],
   }));
   return Response.json({ books });
 }
@@ -110,10 +114,27 @@ export async function POST(request: Request) {
   if (!parsed.success) {
     return Response.json({ error: "bad_request" }, { status: 400 });
   }
-  const { documentId, topic, kind, count } = parsed.data;
+  const { documentId, focus, kind, count } = parsed.data;
 
   if (!process.env.GOOGLE_API_KEY || !process.env.GROQ_API_KEY) {
     return Response.json({ error: "model_keys_not_configured" }, { status: 503 });
+  }
+
+  // Only textbooks are quizzable — same rule the picker applies, enforced
+  // server-side so a crafted request cannot test from a handout.
+  const { data: doc } = await supabase
+    .from("documents")
+    .select("id, title, is_citable")
+    .eq("id", documentId)
+    .single();
+  if (!doc || !doc.is_citable) {
+    return Response.json(
+      {
+        error: "no_material",
+        message: "Tests can only be generated from the textbooks.",
+      },
+      { status: 404 },
+    );
   }
 
   // A quiz costs one model call, so it spends one quota unit like a question.
@@ -125,15 +146,13 @@ export async function POST(request: Request) {
     return Response.json({ error: "quota_exhausted" }, { status: 429 });
   }
 
-  let query = supabase
+  // Fetch wide, then narrow to the student's focus: the focus is free text,
+  // so scoping happens by ranking chunk contents, not by a column filter.
+  const { data: chunks, error } = await supabase
     .from("chunks")
     .select("content, metadata")
     .eq("document_id", documentId)
-    .limit(24);
-  if (topic) {
-    query = query.eq("metadata->>topic", topic);
-  }
-  const { data: chunks, error } = await query;
+    .limit(200);
   if (error) {
     return Response.json({ error: "retrieval_failed" }, { status: 502 });
   }
@@ -147,20 +166,29 @@ export async function POST(request: Request) {
     );
   }
 
-  // Small, shuffled sample with tight character caps: quiz latency is
-  // dominated by prompt size, and 8 focused excerpts out-drill 30 loose ones.
-  const sample = [...chunks]
-    .sort(() => Math.random() - 0.5)
-    .slice(0, 8)
-    .map((c, i) => `--- Material ${i + 1} ---\n${(c.content as string).slice(0, 900)}`)
+  // ~10 focused excerpts with tight character caps: quiz latency is dominated
+  // by prompt size, and focused excerpts out-drill a loose pile.
+  const sample = rankChunksByFocus(
+    chunks as { content: string; metadata: Record<string, unknown> | null }[],
+    focus ?? "",
+    10,
+  )
+    .map((c, i) => `--- Material ${i + 1} ---\n${c.content.slice(0, 900)}`)
     .join("\n\n");
 
-  const prompt = `Create a practice test with ${count} questions in total,
-spread across the sections described. Focus on ${
+  const perSection = Math.round(count / 3);
+  const prompt = `Create a practice test from the material below, drawn from
+the textbook "${doc.title}". Exactly ${count} questions in total — ${perSection} in
+each of the 3 sections. Focus on ${
     kind === "kanji"
       ? "the kanji and vocabulary that appear in this material"
       : "the grammar patterns drilled in this material"
-  }.\n\n${sample}`;
+  }.${
+    focus
+      ? `\nThe student asked the test to focus on: "${focus}". Keep every question
+inside that scope, and say so in scope_description.`
+      : ""
+  }\n\n${sample}`;
   const system = `${SYSTEM}\n\n${KIND_SPEC[kind]}`;
   const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
   const google = createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY });

@@ -16,24 +16,23 @@ import {
 interface Book {
   id: number;
   title: string;
-  level: string | null;
-  doc_type: string;
-  topics: string[];
 }
 
 type Phase = "setup" | "loading" | "active" | "done" | "error";
 
 const KIND_INFO: Record<
   QuizKind,
-  { label: string; ja: string; blurb: string }
+  { label: string; title: string; ja: string; blurb: string }
 > = {
   grammar: {
     label: "Grammar",
+    title: "Grammar Practice Test",
     ja: "文法",
     blurb: "Particles, conjugation, and sentence patterns — like the 文法ふくしゅうシート.",
   },
   kanji: {
     label: "Kanji & Vocabulary",
+    title: "Kanji Practice Test",
     ja: "漢字・語彙",
     blurb: "Readings, writing, and words in context — like the 文字・語彙 section.",
   },
@@ -46,7 +45,7 @@ export function QuizView({ initialKind = "grammar" }: { initialKind?: QuizKind }
   const [kind, setKind] = useState<QuizKind>(initialKind);
   const [books, setBooks] = useState<Book[]>([]);
   const [bookId, setBookId] = useState<number | null>(null);
-  const [topic, setTopic] = useState("");
+  const [focus, setFocus] = useState("");
   const [phase, setPhase] = useState<Phase>("setup");
   const [quiz, setQuiz] = useState<Quiz | null>(null);
   const [answers, setAnswers] = useState<Record<number, string>>({});
@@ -75,9 +74,9 @@ export function QuizView({ initialKind = "grammar" }: { initialKind?: QuizKind }
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           documentId: bookId,
-          topic: topic || undefined,
+          focus: focus.trim() || undefined,
           kind,
-          count: 9,
+          count: 15,
         }),
       });
       if (!response.ok) {
@@ -86,7 +85,7 @@ export function QuizView({ initialKind = "grammar" }: { initialKind?: QuizKind }
         };
         setErrorText(
           body.error === "no_material"
-            ? "No material is loaded for that selection yet. Try another topic."
+            ? "No material is loaded for that selection yet. Try another textbook."
             : body.error === "quota_exhausted"
               ? "You have reached today's limit. It resets at midnight, Japan time."
               : "Could not generate a test. Please try again.",
@@ -163,42 +162,39 @@ export function QuizView({ initialKind = "grammar" }: { initialKind?: QuizKind }
 
             <div className="mt-4 space-y-3">
               <label className="block text-sm">
-                <span className="mb-1 block font-medium text-stone-700">Book / material</span>
+                <span className="mb-1 block font-medium text-stone-700">Textbook</span>
                 <select
                   value={bookId ?? ""}
                   onChange={(e) => {
                     setBookId(e.target.value ? Number(e.target.value) : null);
-                    setTopic("");
                   }}
                   className="w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm"
                 >
-                  <option value="">Select a book…</option>
+                  <option value="">Select a textbook…</option>
                   {books.map((book) => (
                     <option key={book.id} value={book.id}>
                       {book.title}
-                      {book.level ? ` (${book.level})` : ""}
                     </option>
                   ))}
                 </select>
               </label>
 
-              {selectedBook && selectedBook.topics.length > 0 && (
+              {selectedBook && (
                 <label className="block text-sm">
                   <span className="mb-1 block font-medium text-stone-700">
-                    Topic <span className="font-normal text-stone-400">(optional)</span>
+                    What should the test focus on?{" "}
+                    <span className="font-normal text-stone-400">(optional)</span>
                   </span>
-                  <select
-                    value={topic}
-                    onChange={(e) => setTopic(e.target.value)}
-                    className="w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm"
-                  >
-                    <option value="">Whole book</option>
-                    {selectedBook.topics.map((t) => (
-                      <option key={t} value={t}>
-                        {t}
-                      </option>
-                    ))}
-                  </select>
+                  <input
+                    value={focus}
+                    onChange={(e) => setFocus(e.target.value)}
+                    maxLength={200}
+                    placeholder="e.g. 〜ておく、Topic 13、te-form…"
+                    className="w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-stone-500"
+                  />
+                  <span className="mt-1 block text-xs text-stone-400">
+                    Leave blank to be tested on lessons from the whole book.
+                  </span>
                 </label>
               )}
             </div>
@@ -210,7 +206,7 @@ export function QuizView({ initialKind = "grammar" }: { initialKind?: QuizKind }
             >
               {phase === "loading"
                 ? "Writing your test…"
-                : `Start a ${KIND_INFO[kind].label.toLowerCase()} test`}
+                : `Start the ${KIND_INFO[kind].title}`}
             </button>
             {phase === "error" && (
               <p className="mt-4 text-center text-sm text-red-700">{errorText}</p>
@@ -225,15 +221,16 @@ export function QuizView({ initialKind = "grammar" }: { initialKind?: QuizKind }
 
         {quiz && (phase === "active" || phase === "done") && (
           <div className="space-y-8">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 lang="ja" className="text-lg font-semibold">
-                {quiz.title}
-              </h2>
-              {!checked && (
-                <p className="text-sm text-stone-500">
-                  {answered} / {items.length} answered
-                </p>
-              )}
+            <div>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="text-lg font-semibold">{KIND_INFO[kind].title}</h2>
+                {!checked && (
+                  <p className="text-sm text-stone-500">
+                    {answered} / {items.length} answered
+                  </p>
+                )}
+              </div>
+              <p className="mt-1 text-sm text-stone-500">{quiz.scope_description}</p>
             </div>
 
             {checked && (

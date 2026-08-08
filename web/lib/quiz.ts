@@ -22,7 +22,9 @@ export const QuizSectionSchema = z.object({
 });
 
 export const QuizSchema = z.object({
-  title: z.string(),
+  // 1–2 sentences telling the student what the test covers — the grammar
+  // points or vocabulary drilled and where they sit in the course.
+  scope_description: z.string().min(1),
   sections: z.array(QuizSectionSchema).min(1).max(4),
 });
 
@@ -65,4 +67,79 @@ export function normalizeAnswer(text: string): string {
 
 export function isCorrect(item: QuizItem, given: string): boolean {
   return normalizeAnswer(given) === normalizeAnswer(item.answer);
+}
+
+/** A chunk as fetched for quiz generation. */
+export interface FocusableChunk {
+  content: string;
+  metadata: Record<string, unknown> | null;
+}
+
+/** Search tokens from the student's free-text focus ("〜ておく、Topic 13").
+ *
+ * "Topic 13" / "T13" normalise to a t13 marker matched against chunk topic
+ * metadata; everything else is matched as a literal substring of the chunk
+ * text. Bare digits and the word "topic" are dropped — "13" alone would match
+ * unrelated page numbers, not the topic.
+ */
+export function focusTokens(focus: string): string[] {
+  const topics = [...focus.matchAll(/(?:topic|t)\s*(\d{1,2})/gi)].map(
+    (m) => `t${m[1]}`,
+  );
+  const words = focus
+    .split(/[\s、。，,．.／/;；・&()（）「」【】]+/)
+    .map((t) => t.replace(/^[～〜~]+/, "").trim().toLowerCase())
+    .filter(
+      (t) =>
+        t.length > 0 &&
+        !/^\d+$/.test(t) &&
+        !/^(topic|t\d{1,2})$/.test(t) &&
+        (t.length >= 2 || /[぀-ヿ一-鿿]/.test(t)),
+    );
+  return [...new Set([...topics, ...words])];
+}
+
+function shuffled<T>(items: T[]): T[] {
+  return [...items].sort(() => Math.random() - 0.5);
+}
+
+/** Pick the chunks a focused quiz should be generated from.
+ *
+ * With no focus (or one that matches nothing) the whole book is fair game and
+ * a random sample keeps successive tests varied. With a focus, chunks that
+ * mention it are taken first, padded with random material only when the focus
+ * is too narrow to fill the sample on its own.
+ */
+export function rankChunksByFocus<T extends FocusableChunk>(
+  chunks: T[],
+  focus: string,
+  take: number,
+): T[] {
+  const tokens = focusTokens(focus);
+  if (tokens.length === 0) return shuffled(chunks).slice(0, take);
+
+  const scored = chunks.map((chunk) => {
+    const content = chunk.content.toLowerCase();
+    const topic = String(chunk.metadata?.["topic"] ?? "").toLowerCase();
+    let score = 0;
+    for (const token of tokens) {
+      if (/^t\d{1,2}$/.test(token)) {
+        // Topic metadata is authoritative for week markers.
+        if (topic === token) score += 3;
+      } else if (content.includes(token)) {
+        score += 1;
+      }
+    }
+    return { chunk, score };
+  });
+
+  const hits = scored.filter((s) => s.score > 0).sort((a, b) => b.score - a.score);
+  if (hits.length === 0) return shuffled(chunks).slice(0, take);
+
+  const top = hits.slice(0, take).map((s) => s.chunk);
+  if (top.length < take) {
+    const rest = scored.filter((s) => s.score === 0).map((s) => s.chunk);
+    top.push(...shuffled(rest).slice(0, take - top.length));
+  }
+  return top;
 }
