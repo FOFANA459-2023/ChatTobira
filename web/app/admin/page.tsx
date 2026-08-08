@@ -17,6 +17,9 @@ export default function AdminPage() {
   const [session, setSession] = useState<Session>("checking");
   const [password, setPassword] = useState("");
   const [signInError, setSignInError] = useState("");
+  const [linkStatus, setLinkStatus] = useState<"idle" | "sending" | "sent" | "failed">(
+    "idle",
+  );
   const [busy, setBusy] = useState(false);
 
   const [inviteEmail, setInviteEmail] = useState("");
@@ -77,6 +80,23 @@ export default function AdminPage() {
       setSignInError("Could not sign in. Please try again in a moment.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  /** Escape hatch for the first visit (and any forgotten password): the
+   * admin magic-links in like a student, then sets the password while
+   * signed in. */
+  async function emailSignInLink() {
+    setLinkStatus("sending");
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.auth.signInWithOtp({
+        email: ADMIN_EMAIL,
+        options: { emailRedirectTo: `${window.location.origin}/auth/confirm` },
+      });
+      setLinkStatus(error ? "failed" : "sent");
+    } catch {
+      setLinkStatus("failed");
     }
   }
 
@@ -212,6 +232,28 @@ export default function AdminPage() {
               {signInError && (
                 <p className="mt-3 text-sm text-red-700">{signInError}</p>
               )}
+              <div className="mt-4 border-t border-stone-200 pt-3 text-center">
+                <button
+                  onClick={emailSignInLink}
+                  disabled={linkStatus === "sending"}
+                  className="text-xs text-stone-500 underline hover:text-stone-900 disabled:opacity-50"
+                >
+                  {linkStatus === "sending"
+                    ? "Sending…"
+                    : "No password yet, or forgot it? Email me a sign-in link"}
+                </button>
+                {linkStatus === "sent" && (
+                  <p className="mt-2 text-xs text-green-700">
+                    Check the admin inbox for the link, then come back here to
+                    set a password.
+                  </p>
+                )}
+                {linkStatus === "failed" && (
+                  <p className="mt-2 text-xs text-red-700">
+                    Could not send the link. Try again in a minute.
+                  </p>
+                )}
+              </div>
             </>
           )}
 
