@@ -1,3 +1,4 @@
+import { isAdminEmail } from "@/lib/admin";
 import { Chat } from "@/components/chat";
 import { NameGate } from "@/components/name-gate";
 import { firstNameFrom } from "@/lib/name";
@@ -17,9 +18,10 @@ export default async function Home() {
     user?.user_metadata as Record<string, unknown> | undefined,
     null,
   );
-  if (user && !firstName) {
+  const isAdmin = isAdminEmail(user?.email);
+  if (user && !firstName && !isAdmin) {
     return <NameGate />;
   }
 
-  return <Chat firstName={firstName} />;
+  return <Chat firstName={firstName} isAdmin={isAdmin} />;
 }

@@ -2,6 +2,7 @@
 
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
+import Link from "next/link";
 import { useRef, useState } from "react";
 
 import { Citations } from "@/components/citations";
@@ -16,7 +17,13 @@ interface MessageMeta {
   conversationId?: number;
 }
 
-export function Chat({ firstName }: { firstName?: string | null }) {
+export function Chat({
+  firstName,
+  isAdmin = false,
+}: {
+  firstName?: string | null;
+  isAdmin?: boolean;
+}) {
   const [input, setInput] = useState("");
   // Set by the first answer's metadata; later turns append to the same
   // conversation row so history and feedback attach correctly.
@@ -48,7 +55,16 @@ export function Chat({ firstName }: { firstName?: string | null }) {
 
   return (
     <div className="mx-auto flex h-screen max-w-3xl flex-col">
-      <NavBar active="chat" />
+      <NavBar active="chat">
+        {isAdmin && (
+          <Link
+            href="/admin"
+            className="rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-sm text-stone-700 hover:bg-stone-100"
+          >
+            Invite students
+          </Link>
+        )}
+      </NavBar>
 
       <div className="flex-1 space-y-4 overflow-y-auto px-4 py-6">
         {messages.length === 0 && (

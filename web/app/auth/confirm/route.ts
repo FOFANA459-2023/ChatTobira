@@ -2,6 +2,7 @@ import { type EmailOtpType } from "@supabase/supabase-js";
 import { redirect } from "next/navigation";
 import { type NextRequest } from "next/server";
 
+import { isAdminEmail } from "@/lib/admin";
 import { createClient } from "@/lib/supabase/server";
 
 /** Magic-link landing. Handles both shapes Supabase can deliver:
@@ -22,16 +23,31 @@ export async function GET(request: NextRequest) {
   if (token_hash && type) {
     const { error } = await supabase.auth.verifyOtp({ type, token_hash });
     if (!error) {
-      redirect("/");
+      redirect(await landingPath(supabase));
     }
   }
 
   if (code) {
     const { error } = await supabase.auth.exchangeCodeForSession(code);
     if (!error) {
-      redirect("/");
+      redirect(await landingPath(supabase));
     }
   }
 
   redirect("/login");
+}
+
+/** The admin's link lands on the admin page — that is where they were headed;
+ * students land on the chat. */
+async function landingPath(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+): Promise<string> {
+  try {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    return isAdminEmail(user?.email) ? "/admin" : "/";
+  } catch {
+    return "/";
+  }
 }
