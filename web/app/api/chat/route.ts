@@ -24,6 +24,7 @@ const BodySchema = z.object({
       topic: z.string().regex(/^T\d{1,2}$/).optional(),
     })
     .default({}),
+  conversationId: z.number().int().positive().optional(),
 });
 
 function lastUserText(messages: UIMessage[]): string {
@@ -56,10 +57,47 @@ export async function POST(request: Request) {
     return Response.json({ error: "bad_request" }, { status: 400 });
   }
   const { messages, scope } = parsed.data;
+  let { conversationId } = parsed.data;
 
   const question = lastUserText(messages);
   if (!question) {
     return Response.json({ error: "empty_question" }, { status: 400 });
+  }
+
+  // Persist under RLS as the signed-in student. Failures here must never
+  // block an answer — history is valuable, the answer is the product.
+  if (!conversationId) {
+    const { data: conversation } = await supabase
+      .from("conversations")
+      .insert({ user_id: user.id, scope, title: question.slice(0, 60) })
+      .select("id")
+      .single();
+    conversationId = (conversation as { id: number } | null)?.id;
+  }
+  if (conversationId) {
+    await supabase
+      .from("messages")
+      .insert({ conversation_id: conversationId, role: "user", content: question });
+  }
+
+  async function persistAssistant(
+    answer: string,
+    citations: Citation[],
+    model: string,
+  ): Promise<number | undefined> {
+    if (!conversationId || !answer) return undefined;
+    const { data } = await supabase
+      .from("messages")
+      .insert({
+        conversation_id: conversationId,
+        role: "assistant",
+        content: answer,
+        citations,
+        model,
+      })
+      .select("id")
+      .single();
+    return (data as { id: number } | null)?.id;
   }
 
   // Quota first: an exhausted student costs zero model calls. Atomic in SQL,
@@ -90,7 +128,8 @@ export async function POST(request: Request) {
   });
   if (cached && cached.length > 0) {
     const hit = cached[0] as { answer: string; citations: Citation[] };
-    return cachedAnswerResponse(hit.answer, hit.citations);
+    await persistAssistant(hit.answer, hit.citations, "cache");
+    return cachedAnswerResponse(hit.answer, hit.citations, conversationId);
   }
 
   const chunks = await retrieve(supabase, embedding, tokensForQuery(question), scope);
@@ -129,7 +168,7 @@ export async function POST(request: Request) {
   return result.toUIMessageStreamResponse({
     messageMetadata: ({ part }) => {
       if (part.type === "finish") {
-        return { citations, model: modelUsed };
+        return { citations, model: modelUsed, conversationId };
       }
     },
     onFinish: async ({ responseMessage }) => {
@@ -138,6 +177,7 @@ export async function POST(request: Request) {
         .map((p) => p.text)
         .join("");
       if (!answer) return;
+      await persistAssistant(answer, citations, modelUsed);
       // Cache fire-and-forget: a failed write must not break the reply.
       try {
         await supabase.rpc("cache_put", {
@@ -155,7 +195,11 @@ export async function POST(request: Request) {
 }
 
 /** Serve a cache hit in the same UI-message-stream shape as a live answer. */
-function cachedAnswerResponse(answer: string, citations: Citation[]): Response {
+function cachedAnswerResponse(
+  answer: string,
+  citations: Citation[],
+  conversationId?: number,
+): Response {
   const encoder = new TextEncoder();
   const id = crypto.randomUUID();
   const events = [
@@ -163,7 +207,10 @@ function cachedAnswerResponse(answer: string, citations: Citation[]): Response {
     { type: "text-start", id },
     { type: "text-delta", id, delta: answer },
     { type: "text-end", id },
-    { type: "message-metadata", messageMetadata: { citations, model: "cache" } },
+    {
+      type: "message-metadata",
+      messageMetadata: { citations, model: "cache", conversationId },
+    },
     { type: "finish" },
   ];
 

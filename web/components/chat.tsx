@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useRef, useState } from "react";
 
 import { Citations } from "@/components/citations";
+import { FeedbackButtons } from "@/components/feedback-buttons";
 import { MicButton } from "@/components/mic-button";
 import { ScopePicker } from "@/components/scope-picker";
 import type { Citation, StudyScope } from "@/lib/retrieval";
@@ -13,6 +14,7 @@ import type { Citation, StudyScope } from "@/lib/retrieval";
 interface MessageMeta {
   citations?: Citation[];
   model?: string;
+  conversationId?: number;
 }
 
 export function Chat() {
@@ -20,13 +22,23 @@ export function Chat() {
   const [input, setInput] = useState("");
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
+  // Set by the first answer's metadata; later turns append to the same
+  // conversation row so history and feedback attach correctly.
+  const conversationRef = useRef<number | undefined>(undefined);
 
   const { messages, sendMessage, status, error } = useChat({
     transport: new DefaultChatTransport({
       api: "/api/chat",
-      // Read from the ref so mid-conversation scope changes apply immediately.
-      body: () => ({ scope: scopeRef.current }),
+      // Read from refs so mid-conversation changes apply immediately.
+      body: () => ({
+        scope: scopeRef.current,
+        conversationId: conversationRef.current,
+      }),
     }),
+    onFinish: ({ message }) => {
+      const meta = (message.metadata ?? {}) as MessageMeta;
+      if (meta.conversationId) conversationRef.current = meta.conversationId;
+    },
   });
 
   const busy = status === "submitted" || status === "streaming";
@@ -88,7 +100,12 @@ export function Chat() {
                 ) : null,
               )}
               {message.role === "assistant" && (
-                <Citations citations={meta.citations ?? []} />
+                <>
+                  <Citations citations={meta.citations ?? []} />
+                  {message.id === messages.at(-1)?.id && !busy && (
+                    <FeedbackButtons conversationId={meta.conversationId} />
+                  )}
+                </>
               )}
             </div>
           );
