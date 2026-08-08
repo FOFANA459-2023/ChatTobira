@@ -9,12 +9,10 @@ import { createClient } from "@/lib/supabase/server";
 export const maxDuration = 60;
 
 const BodySchema = z.object({
-  scope: z
-    .object({
-      level: z.enum(["F2", "F3", "INT"]).optional(),
-      topic: z.string().regex(/^T\d{1,2}$/).optional(),
-    })
-    .default({}),
+  // The student picks a specific source: quizzes from "everything" produced
+  // vague drills and slow generation over an unfocused sample.
+  documentId: z.number().int().positive(),
+  topic: z.string().regex(/^T\d{1,2}$/).optional(),
   count: z.number().int().min(3).max(10).default(5),
 });
 
@@ -31,16 +29,46 @@ provided course material. Rules:
   Japanese pattern named.
 - Never reference "the source", file names, or page numbers in questions.`;
 
-export async function POST(request: Request) {
+async function requireUser() {
   const supabase = await createClient();
-  let user = null;
   try {
-    ({
+    const {
       data: { user },
-    } = await supabase.auth.getUser());
+    } = await supabase.auth.getUser();
+    return { supabase, user };
   } catch {
-    /* unreachable auth backend reads as signed out */
+    return { supabase, user: null };
   }
+}
+
+/** Books and topics available for quizzing, for the picker UI. */
+export async function GET() {
+  const { supabase, user } = await requireUser();
+  if (!user) {
+    return Response.json({ error: "not_signed_in" }, { status: 401 });
+  }
+
+  const { data, error } = await supabase
+    .from("documents")
+    .select("id, title, level, doc_type, topics, is_citable")
+    .order("is_citable", { ascending: false })
+    .order("title");
+  if (error) {
+    return Response.json({ error: "lookup_failed" }, { status: 500 });
+  }
+
+  const books = (data ?? []).map((d) => ({
+    id: d.id as number,
+    title: d.title as string,
+    level: d.level as string | null,
+    doc_type: d.doc_type as string,
+    topics: (d.topics ?? []) as string[],
+  }));
+  return Response.json({ books });
+}
+
+export async function POST(request: Request) {
+  const { supabase, user } = await requireUser();
   if (!user) {
     return Response.json({ error: "not_signed_in" }, { status: 401 });
   }
@@ -49,7 +77,11 @@ export async function POST(request: Request) {
   if (!parsed.success) {
     return Response.json({ error: "bad_request" }, { status: 400 });
   }
-  const { scope, count } = parsed.data;
+  const { documentId, topic, count } = parsed.data;
+
+  if (!process.env.GOOGLE_API_KEY || !process.env.GROQ_API_KEY) {
+    return Response.json({ error: "model_keys_not_configured" }, { status: 503 });
+  }
 
   // A quiz costs one model call, so it spends one quota unit like a question.
   const { data: remaining, error: quotaError } = await supabase.rpc("consume_quota");
@@ -60,58 +92,54 @@ export async function POST(request: Request) {
     return Response.json({ error: "quota_exhausted" }, { status: 429 });
   }
 
-  // Pull drill source material straight by metadata — no embedding needed for
-  // a topic-shaped request. Answer keys are prime quiz material.
   let query = supabase
     .from("chunks")
     .select("content, metadata")
-    .limit(30);
-  if (scope.topic) {
-    query = query.eq("metadata->>topic", scope.topic);
-  } else if (scope.level) {
-    query = query.eq("metadata->>level", scope.level);
+    .eq("document_id", documentId)
+    .limit(24);
+  if (topic) {
+    query = query.eq("metadata->>topic", topic);
   }
   const { data: chunks, error } = await query;
   if (error) {
-    return Response.json({ error: "retrieval_failed" }, { status: 500 });
+    return Response.json({ error: "retrieval_failed" }, { status: 502 });
   }
   if (!chunks || chunks.length === 0) {
     return Response.json(
       {
         error: "no_material",
-        message: "No course material is loaded for that scope yet.",
+        message: "No course material is loaded for that selection yet.",
       },
       { status: 404 },
     );
   }
 
-  // Shuffle so repeat quizzes on the same topic vary their source pages.
+  // Small, shuffled sample with tight character caps: quiz latency is
+  // dominated by prompt size, and 8 focused excerpts out-drill 30 loose ones.
   const sample = [...chunks]
     .sort(() => Math.random() - 0.5)
-    .slice(0, 10)
-    .map((c, i) => `--- Material ${i + 1} ---\n${c.content}`)
+    .slice(0, 8)
+    .map((c, i) => `--- Material ${i + 1} ---\n${(c.content as string).slice(0, 900)}`)
     .join("\n\n");
 
-  if (!process.env.GOOGLE_API_KEY || !process.env.GROQ_API_KEY) {
-    return Response.json({ error: "model_keys_not_configured" }, { status: 503 });
-  }
-
   const prompt = `Create ${count} drill items from this material.\n\n${sample}`;
-  const google = createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY });
   const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
+  const google = createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY });
 
+  // Groq first: sub-second token rates make it the fast path, and its daily
+  // budget is healthier than gemini-3.6-flash's 20 requests/day. Gemini only
+  // catches the failure case.
   try {
     const { object } = await generateObject({
-      model: google(process.env.FALLBACK_MODEL ?? "gemini-3.6-flash"),
+      model: groq(process.env.CHAT_MODEL ?? "llama-3.3-70b-versatile"),
       schema: QuizSchema,
       system: SYSTEM,
       prompt,
     });
     return Response.json(object);
   } catch {
-    // Gemini quota or transport failure: same request through Groq.
     const { object } = await generateObject({
-      model: groq(process.env.CHAT_MODEL ?? "llama-3.3-70b-versatile"),
+      model: google(process.env.FALLBACK_MODEL ?? "gemini-3.6-flash"),
       schema: QuizSchema,
       system: SYSTEM,
       prompt,

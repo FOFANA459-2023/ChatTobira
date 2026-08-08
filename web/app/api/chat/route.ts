@@ -7,9 +7,11 @@ import { contextBlock, systemPrompt } from "@/lib/prompt";
 import {
   buildCitations,
   embedQuery,
+  isSmallTalk,
   retrieve,
   tokensForQuery,
   type Citation,
+  type RetrievedChunk,
   type StudyScope,
 } from "@/lib/retrieval";
 import { createClient } from "@/lib/supabase/server";
@@ -122,32 +124,42 @@ export async function POST(request: Request) {
     return Response.json({ error: "model_keys_not_configured" }, { status: 503 });
   }
 
-  let embedding: number[];
-  try {
-    embedding = await embedQuery(question);
-  } catch {
-    return Response.json({ error: "embedding_failed" }, { status: 502 });
-  }
-  const vectorLiteral = `[${embedding.join(",")}]`;
+  // Small talk skips the whole retrieval stack — no embedding round-trip, no
+  // cache probe, no vector search. Faster first token, and no absurd
+  // textbook citation under "hello".
+  const trivial = isSmallTalk(question);
 
-  // Semantic cache: 100 students ask the same ~30 grammar questions, and a hit
-  // here costs no Groq/Gemini quota at all.
-  const { data: cached } = await supabase.rpc("cache_get", {
-    query_embedding: vectorLiteral,
-    query_scope: scope,
-  });
-  if (cached && cached.length > 0) {
-    const hit = cached[0] as { answer: string; citations: Citation[] };
-    await persistAssistant(hit.answer, hit.citations, "cache");
-    return cachedAnswerResponse(hit.answer, hit.citations, conversationId);
+  let vectorLiteral: string | null = null;
+  let chunks: RetrievedChunk[] = [];
+
+  if (!trivial) {
+    let embedding: number[];
+    try {
+      embedding = await embedQuery(question);
+    } catch {
+      return Response.json({ error: "embedding_failed" }, { status: 502 });
+    }
+    vectorLiteral = `[${embedding.join(",")}]`;
+
+    // Semantic cache: 100 students ask the same ~30 grammar questions, and a
+    // hit here costs no Groq/Gemini quota at all.
+    const { data: cached } = await supabase.rpc("cache_get", {
+      query_embedding: vectorLiteral,
+      query_scope: scope,
+    });
+    if (cached && cached.length > 0) {
+      const hit = cached[0] as { answer: string; citations: Citation[] };
+      await persistAssistant(hit.answer, hit.citations, "cache");
+      return cachedAnswerResponse(hit.answer, hit.citations, conversationId);
+    }
+
+    try {
+      chunks = await retrieve(supabase, embedding, tokensForQuery(question), scope, 8);
+    } catch {
+      return Response.json({ error: "retrieval_failed" }, { status: 502 });
+    }
   }
 
-  let chunks;
-  try {
-    chunks = await retrieve(supabase, embedding, tokensForQuery(question), scope);
-  } catch {
-    return Response.json({ error: "retrieval_failed" }, { status: 502 });
-  }
   const citations = buildCitations(chunks);
 
   const system = `${systemPrompt(scope as StudyScope)}\n\n=== SOURCE MATERIAL ===\n${contextBlock(chunks)}`;
@@ -194,16 +206,19 @@ export async function POST(request: Request) {
       if (!answer) return;
       await persistAssistant(answer, citations, modelUsed);
       // Cache fire-and-forget: a failed write must not break the reply.
-      try {
-        await supabase.rpc("cache_put", {
-          q_question: question,
-          q_embedding: vectorLiteral,
-          q_answer: answer,
-          q_citations: citations,
-          q_scope: scope,
-        });
-      } catch {
-        /* cache is best-effort */
+      // Small talk is never cached — it has no embedding and no reuse value.
+      if (vectorLiteral) {
+        try {
+          await supabase.rpc("cache_put", {
+            q_question: question,
+            q_embedding: vectorLiteral,
+            q_answer: answer,
+            q_citations: citations,
+            q_scope: scope,
+          });
+        } catch {
+          /* cache is best-effort */
+        }
       }
     },
   });

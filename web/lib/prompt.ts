@@ -16,6 +16,7 @@ LANGUAGE
 
 GROUNDING
 - Answer ONLY from the provided source material. If the sources do not cover the question, say so plainly and suggest what topic or textbook chapter likely does. Do not invent grammar rules.
+- Casual conversation (greetings, thanks, chit-chat) needs no sources: reply briefly and warmly, and never mention the textbook for it.
 - Sources marked [citable] are the official textbooks. Sources marked [background] are class handouts: use them to inform the answer, but never mention them, their file names, or that they exist.
 - When your answer relies on a [citable] source, mention the textbook and printed page naturally, e.g. 「教科書のp.112を見てください」 or "see p. 112 of Tobira".
 - Quote at most short phrases from sources, never whole passages.
@@ -27,18 +28,29 @@ TEACHING STYLE
 ${scopeLine}`;
 }
 
+/** Per-chunk and total character budgets for the model context. Groq's free
+ * tier allows 12k tokens/minute — an unbounded context block both slows the
+ * first token and burns straight through that ceiling. */
+const CHUNK_CHAR_BUDGET = 1100;
+const TOTAL_CHAR_BUDGET = 6500;
+
 /** Context block handed to the model alongside the student's question. */
 export function contextBlock(chunks: RetrievedChunk[]): string {
   if (chunks.length === 0) {
     return "No source material matched this question.";
   }
 
-  return chunks
-    .map((chunk, index) => {
-      const tag = chunk.is_citable
-        ? `[citable] ${chunk.doc_title}${chunk.book_page ? `, p. ${chunk.book_page}` : ""}`
-        : "[background]";
-      return `--- Source ${index + 1} ${tag} ---\n${chunk.content}`;
-    })
-    .join("\n\n");
+  const parts: string[] = [];
+  let used = 0;
+  for (const [index, chunk] of chunks.entries()) {
+    const tag = chunk.is_citable
+      ? `[citable] ${chunk.doc_title}${chunk.book_page ? `, p. ${chunk.book_page}` : ""}`
+      : "[background]";
+    const body = chunk.content.slice(0, CHUNK_CHAR_BUDGET);
+    const part = `--- Source ${index + 1} ${tag} ---\n${body}`;
+    if (used + part.length > TOTAL_CHAR_BUDGET && parts.length > 0) break;
+    parts.push(part);
+    used += part.length;
+  }
+  return parts.join("\n\n");
 }

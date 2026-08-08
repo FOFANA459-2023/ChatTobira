@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { buildCitations, tokensForQuery, type RetrievedChunk } from "../retrieval";
+import {
+  buildCitations,
+  isSmallTalk,
+  tokensForQuery,
+  type RetrievedChunk,
+} from "../retrieval";
 
 function chunk(overrides: Partial<RetrievedChunk>): RetrievedChunk {
   return {
@@ -14,6 +19,7 @@ function chunk(overrides: Partial<RetrievedChunk>): RetrievedChunk {
     content: "文法の説明です。",
     metadata: {},
     score: 0.5,
+    similarity: 0.8,
     ...overrides,
   };
 }
@@ -37,7 +43,31 @@ describe("tokensForQuery", () => {
   });
 });
 
+describe("isSmallTalk", () => {
+  it("greetings and thanks are small talk in both languages", () => {
+    for (const text of ["hello", "Hi!", "thanks", "こんにちは", "ありがとうございます", "おはよう"]) {
+      expect(isSmallTalk(text), text).toBe(true);
+    }
+  });
+
+  it("real questions are not small talk", () => {
+    for (const text of [
+      "「〜がち」はどういう意味ですか",
+      "how do I use ておく?",
+      "たい", // short but Japanese — could be a grammar point
+    ]) {
+      expect(isSmallTalk(text), text).toBe(false);
+    }
+  });
+});
+
 describe("buildCitations", () => {
+  it("drops chunks below the similarity floor — 'hello' cites nothing", () => {
+    // Live measurements: on-topic ~0.78, small talk ~0.59.
+    expect(buildCitations([chunk({ similarity: 0.59 })])).toEqual([]);
+    expect(buildCitations([chunk({ similarity: 0.78 })])).toHaveLength(1);
+  });
+
   it("never cites a class handout, even a top-scoring one", () => {
     const citations = buildCitations([
       chunk({ is_citable: false, doc_title: "T12 answer key", score: 0.99 }),

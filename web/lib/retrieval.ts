@@ -13,6 +13,8 @@ export interface RetrievedChunk {
   content: string;
   metadata: Record<string, unknown>;
   score: number;
+  /** True cosine similarity to the query, independent of RRF rank. */
+  similarity: number;
 }
 
 export interface Citation {
@@ -28,6 +30,20 @@ export interface StudyScope {
 }
 
 const segmenter = new TinySegmenter();
+
+const GREETING_RE =
+  /^(hi|hello|hey|yo|thanks?|thank you|ok(ay)?|cool|nice|good (morning|evening|night)|bye|see you|こんにちは|こんばんは|おはよう(ございます)?|ありがとう(ございます)?|はい|うん|じゃあね|さようなら|よろしく(おねがいします)?|お疲れ様(です)?|おつかれ)[\s!?！？。～~]*$/i;
+
+/** Small talk needs no retrieval: answering "hello" through an embedding
+ * call, a cache probe, and a vector search wastes ~1s and then decorates the
+ * greeting with textbook citations. */
+export function isSmallTalk(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return true;
+  if (GREETING_RE.test(trimmed)) return true;
+  // Very short Latin-only messages ("ok!", "lol") are never grammar questions.
+  return trimmed.length < 8 && !/[぀-ヿ一-鿿]/.test(trimmed);
+}
 
 /** Query-side tokens for the lexical arm of hybrid search.
  *
@@ -108,6 +124,12 @@ export async function retrieve(
 
 const QUOTE_LIMIT = Number(process.env.CITATION_QUOTE_CHARS ?? 200);
 
+/** Below this cosine similarity the corpus does not really cover the
+ * question — cite nothing rather than decorate an answer with noise.
+ * Measured on the live corpus: on-topic grammar questions score ~0.78,
+ * small talk ~0.59. */
+export const CITE_MIN_SIMILARITY = Number(process.env.CITE_MIN_SIMILARITY ?? 0.66);
+
 /** Strip Markdown/furigana scaffolding so quotes read as plain text. */
 function plainText(markdown: string): string {
   return markdown
@@ -124,7 +146,9 @@ function plainText(markdown: string): string {
  * HARD RULE: only textbook chunks (is_citable) may ever appear here. Class
  * handouts ground the answer but are never named. Enforced here, server-side,
  * regardless of what the model says. Quotes are capped so the app excerpts
- * rather than reproduces the commercial textbooks.
+ * rather than reproduces the commercial textbooks. Chunks below the
+ * similarity floor never cite: an off-topic question retrieves *something*,
+ * but decorating "hello" with a textbook reference helps nobody.
  */
 export function buildCitations(chunks: RetrievedChunk[]): Citation[] {
   const seen = new Set<string>();
@@ -132,6 +156,7 @@ export function buildCitations(chunks: RetrievedChunk[]): Citation[] {
 
   for (const chunk of chunks) {
     if (!chunk.is_citable) continue;
+    if ((chunk.similarity ?? 0) < CITE_MIN_SIMILARITY) continue;
     const key = `${chunk.document_id}:${chunk.book_page ?? chunk.pdf_page}`;
     if (seen.has(key)) continue;
     seen.add(key);

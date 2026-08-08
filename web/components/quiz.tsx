@@ -1,23 +1,41 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import { ScopePicker } from "@/components/scope-picker";
 import { isCorrect, type Quiz, type QuizItem } from "@/lib/quiz";
-import type { StudyScope } from "@/lib/retrieval";
+
+interface Book {
+  id: number;
+  title: string;
+  level: string | null;
+  doc_type: string;
+  topics: string[];
+}
 
 type Phase = "setup" | "loading" | "active" | "done" | "error";
 
 export function QuizView() {
-  const [scope, setScope] = useState<StudyScope>({});
+  const [books, setBooks] = useState<Book[]>([]);
+  const [bookId, setBookId] = useState<number | null>(null);
+  const [topic, setTopic] = useState("");
   const [phase, setPhase] = useState<Phase>("setup");
   const [quiz, setQuiz] = useState<Quiz | null>(null);
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const [checked, setChecked] = useState(false);
   const [errorText, setErrorText] = useState("");
 
+  useEffect(() => {
+    fetch("/api/quiz")
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then((data: { books: Book[] }) => setBooks(data.books))
+      .catch(() => setBooks([]));
+  }, []);
+
+  const selectedBook = books.find((b) => b.id === bookId) ?? null;
+
   async function generate() {
+    if (!bookId) return;
     setPhase("loading");
     setChecked(false);
     setAnswers({});
@@ -25,16 +43,19 @@ export function QuizView() {
       const response = await fetch("/api/quiz", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scope, count: 5 }),
+        body: JSON.stringify({
+          documentId: bookId,
+          topic: topic || undefined,
+          count: 5,
+        }),
       });
       if (!response.ok) {
         const body = (await response.json().catch(() => ({}))) as {
           error?: string;
-          message?: string;
         };
         setErrorText(
           body.error === "no_material"
-            ? "No course material is loaded for that scope yet. Try another topic."
+            ? "No material is loaded for that selection yet. Try another topic."
             : body.error === "quota_exhausted"
               ? "You have reached today's limit. It resets at midnight, Japan time."
               : "Could not generate a quiz. Please try again.",
@@ -60,27 +81,66 @@ export function QuizView() {
         <h1 className="text-lg font-semibold tracking-tight">
           Practice <span className="font-normal text-stone-400">れんしゅう</span>
         </h1>
-        <div className="flex items-center gap-3">
-          <ScopePicker scope={scope} onChange={setScope} />
-          <Link href="/" className="text-sm text-stone-500 hover:text-stone-900">
-            Back to chat
-          </Link>
-        </div>
+        <Link href="/" className="text-sm text-stone-500 hover:text-stone-900">
+          Back to chat
+        </Link>
       </header>
 
       {phase !== "active" && phase !== "done" && (
-        <div className="mt-16 text-center">
+        <div className="mx-auto mt-12 max-w-md text-center">
           <p lang="ja" className="text-xl text-stone-600">
             クイズでふくしゅうしましょう
           </p>
           <p className="mt-2 text-sm text-stone-500">
-            Pick a topic above, then generate five practice questions from your
-            course material.
+            Choose the material to be quizzed on, then generate five questions.
           </p>
+
+          <div className="mt-6 space-y-3 text-left">
+            <label className="block text-sm">
+              <span className="mb-1 block font-medium text-stone-700">Book / material</span>
+              <select
+                value={bookId ?? ""}
+                onChange={(e) => {
+                  setBookId(e.target.value ? Number(e.target.value) : null);
+                  setTopic("");
+                }}
+                className="w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm"
+              >
+                <option value="">Select a book…</option>
+                {books.map((book) => (
+                  <option key={book.id} value={book.id}>
+                    {book.title}
+                    {book.level ? ` (${book.level})` : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {selectedBook && selectedBook.topics.length > 0 && (
+              <label className="block text-sm">
+                <span className="mb-1 block font-medium text-stone-700">
+                  Topic <span className="font-normal text-stone-400">(optional)</span>
+                </span>
+                <select
+                  value={topic}
+                  onChange={(e) => setTopic(e.target.value)}
+                  className="w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm"
+                >
+                  <option value="">Whole book</option>
+                  {selectedBook.topics.map((t) => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </div>
+
           <button
             onClick={generate}
-            disabled={phase === "loading"}
-            className="mt-6 rounded-xl bg-stone-900 px-6 py-2.5 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
+            disabled={!bookId || phase === "loading"}
+            className="mt-6 w-full rounded-xl bg-stone-900 px-6 py-2.5 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
           >
             {phase === "loading" ? "Generating…" : "Generate quiz"}
           </button>
@@ -123,10 +183,13 @@ export function QuizView() {
                 {score} / {quiz.items.length}
               </p>
               <button
-                onClick={generate}
+                onClick={() => {
+                  setQuiz(null);
+                  setPhase("setup");
+                }}
                 className="rounded-xl border border-stone-300 bg-white px-5 py-2.5 text-sm hover:bg-stone-100"
               >
-                Another quiz
+                New quiz
               </button>
             </div>
           )}
