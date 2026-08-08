@@ -163,7 +163,7 @@ export default function AdminPage() {
               <Link href="/" className="hover:text-stone-600">
                 ChatTobira
               </Link>{" "}
-              <span className="text-base font-normal text-stone-500">admin</span>
+              <span className="text-base font-normal text-stone-500">Admin</span>
             </h1>
             {session === "admin" && (
               <button
@@ -181,7 +181,7 @@ export default function AdminPage() {
 
           {session === "not_admin" && (
             <p className="mt-6 text-sm text-stone-600">
-              This page is for the teacher account only.{" "}
+              This page is for the admin only.{" "}
               <Link href="/" className="underline">
                 Back to the chat
               </Link>
@@ -191,9 +191,7 @@ export default function AdminPage() {
 
           {session === "signed_out" && (
             <>
-              <p className="mt-2 text-sm text-stone-600">
-                Teacher sign-in for {ADMIN_EMAIL}.
-              </p>
+              <p className="mt-2 text-sm text-stone-600">ChatTobira Admin sign-in.</p>
               <form onSubmit={signIn} className="mt-6 space-y-3">
                 <input
                   type="password"
@@ -221,8 +219,8 @@ export default function AdminPage() {
           {session === "admin" && (
             <>
               <p className="mt-2 text-sm text-stone-600">
-                Welcome, Varlee. Invite a student by email — they receive a
-                sign-in link and just enter their name on first visit.
+                Invite a student by email — they receive a sign-in link and
+                just enter their name on first visit.
               </p>
               <form onSubmit={invite} className="mt-5 flex gap-2">
                 <input

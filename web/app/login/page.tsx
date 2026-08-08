@@ -48,9 +48,8 @@ export default function LoginPage() {
           <span className="text-base font-normal text-stone-500">とびら</span>
         </h1>
         <p className="mt-2 text-sm text-stone-600">
-          Access is limited to invited students — your teacher sends the invite
-          to your email. Already invited? Enter that email to get a fresh
-          sign-in link.
+          Access is limited to invited students — invites arrive by email.
+          Already invited? Enter that email to get a fresh sign-in link.
         </p>
 
         {!configured && (
@@ -105,7 +104,7 @@ export default function LoginPage() {
 
         <p className="mt-6 border-t border-stone-200 pt-4 text-center text-xs text-stone-400">
           <Link href="/admin" className="underline hover:text-stone-600">
-            Teacher sign-in
+            Admin sign-in
           </Link>
         </p>
       </div>
