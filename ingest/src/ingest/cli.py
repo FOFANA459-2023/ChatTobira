@@ -198,7 +198,8 @@ def cmd_verify() -> None:
 
 @app.command("invite")
 def cmd_invite(
-    emails: list[str] = typer.Argument(..., help="Email addresses to invite"),
+    # Optional so `--list` works on its own rather than demanding a dummy email.
+    emails: list[str] | None = typer.Argument(None, help="Email addresses to invite"),
     note: str = typer.Option("", help="Optional note, e.g. 'F3 spring cohort'"),
     remove: bool = typer.Option(False, "--remove", help="Remove instead of add"),
     show: bool = typer.Option(False, "--list", help="List the allowlist and exit"),
@@ -212,6 +213,10 @@ def cmd_invite(
             console.print(f"{row['email']}  [dim]{row['note'] or ''}[/dim]")
         console.print(f"[bold]{len(rows)} invited[/bold]")
         return
+
+    if not emails:
+        console.print("[red]No email addresses given.[/red] Try --list to see the allowlist.")
+        raise typer.Exit(2)
 
     if remove:
         for email in emails:
