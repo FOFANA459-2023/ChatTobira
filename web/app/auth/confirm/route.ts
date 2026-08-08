@@ -34,7 +34,10 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  redirect("/login");
+  // Verification failed — expired, already used, or malformed. Land on the
+  // login page WITH a reason, so the student knows to request a fresh link
+  // instead of staring at a silent form.
+  redirect("/login?link=invalid");
 }
 
 /** Students land on the chat. The admin account must NEVER get a session

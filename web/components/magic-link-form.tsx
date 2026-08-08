@@ -12,7 +12,13 @@ type Status = "idle" | "sending" | "sent" | "not_invited" | "admin" | "error";
  * out-of-trial panel. The admin email is refused here: the admin account
  * signs in with a password only, so a sign-in link for it must never be
  * requestable from the app. */
-export function MagicLinkForm({ disabled = false }: { disabled?: boolean }) {
+export function MagicLinkForm({
+  disabled = false,
+  showAdminLink = false,
+}: {
+  disabled?: boolean;
+  showAdminLink?: boolean;
+}) {
   const [email, setEmail] = useState("");
   const [status, setStatus] = useState<Status>("idle");
 
@@ -69,13 +75,15 @@ export function MagicLinkForm({ disabled = false }: { disabled?: boolean }) {
 
       {status === "sent" && (
         <p className="mt-4 text-sm text-green-700">
-          Check your inbox for the sign-in link.
+          Your sign-in link is on its way — check your inbox. The link works
+          once and expires in one hour.
         </p>
       )}
       {status === "not_invited" && (
         <p className="mt-4 text-sm text-amber-700">
-          This email has not been invited yet. Ask the admin to invite you,
-          then check your inbox.
+          This email is not on the invite list yet. ChatTobira is limited to
+          invited students — ask the admin to invite you, and your sign-in
+          link will arrive by email.
         </p>
       )}
       {status === "admin" && (
@@ -89,7 +97,15 @@ export function MagicLinkForm({ disabled = false }: { disabled?: boolean }) {
       )}
       {status === "error" && (
         <p className="mt-4 text-sm text-red-700">
-          Something went wrong. Please try again in a moment.
+          Something went wrong on our side. Please try again in a moment.
+        </p>
+      )}
+
+      {showAdminLink && (
+        <p className="mt-5 border-t border-stone-200 pt-3 text-center text-xs text-stone-400">
+          <Link href="/admin" className="underline hover:text-stone-600">
+            Admin sign-in
+          </Link>
         </p>
       )}
     </div>

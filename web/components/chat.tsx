@@ -10,6 +10,7 @@ import { FeedbackButtons } from "@/components/feedback-buttons";
 import { MagicLinkForm } from "@/components/magic-link-form";
 import { MicButton } from "@/components/mic-button";
 import { NavBar } from "@/components/nav";
+import { createClient } from "@/lib/supabase/client";
 import type { Citation } from "@/lib/retrieval";
 
 interface MessageMeta {
@@ -62,12 +63,26 @@ export function Chat({
     <div className="mx-auto flex h-screen max-w-3xl flex-col">
       <NavBar active="chat">
         {isAdmin && (
-          <Link
-            href="/admin"
-            className="rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-sm text-stone-700 hover:bg-stone-100"
-          >
-            Invite students
-          </Link>
+          <>
+            <Link
+              href="/admin"
+              className="rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-sm text-stone-700 hover:bg-stone-100"
+            >
+              Invite students
+            </Link>
+            <button
+              onClick={async () => {
+                try {
+                  await createClient().auth.signOut();
+                } finally {
+                  window.location.assign("/");
+                }
+              }}
+              className="rounded-lg px-3 py-1.5 text-sm text-stone-500 hover:text-stone-900"
+            >
+              Sign out
+            </button>
+          </>
         )}
       </NavBar>
 
@@ -133,11 +148,11 @@ export function Chat({
         <div className="border-t border-stone-200 bg-white px-4 py-5">
           <div className="mx-auto max-w-sm">
             <p className="text-sm font-medium text-stone-800">
-              You are out of trial questions — sign in with a link to keep
-              studying.
+              That is the end of your free trial. Enter your email below and
+              we will send you a sign-in link so you can keep studying.
             </p>
             <div className="mt-3">
-              <MagicLinkForm />
+              <MagicLinkForm showAdminLink />
             </div>
           </div>
         </div>
