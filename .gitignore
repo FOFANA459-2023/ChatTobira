@@ -1,0 +1,63 @@
+# ---------------------------------------------------------------------------
+# Course materials — NEVER COMMIT
+# ---------------------------------------------------------------------------
+# These folders hold ~94MB of class handouts plus two commercial Kuroshio
+# textbooks (Tobira Intermediate Japanese / Tobira Kanji and Vocabulary).
+# Committing them would redistribute copyrighted material and bloat the repo.
+# They live on disk and are read by the ingest pipeline via MATERIALS_ROOT.
+/Foundation 1*/
+/Foundation 2/
+/Foundation 3/
+/Intermediate/
+/materials/
+
+# Derived artifacts from ingestion (regenerable, large)
+/.work/
+*.pdf
+*.ppt
+*.pptx
+*.doc
+*.docx
+
+# ---------------------------------------------------------------------------
+# Secrets
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+.dev.vars
+.wrangler/
+
+# ---------------------------------------------------------------------------
+# Python (ingest/)
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# ---------------------------------------------------------------------------
+# Node (web/)
+# ---------------------------------------------------------------------------
+node_modules/
+.next/
+out/
+.open-next/
+next-env.d.ts
+*.tsbuildinfo
+
+# ---------------------------------------------------------------------------
+# OS / editor
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
