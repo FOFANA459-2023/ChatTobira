@@ -2,6 +2,7 @@
 
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
+import Link from "next/link";
 import { useRef, useState } from "react";
 
 import { Citations } from "@/components/citations";
@@ -44,7 +45,15 @@ export function Chat() {
         <h1 className="text-lg font-semibold tracking-tight">
           ChatTobira <span className="font-normal text-stone-400">とびら</span>
         </h1>
-        <ScopePicker scope={scope} onChange={setScope} />
+        <div className="flex items-center gap-3">
+          <ScopePicker scope={scope} onChange={setScope} />
+          <Link
+            href="/quiz"
+            className="text-sm text-stone-500 hover:text-stone-900"
+          >
+            Practice
+          </Link>
+        </div>
       </header>
 
       <div className="flex-1 space-y-4 overflow-y-auto px-4 py-6">

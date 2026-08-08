@@ -22,6 +22,13 @@ test("chat API rejects unauthenticated requests", async ({ request }) => {
   expect(response.status()).toBe(401);
 });
 
+test("quiz API rejects unauthenticated requests", async ({ request }) => {
+  const response = await request.post("/api/quiz", {
+    data: { scope: {}, count: 5 },
+  });
+  expect(response.status()).toBe(401);
+});
+
 test("transcribe API rejects unauthenticated requests", async ({ request }) => {
   const response = await request.post("/api/transcribe", {
     multipart: { audio: { name: "a.webm", mimeType: "audio/webm", buffer: Buffer.from("x") } },
