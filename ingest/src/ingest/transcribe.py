@@ -107,6 +107,15 @@ class DailyQuotaError(RuntimeError):
     """
 
 
+class OutputTruncatedError(RuntimeError):
+    """The response JSON was cut off by the output-token ceiling.
+
+    Seen live on dense scanned sheets: 4 pages of transcription exceeded the
+    default output budget and json.loads got an unterminated string. Retrying
+    the same batch reproduces it; the fix is fewer pages per request.
+    """
+
+
 # Tried in order; each free-tier model has an independent daily quota, so the
 # cascade multiplies the daily page budget. Lite models transcribe well — this
 # is OCR-style work, not reasoning. Override the first entry with VISION_MODEL.
@@ -151,6 +160,9 @@ def _call_model(model: str, images: list[Path], count: int) -> list[dict]:
                 response_schema=RESPONSE_SCHEMA,
                 # Transcription, not composition. Any creativity here is an error.
                 temperature=0.0,
+                # Dense scanned pages produce very long markdown; the default
+                # budget truncated a 4-page batch mid-string.
+                max_output_tokens=65536,
             ),
         )
     except Exception as exc:
@@ -163,7 +175,10 @@ def _call_model(model: str, images: list[Path], count: int) -> list[dict]:
             raise TransientVisionError(message) from exc
         raise
 
-    payload = json.loads(response.text)
+    try:
+        payload = json.loads(response.text)
+    except json.JSONDecodeError as exc:
+        raise OutputTruncatedError(f"truncated JSON after {len(response.text)} chars") from exc
     pages = payload.get("pages", [])
     if len(pages) != count:
         raise TransientVisionError(f"model returned {len(pages)} pages for {count} images")
@@ -205,7 +220,16 @@ def transcribe(
 
     for offset in range(0, len(images), batch_size):
         batch = images[offset : offset + batch_size]
-        pages = _call(batch, len(batch))
+        try:
+            pages = _call(batch, len(batch))
+        except OutputTruncatedError:
+            # A dense batch overflowed the output budget even at 64k tokens.
+            # One page per request always fits.
+            pages = []
+            for image in batch:
+                pages.extend(_call([image], 1))
+                if CONFIG.vision_throttle > 0:
+                    time.sleep(CONFIG.vision_throttle)
 
         for i, page in enumerate(pages):
             book_page = page.get("book_page")
