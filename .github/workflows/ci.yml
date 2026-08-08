@@ -80,15 +80,26 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       exists: ${{ steps.check.outputs.exists }}
+      can_deploy: ${{ steps.check.outputs.can_deploy }}
     steps:
       - uses: actions/checkout@v4
       - id: check
+        env:
+          # secrets are not readable in a job-level `if`, so the deploy gate is
+          # computed here and exported as an output instead.
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           if [ -f web/package.json ]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "web/ not present yet — web jobs will no-op green."
+          fi
+          if [ -n "$CF_TOKEN" ]; then
+            echo "can_deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "can_deploy=false" >> "$GITHUB_OUTPUT"
+            echo "CLOUDFLARE_* secrets not configured — deploy will skip."
           fi
 
   web-lint-typecheck:
@@ -191,7 +202,7 @@ jobs:
       github.ref == 'refs/heads/main' &&
       github.event_name == 'push' &&
       needs.web-detect.outputs.exists == 'true' &&
-      secrets.CLOUDFLARE_API_TOKEN != ''
+      needs.web-detect.outputs.can_deploy == 'true'
     runs-on: ubuntu-latest
     environment: production
     defaults:

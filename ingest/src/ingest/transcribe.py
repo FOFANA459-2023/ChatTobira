@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -94,16 +95,47 @@ def _client():
 
 
 class TransientVisionError(RuntimeError):
-    """Rate limit or transport failure — worth retrying."""
+    """Retryable within the same model: per-minute throttle or transport blip."""
+
+
+class DailyQuotaError(RuntimeError):
+    """This model's free-tier DAILY budget is spent; retrying is pointless.
+
+    Measured reality (2026-08): gemini-3.6-flash allows only 20 requests/day on
+    the free tier. Each model has its own daily bucket, so the fix is to move
+    down the cascade, not to wait.
+    """
+
+
+# Tried in order; each free-tier model has an independent daily quota, so the
+# cascade multiplies the daily page budget. Lite models transcribe well — this
+# is OCR-style work, not reasoning. Override the first entry with VISION_MODEL.
+MODEL_CASCADE = [
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+]
+
+_exhausted: set[str] = set()
+
+
+def _cascade() -> list[str]:
+    preferred = CONFIG.vision_model
+    models = [preferred] + [m for m in MODEL_CASCADE if m != preferred]
+    return [m for m in models if m not in _exhausted]
+
+
+def _is_daily_quota(message: str) -> bool:
+    return "PerDay" in message or "RequestsPerDayPerProject" in message
 
 
 @retry(
     retry=retry_if_exception_type(TransientVisionError),
-    wait=wait_exponential(multiplier=8, min=8, max=240),
-    stop=stop_after_attempt(6),
+    wait=wait_exponential(multiplier=8, min=8, max=120),
+    stop=stop_after_attempt(4),
     reraise=True,
 )
-def _call(images: list[Path], count: int) -> list[dict]:
+def _call_model(model: str, images: list[Path], count: int) -> list[dict]:
     from google.genai import types
 
     parts: list = [PROMPT % count]
@@ -112,7 +144,7 @@ def _call(images: list[Path], count: int) -> list[dict]:
 
     try:
         response = _client().models.generate_content(
-            model=CONFIG.vision_model,
+            model=model,
             contents=parts,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -123,7 +155,11 @@ def _call(images: list[Path], count: int) -> list[dict]:
         )
     except Exception as exc:
         message = str(exc)
-        if any(m in message for m in ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE")):
+        if "429" in message or "RESOURCE_EXHAUSTED" in message:
+            if _is_daily_quota(message):
+                raise DailyQuotaError(message) from exc
+            raise TransientVisionError(message) from exc
+        if "503" in message or "UNAVAILABLE" in message:
             raise TransientVisionError(message) from exc
         raise
 
@@ -134,8 +170,36 @@ def _call(images: list[Path], count: int) -> list[dict]:
     return pages
 
 
-def transcribe(images: list[Path], start_page: int = 1) -> list[PageText]:
-    """Transcribe page images in batches, throttled for the free tier."""
+def _call(images: list[Path], count: int) -> list[dict]:
+    """Try each model in the cascade until one has daily budget left."""
+    last: Exception | None = None
+    for model in _cascade():
+        try:
+            return _call_model(model, images, count)
+        except DailyQuotaError as exc:
+            _exhausted.add(model)
+            last = exc
+        except TransientVisionError as exc:
+            last = exc
+    raise DailyQuotaError(
+        "every vision model in the cascade is out of daily free-tier quota; "
+        "re-run tomorrow (the manifest resumes) or add billing"
+    ) from last
+
+
+def transcribe(
+    images: list[Path],
+    start_page: int = 1,
+    on_batch: Callable[[list[PageText]], None] | None = None,
+) -> list[PageText]:
+    """Transcribe page images in batches, throttled for the free tier.
+
+    on_batch receives the accumulated results after every batch. The caller
+    persists them, so a daily-quota cut mid-document loses at most one batch of
+    work instead of the whole document — with a 20-requests/day model, losing a
+    290-page textbook to a crash on request 19 is the difference between
+    finishing this week and never finishing.
+    """
     results: list[PageText] = []
     batch_size = max(1, CONFIG.pages_per_request)
 
@@ -154,6 +218,9 @@ def transcribe(images: list[Path], start_page: int = 1) -> list[PageText]:
                     has_japanese=bool(page.get("has_japanese")),
                 )
             )
+
+        if on_batch is not None:
+            on_batch(results)
 
         if offset + batch_size < len(images) and CONFIG.vision_throttle > 0:
             time.sleep(CONFIG.vision_throttle)

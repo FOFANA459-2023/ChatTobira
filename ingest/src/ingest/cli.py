@@ -22,7 +22,7 @@ from .config import CONFIG
 from .discover import SourceDoc, discover
 from .embed import embed_documents
 from .manifest import Manifest
-from .transcribe import PageText, transcribe
+from .transcribe import DailyQuotaError, PageText, transcribe
 
 app = typer.Typer(add_completion=False, help="ChatTobira ingestion pipeline")
 console = Console()
@@ -34,6 +34,17 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
 
 def _text_path(doc: SourceDoc) -> Path:
     return CONFIG.text_dir / f"{doc.content_sha[:12]}.json"
+
+
+def _partial_path(doc: SourceDoc) -> Path:
+    return CONFIG.text_dir / f"{doc.content_sha[:12]}.partial.json"
+
+
+def _save_pages(path: Path, pages: list[PageText]) -> None:
+    path.write_text(
+        json.dumps([p.__dict__ for p in pages], ensure_ascii=False, indent=1),
+        "utf-8",
+    )
 
 
 def _load_pages(doc: SourceDoc) -> list[PageText] | None:
@@ -73,6 +84,9 @@ def cmd_transcribe(
     CONFIG.ensure_dirs()
     manifest = Manifest()
     docs = [d for d in discover() if not only or only.lower() in d.path.lower()]
+    # Smallest sources first: on a quota-capped day this completes dozens of
+    # handouts instead of burning the whole budget partway into one textbook.
+    docs.sort(key=lambda d: d.size_bytes)
     if limit:
         docs = docs[:limit]
 
@@ -85,13 +99,33 @@ def cmd_transcribe(
         pdf = render.to_pdf(doc)
         images = render.render_pages(doc, pdf)
 
-        console.print(f"[cyan]vision[/cyan]  {doc.path} ({len(images)} pages)")
-        pages = transcribe(images)
+        # Resume a partially transcribed document from its checkpoint file:
+        # with a 20-requests/day model, pages already paid for must never be
+        # paid for twice.
+        partial = _partial_path(doc)
+        done_pages: list[PageText] = []
+        if not force and partial.exists():
+            done_pages = [PageText(**p) for p in json.loads(partial.read_text("utf-8"))]
+            console.print(f"[dim]resume[/dim]  {doc.path}: {len(done_pages)} pages checkpointed")
 
-        _text_path(doc).write_text(
-            json.dumps([p.__dict__ for p in pages], ensure_ascii=False, indent=1),
-            "utf-8",
-        )
+        remaining = images[len(done_pages) :]
+        console.print(f"[cyan]vision[/cyan]  {doc.path} ({len(remaining)}/{len(images)} pages)")
+
+        try:
+            pages = done_pages + transcribe(
+                remaining,
+                start_page=len(done_pages) + 1,
+                on_batch=lambda batch, p=partial, d=done_pages: _save_pages(p, d + batch),
+            )
+        except DailyQuotaError:
+            console.print(
+                "[red]daily quota exhausted on every vision model[/red] — progress "
+                "is checkpointed; re-run this command tomorrow to continue."
+            )
+            raise typer.Exit(75)  # EX_TEMPFAIL
+
+        _save_pages(_text_path(doc), pages)
+        partial.unlink(missing_ok=True)
         manifest.mark("transcribe", doc.path, doc.content_sha, pages=len(pages))
 
         japanese = sum(1 for p in pages if p.has_japanese)
