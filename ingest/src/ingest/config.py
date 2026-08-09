@@ -57,19 +57,21 @@ class Config:
 
     @property
     def google_api_keys(self) -> list[str]:
-        """Every Google key configured, in order.
+        """Every Google key configured, in order; empty when none is set.
 
         Free-tier daily buckets are per Cloud project, not per account, so a
         key from a second project genuinely doubles the pages transcribable in
         a day rather than just reshuffling the same quota. Set GOOGLE_API_KEY_2
         (through _5) to use them; one key remains perfectly valid.
+
+        Deliberately does not raise on an empty result: planning which
+        key/model pairs exist must work without credentials, or tests and
+        dry runs cannot inspect the cascade. The missing-key error belongs at
+        the call site, where it can say what was actually attempted.
         """
         keys = [os.getenv("GOOGLE_API_KEY", "").strip()]
         keys += [os.getenv(f"GOOGLE_API_KEY_{n}", "").strip() for n in range(2, 6)]
-        found = [k for k in keys if k]
-        if not found:
-            raise RuntimeError("GOOGLE_API_KEY is not set. Copy .env.example to .env and fill it in.")
-        return found
+        return [k for k in keys if k]
 
     @property
     def database_url(self) -> str:

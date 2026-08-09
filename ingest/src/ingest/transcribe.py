@@ -140,9 +140,7 @@ def _cascade() -> list[tuple[int, str]]:
     preferred = CONFIG.vision_model
     models = [preferred] + [m for m in MODEL_CASCADE if m != preferred]
     key_count = len(CONFIG.google_api_keys)
-    return [
-        (k, m) for m in models for k in range(key_count) if (k, m) not in _exhausted
-    ]
+    return [(k, m) for m in models for k in range(key_count) if (k, m) not in _exhausted]
 
 
 def _is_daily_quota(message: str) -> bool:
@@ -206,6 +204,8 @@ def _call(images: list[Path], count: int) -> list[dict]:
     """Try each key/model pair until one has daily budget left."""
     last: Exception | None = None
     keys = CONFIG.google_api_keys
+    if not keys:
+        raise RuntimeError("GOOGLE_API_KEY is not set. Copy .env.example to .env and fill it in.")
     for key_index, model in _cascade():
         try:
             return _call_model(keys[key_index], model, images, count)

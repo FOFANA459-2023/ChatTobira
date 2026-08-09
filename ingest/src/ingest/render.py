@@ -92,14 +92,28 @@ def page_count(pdf_path: Path) -> int:
         return pdf.page_count
 
 
-# A scanned blank verso is not pure white — it carries scanner speckle, paper
-# texture, and show-through from the printed side — so "any dark pixel at all"
-# would never fire. These thresholds were calibrated against the real rendered
-# pages of Foundation 1 & 2; see `ingest blank-check`, which reprints the
-# measurement for any document.
+# Calibration. Measured ink ratios, ~458k sampled pixels per A4 page:
+#
+#   truly blank page          0.0000000        0 dark px
+#   page number alone         0.0001280       58
+#   one short line of text    0.0009744      447
+#   section title alone       0.0019324      886
+#   lightest real page in     0.0193          -   (Foundation 1 & 2, 290 pages)
+#     a scanned textbook
+#
+# The threshold sits at 0.00005 — below the sparsest page that still carries
+# information, above nothing. An earlier value of 0.0015 looked safe against
+# the scanned textbook, whose lightest page measures 0.019, but would have
+# silently deleted a page holding a single line of text. The gap between
+# "blank" and "sparse" is far narrower than the gap between "blank" and
+# "typical", so calibrate against sparse pages, never against a dense corpus.
+#
+# The asymmetry is deliberate: a page wrongly called blank loses textbook
+# content permanently and invisibly, while a blank wrongly kept costs one
+# request. When in doubt, transcribe.
 BLANK_SHRINK = 2  # halve twice: 200 DPI -> ~50 DPI, 16x fewer bytes to scan
 BLANK_DARK_LEVEL = 200  # 0=black, 255=white; below this counts as ink
-BLANK_INK_RATIO = 0.0015  # inked fraction under which the page carries nothing
+BLANK_INK_RATIO = 0.00005  # ~23 dark pixels; fewer than that is an empty page
 
 
 def ink_ratio(image: Path) -> float:
