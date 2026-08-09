@@ -9,9 +9,10 @@ test("unauthenticated visitor gets the trial chat, not a redirect", async ({
   await expect(page.getByText(/3 questions free/)).toBeVisible();
 });
 
-test("quiz still requires sign-in", async ({ page }) => {
+test("quiz page is open to trial visitors, like the chat", async ({ page }) => {
   await page.goto("/quiz");
-  await expect(page).toHaveURL(/\/login/);
+  await expect(page).toHaveURL(/\/quiz/);
+  await expect(page.getByText(/1 practice test free/)).toBeVisible();
 });
 
 test("login page explains the invite-only policy", async ({ page }) => {
@@ -51,11 +52,35 @@ test("chat API admits anonymous trial requests past the auth gate", async ({
   expect(response.status()).not.toBe(401);
 });
 
-test("quiz API rejects unauthenticated requests", async ({ request }) => {
+test("quiz API admits an anonymous visitor's first test", async ({ request }) => {
+  // Not 401: the quiz trial cookie meters anonymous use inside the route, the
+  // same way the chat trial does. (No model keys in this environment, so the
+  // request fails later — the point is the gate, not the paper.)
   const response = await request.post("/api/quiz", {
-    data: { scope: {}, count: 5 },
+    data: { documentId: 1, kind: "grammar", count: 9 },
+  });
+  expect(response.status()).not.toBe(401);
+});
+
+test("quiz API requires sign-in once the free test is spent", async ({ request }) => {
+  // Its own test so the cookie jar starts empty and this header is the only
+  // trial state in play.
+  const response = await request.post("/api/quiz", {
+    headers: { cookie: "tobira_quiz_trial=1" },
+    data: { documentId: 1, kind: "grammar", count: 9 },
   });
   expect(response.status()).toBe(401);
+  expect(await response.json()).toMatchObject({ error: "trial_exhausted" });
+});
+
+test("the chat trial does not consume the quiz trial", async ({ request }) => {
+  // Separate cookies on purpose: sampling one part of the product must not
+  // silently spend the other.
+  const response = await request.post("/api/quiz", {
+    headers: { cookie: "tobira_trial=3" },
+    data: { documentId: 1, kind: "grammar", count: 9 },
+  });
+  expect(response.status()).not.toBe(401);
 });
 
 test("transcribe API rejects unauthenticated requests", async ({ request }) => {
