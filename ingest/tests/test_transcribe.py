@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 import ingest.transcribe as transcribe_module
 from ingest.config import CONFIG
-from ingest.transcribe import _cascade, _is_daily_quota
+from ingest.transcribe import (
+    OutputTruncatedError,
+    _cascade,
+    _is_daily_quota,
+    _transcribe_one,
+)
 
 
 def _use_keys(monkeypatch, *keys: str) -> None:
@@ -86,3 +95,85 @@ def test_planning_the_cascade_needs_no_credentials(monkeypatch):
     _use_keys(monkeypatch)
     monkeypatch.setattr(transcribe_module, "_exhausted", set())
     assert _cascade() == []
+
+
+# --- surviving a page the model cannot finish --------------------------------
+#
+# Observed live on the Foundation 1 & 2 table of contents: dot leaders sent the
+# model into emitting U+2026 forever, 65,520 tokens, truncated mid-escape. It
+# crashed the run at page 7 and forfeited the other 283.
+
+PAGE = Path("0007.png")
+GOOD = {"markdown": "# 目次", "has_japanese": True}
+
+
+def _calls_returning(*outcomes):
+    """Stub _call that yields each outcome in turn; exceptions are raised."""
+    seen: list[float] = []
+
+    def call(images, count, temperature=0.0):
+        seen.append(temperature)
+        outcome = outcomes[len(seen) - 1]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return [outcome]
+
+    call.temperatures = seen
+    return call
+
+
+def test_page_that_transcribes_first_time_costs_one_request(monkeypatch):
+    call = _calls_returning(GOOD)
+    monkeypatch.setattr(transcribe_module, "_call", call)
+    warnings: list[str] = []
+
+    assert _transcribe_one(PAGE, warnings.append) == GOOD
+    assert call.temperatures == [0.0]
+    assert warnings == []
+
+
+def test_runaway_page_is_retried_with_a_temperature_that_breaks_the_loop(monkeypatch):
+    call = _calls_returning(OutputTruncatedError("ran away"), GOOD)
+    monkeypatch.setattr(transcribe_module, "_call", call)
+    warnings: list[str] = []
+
+    assert _transcribe_one(PAGE, warnings.append) == GOOD
+    # Greedy decoding is the failure; the retry must not also be greedy.
+    assert call.temperatures[0] == 0.0
+    assert call.temperatures[1] > 0.0
+    assert len(warnings) == 1
+    assert "recovered" in warnings[0]
+
+
+def test_page_no_model_can_finish_is_recorded_empty_not_raised(monkeypatch):
+    """The whole point: one unreadable page must not cost the 283 after it."""
+    call = _calls_returning(
+        OutputTruncatedError("ran away"), OutputTruncatedError("ran away again")
+    )
+    monkeypatch.setattr(transcribe_module, "_call", call)
+    warnings: list[str] = []
+
+    assert _transcribe_one(PAGE, warnings.append) == {}
+    assert len(warnings) == 1
+    assert "skipped" in warnings[0]
+
+
+def test_recovery_works_without_a_warning_callback(monkeypatch):
+    monkeypatch.setattr(
+        transcribe_module,
+        "_call",
+        _calls_returning(OutputTruncatedError("x"), OutputTruncatedError("y")),
+    )
+    assert _transcribe_one(PAGE, None) == {}
+
+
+def test_quota_errors_still_propagate(monkeypatch):
+    """Only truncation is survivable. An exhausted quota must still stop the
+    run so the checkpoint is kept and the work resumes tomorrow."""
+    monkeypatch.setattr(
+        transcribe_module,
+        "_call",
+        _calls_returning(transcribe_module.DailyQuotaError("spent")),
+    )
+    with pytest.raises(transcribe_module.DailyQuotaError):
+        _transcribe_one(PAGE, None)

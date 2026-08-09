@@ -40,6 +40,13 @@ they appear.
 - Preserve the heading structure of the page with Markdown headings.
 - Describe a purely pictorial element in square brackets, e.g. [写真: 家族の絵]. \
 Do not describe decorative layout.
+- Dot leaders — the runs of …… or ..... that join a heading to its page number \
+in a table of contents — are decoration, not text. Write the entry and its \
+number separated by a single space, e.g. "Topic 1 15". Never reproduce the run \
+of dots.
+- Never repeat any character more than three times in a row. A page is at most \
+a few thousand characters; if you find yourself emitting the same character \
+again and again, stop and move to the next line.
 - book_page: the page number PRINTED on the page itself, usually in a corner. \
 Return it as a string exactly as printed. If no number is printed, return null. \
 Never guess it and never derive it from the page's position in the file — it is \
@@ -126,6 +133,10 @@ MODEL_CASCADE = [
     "gemini-3.1-flash-lite",
 ]
 
+# Retry temperature for a page that ran away at temperature 0. High enough to
+# break a repetition loop, low enough that the transcription stays faithful.
+REPETITION_BREAK_TEMPERATURE = 0.35
+
 # (key index, model) pairs whose daily bucket is spent for this run.
 _exhausted: set[tuple[int, str]] = set()
 
@@ -153,7 +164,13 @@ def _is_daily_quota(message: str) -> bool:
     stop=stop_after_attempt(4),
     reraise=True,
 )
-def _call_model(api_key: str, model: str, images: list[Path], count: int) -> list[dict]:
+def _call_model(
+    api_key: str,
+    model: str,
+    images: list[Path],
+    count: int,
+    temperature: float = 0.0,
+) -> list[dict]:
     from google.genai import types
 
     parts: list = [PROMPT % count]
@@ -167,8 +184,10 @@ def _call_model(api_key: str, model: str, images: list[Path], count: int) -> lis
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=RESPONSE_SCHEMA,
-                # Transcription, not composition. Any creativity here is an error.
-                temperature=0.0,
+                # Transcription, not composition. Any creativity here is an
+                # error — but see REPETITION_BREAK_TEMPERATURE for the one case
+                # where greedy decoding is itself the failure.
+                temperature=temperature,
                 # Dense scanned pages produce very long markdown; the default
                 # budget truncated a 4-page batch mid-string.
                 max_output_tokens=65536,
@@ -200,20 +219,30 @@ def _call_model(api_key: str, model: str, images: list[Path], count: int) -> lis
     return pages
 
 
-def _call(images: list[Path], count: int) -> list[dict]:
+def _call(images: list[Path], count: int, temperature: float = 0.0) -> list[dict]:
     """Try each key/model pair until one has daily budget left."""
     last: Exception | None = None
+    truncated: OutputTruncatedError | None = None
     keys = CONFIG.google_api_keys
     if not keys:
         raise RuntimeError("GOOGLE_API_KEY is not set. Copy .env.example to .env and fill it in.")
     for key_index, model in _cascade():
         try:
-            return _call_model(keys[key_index], model, images, count)
+            return _call_model(keys[key_index], model, images, count, temperature)
         except DailyQuotaError as exc:
             _exhausted.add((key_index, model))
             last = exc
         except TransientVisionError as exc:
             last = exc
+        except OutputTruncatedError as exc:
+            # Not fatal to the cascade: a repetition loop is a property of one
+            # model's decoding, so the next model down may transcribe the same
+            # page cleanly. Remembered and re-raised below so the caller can
+            # still fall back to one page per request.
+            truncated = exc
+            last = exc
+    if truncated is not None:
+        raise truncated
     raise DailyQuotaError(
         "every vision model on every configured key is out of daily free-tier "
         "quota; re-run tomorrow (the manifest resumes), add GOOGLE_API_KEY_2 "
@@ -221,10 +250,43 @@ def _call(images: list[Path], count: int) -> list[dict]:
     ) from last
 
 
+def _transcribe_one(image: Path, on_warning: Callable[[str], None] | None) -> dict:
+    """Transcribe a single page, surviving a page that no model can finish.
+
+    Observed live on the Foundation 1 & 2 table of contents: the page is a list
+    of headings joined to page numbers by long runs of "……", and the model fell
+    into emitting U+2026 forever — 65,520 output tokens, 32% of them one
+    character, truncated mid-escape. The prompt now forbids reproducing dot
+    leaders, but no prompt makes repetition impossible, so this stays defensive.
+    Returning an empty page loses one page; raising loses every page after it.
+    """
+    try:
+        return _call([image], 1)[0]
+    except OutputTruncatedError:
+        pass
+
+    # Greedy decoding is what gets stuck: at temperature 0 the next token after
+    # a run of dots is always another dot. A little randomness breaks the loop
+    # without licensing the model to invent text.
+    try:
+        page = _call([image], 1, temperature=REPETITION_BREAK_TEMPERATURE)[0]
+        if on_warning is not None:
+            on_warning(f"{image.name}: recovered after a repetition loop")
+        return page
+    except OutputTruncatedError:
+        if on_warning is not None:
+            on_warning(
+                f"{image.name}: no model could transcribe this page without "
+                "running away; recorded as empty and skipped"
+            )
+        return {}
+
+
 def transcribe(
     images: list[Path],
     start_page: int = 1,
     on_batch: Callable[[list[PageText]], None] | None = None,
+    on_warning: Callable[[str], None] | None = None,
 ) -> list[PageText]:
     """Transcribe page images in batches, throttled for the free tier.
 
@@ -233,6 +295,10 @@ def transcribe(
     work instead of the whole document — with a 20-requests/day model, losing a
     290-page textbook to a crash on request 19 is the difference between
     finishing this week and never finishing.
+
+    on_warning reports pages that could not be transcribed. They are recorded
+    empty rather than raised, for the same reason: one unreadable page must not
+    cost the 280 that follow it.
     """
     results: list[PageText] = []
     batch_size = max(1, CONFIG.pages_per_request)
@@ -252,10 +318,10 @@ def transcribe(
                 pages = _call(live_images, len(live_images))
             except OutputTruncatedError:
                 # A dense batch overflowed the output budget even at 64k tokens.
-                # One page per request always fits.
+                # Retry page by page, so one bad page costs only itself.
                 pages = []
                 for image in live_images:
-                    pages.extend(_call([image], 1))
+                    pages.append(_transcribe_one(image, on_warning))
                     if CONFIG.vision_throttle > 0:
                         time.sleep(CONFIG.vision_throttle)
             transcribed = {index: page for (index, _), page in zip(live, pages)}

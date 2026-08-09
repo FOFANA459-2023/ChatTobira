@@ -119,11 +119,17 @@ def cmd_transcribe(
         remaining = images[len(done_pages) :]
         console.print(f"[cyan]vision[/cyan]  {doc.path} ({len(remaining)}/{len(images)} pages)")
 
+        unreadable: list[str] = []
+
         try:
             pages = done_pages + transcribe(
                 remaining,
                 start_page=len(done_pages) + 1,
                 on_batch=lambda batch, p=partial, d=done_pages: _save_pages(p, d + batch),
+                on_warning=lambda message, seen=unreadable: (
+                    seen.append(message),
+                    console.print(f"[yellow]warn[/yellow]    {message}"),
+                )[0],
             )
         except DailyQuotaError:
             console.print(
@@ -140,6 +146,11 @@ def cmd_transcribe(
         console.print(
             f"[green]done[/green]    {doc.path}: {japanese}/{len(pages)} pages with Japanese"
         )
+        if unreadable:
+            console.print(
+                f"[yellow]note[/yellow]    {len(unreadable)} page(s) could not be "
+                "transcribed and were stored empty; re-run with --force to retry them"
+            )
 
 
 @app.command("push")

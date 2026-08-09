@@ -69,13 +69,33 @@ export default function AdminPage() {
         password,
       });
       if (error) {
-        setSignInError("That password is not right. Please try again.");
+        // Reporting every failure as "wrong password" hid a real lockout once:
+        // a rate limit, an unconfirmed email, and a misconfigured deployment
+        // all look identical from here, and none of them are fixed by typing
+        // the password again. Name what actually happened.
+        if (error.status === 429) {
+          setSignInError(
+            "Too many sign-in attempts. Supabase is rate-limiting this account — wait a few minutes and try again.",
+          );
+        } else if (/email not confirmed/i.test(error.message)) {
+          setSignInError(
+            "This account's email is not confirmed, so password sign-in is refused.",
+          );
+        } else if (/invalid login credentials/i.test(error.message)) {
+          setSignInError("That password is not right. Please try again.");
+        } else {
+          setSignInError(`Sign-in failed: ${error.message}`);
+        }
       } else {
         setPassword("");
         setSession("admin");
       }
-    } catch {
-      setSignInError("Could not sign in. Please try again in a moment.");
+    } catch (error) {
+      setSignInError(
+        `Could not reach the sign-in service: ${
+          error instanceof Error ? error.message : "unknown error"
+        }`,
+      );
     } finally {
       setBusy(false);
     }
