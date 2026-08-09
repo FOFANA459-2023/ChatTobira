@@ -5,7 +5,7 @@ import { generateObject } from "ai";
 import { z } from "zod";
 
 import { isProviderDead, noteProviderFailure } from "@/lib/providers";
-import { QuizSchema, rankChunksByFocus } from "@/lib/quiz";
+import { focusTokens, QuizSchema, rankChunksByFocus } from "@/lib/quiz";
 import { createClient } from "@/lib/supabase/server";
 import { serviceClient } from "@/lib/supabase/service";
 import { trialCookie, trialUsed, TRIALS } from "@/lib/trial";
@@ -33,7 +33,15 @@ provided course material, in the format of the course's own test papers. Rules:
   the polite Japanese instruction line exactly as it would appear on the paper,
   e.g. 「（　）に入る適切なことばを選んでください。」 — and instruction_en, a
   short English translation of that instruction.
-- Japanese in Japanese script with furigana as 漢字（かんじ） on first use.
+- Japanese in Japanese script. Furigana (written 漢字（かんじ）) follows the
+  scope rule in the request: students are expected to READ the kanji they have
+  already been taught, so kanji taught at or before the tested scope carry NO
+  furigana; only kanji from beyond the scope get furigana. Never put furigana
+  on a word whose reading or writing is itself being tested.
+- true_false: the question is ONE statement about the section's passage, and
+  the answer is exactly ○ (the statement matches the passage) or × (it does
+  not). Mix ○ and × answers; × statements must be plausibly wrong, contradicted
+  by the passage, not absurd.
 - multiple_choice: exactly 4 choices, one correct, distractors that reflect
   real learner confusions (wrong particle, wrong conjugation, wrong register,
   similar-looking kanji, similar-sounding readings).
@@ -68,7 +76,7 @@ provided course material, in the format of the course's own test papers. Rules:
 // Section plans mirror the papers students actually sit: the 文法復習シート
 // for grammar, the JLPT-style 文字・語彙 sections for kanji.
 const KIND_SPEC: Record<"grammar" | "kanji", string> = {
-  grammar: `Structure the paper as exactly 3 sections, in this order:
+  grammar: `Structure the paper as exactly 4 sections, in this order:
 Section 1 — instruction_ja 「（　）に入る適切なことばを選んでください。」:
   multiple_choice. Short sentences or two-line dialogues with （　）; choices
   are particles, question words, or forms drilled in the material.
@@ -80,7 +88,14 @@ Section 2 — instruction_ja 「＿＿のことばを正しい形にしてくだ
   itself is what changes.
 Section 3 — instruction_ja 「例のように文を完成させてください。」:
   fill_blank. Complete the sentence using the sentence pattern being drilled;
-  the question states what to do with the given fragment.`,
+  the question states what to do with the given fragment.
+Section 4 — instruction_ja 「つぎの文章を読んで、内容と合っていれば○、違っていれば×を選んでください。」:
+  READING. Write this section's "passage": a short original text of 150–250
+  characters in the style of the reading passages on the course's past papers
+  (a student's diary, a letter, a note about daily life or campus life), built
+  from the vocabulary and grammar in the excerpts. Then exactly 5 true_false
+  items: each question is one statement about the passage, answer ○ or ×.
+  The passage field belongs to the section, not to the items.`,
   kanji: `Structure the paper as exactly 3 sections, in this order:
 Section 1 — instruction_ja 「＿＿のことばの読み方として、いちばんいいものを選んでください。」:
   multiple_choice. A sentence with one kanji word marked 【 】; the choices are
@@ -267,14 +282,34 @@ export async function POST(request: Request) {
   // student's own book or they cannot follow them.
   const division = /intermediate/i.test(doc.title) ? "Lesson" : "Topic";
 
+  // Furigana scope: a student testing from division N has been taught the
+  // kanji of divisions 1..N, so those carry no reading aids. The scope comes
+  // from the focus when one names a division; a whole-book test treats the
+  // book's own kanji as taught.
+  const focusDivisions = focusTokens(focus ?? "")
+    .filter((token) => /^t\d{1,2}$/.test(token))
+    .map((token) => Number(token.slice(1)));
+  const scopeDivision = focusDivisions.length > 0 ? Math.max(...focusDivisions) : null;
+  const furiganaRule = scopeDivision
+    ? `Furigana scope: this test is scoped to ${division} ${scopeDivision}. Write NO
+furigana for kanji taught in ${division} 1 through ${division} ${scopeDivision} —
+students are expected to read them. Write furigana 漢字（かんじ） only for kanji
+from beyond ${division} ${scopeDivision}.`
+    : `Furigana scope: this test covers the whole book, so treat every kanji that
+appears in the excerpts as already taught and write NO furigana for it. Write
+furigana 漢字（かんじ） only for kanji from outside this textbook.`;
+
+  const reading = kind === "grammar" ? 5 : 0;
   const perSection = Math.round(count / 3);
   const prompt = `Create a practice test from the textbook excerpts below, all
 from "${doc.title}" — the book the student owns. The paper's format is modelled
 on the course's past test papers, but every question must be drawn from these
 excerpts. This textbook divides its content into ${division}s: write every
 review reference as "${division} N — concept (p. NN)", using the ${division}
-numbers and page numbers as printed in the excerpts. Exactly ${count} questions
-in total — ${perSection} in each of the 3 sections. Focus on ${
+numbers and page numbers as printed in the excerpts.
+${furiganaRule}
+Exactly ${count + reading} questions in total — ${perSection} in each of the
+3 ${kind === "grammar" ? "non-reading sections, plus exactly 5 in the reading section" : "sections"}. Focus on ${
     kind === "kanji"
       ? "the kanji and vocabulary that appear in these excerpts"
       : "the grammar patterns drilled in these excerpts"
@@ -332,9 +367,15 @@ vocabulary — while staying inside the same material:\n${avoid
       });
       // A paper that is schema-valid but far too short is still unusable —
       // seen live: 1 item back from a 9-item request. Let the next tier try.
+      const expected = count + reading;
       const produced = object.sections.reduce((n, s) => n + s.items.length, 0);
-      if (produced < Math.ceil(count * 0.6)) {
-        throw new Error(`paper too short: ${produced} items for count=${count}`);
+      if (produced < Math.ceil(expected * 0.6)) {
+        throw new Error(`paper too short: ${produced} items for count=${expected}`);
+      }
+      // A grammar paper without its reading passage is missing a section the
+      // real papers always have.
+      if (reading > 0 && !object.sections.some((s) => s.passage && s.passage.length >= 50)) {
+        throw new Error("paper is missing the reading passage");
       }
       return Response.json(object, {
         headers: setCookie ? { "Set-Cookie": setCookie } : undefined,

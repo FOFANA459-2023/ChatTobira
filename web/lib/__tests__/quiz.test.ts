@@ -68,6 +68,22 @@ describe("isCorrect", () => {
     expect(isCorrect(item("見える"), "みえる")).toBe(false);
   });
 
+  it("grades ○× statements across Unicode spellings of the marks", () => {
+    const statement: QuizItem = {
+      type: "true_false",
+      question: "リサさんは まいにち としょかんへ 行きます。",
+      answer: "○",
+      explanation: "e",
+      review: "Topic 4 — daily routines (p. 45)",
+    };
+    expect(isCorrect(statement, "○")).toBe(true);
+    // The model sometimes answers with the large circle or a different cross.
+    expect(isCorrect({ ...statement, answer: "◯" }, "○")).toBe(true);
+    expect(isCorrect({ ...statement, answer: "×" }, "✕")).toBe(true);
+    expect(isCorrect(statement, "×")).toBe(false);
+    expect(isCorrect(statement, "")).toBe(false);
+  });
+
   it("accepts romaji typed on an English keyboard", () => {
     expect(isCorrect(item("食べました", "たべました"), "tabemashita")).toBe(true);
     expect(isCorrect(item("で"), "de")).toBe(true);

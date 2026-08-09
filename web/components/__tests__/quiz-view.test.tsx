@@ -44,6 +44,20 @@ const PAPER: Quiz = {
         },
       ],
     },
+    {
+      instruction_ja: "つぎの文章を読んで、内容と合っていれば○、違っていれば×を選んでください。",
+      instruction_en: "Read the passage and mark each statement ○ or ×.",
+      passage: "わたしは まいあさ 七時に おきます。あさごはんを 食べてから、大学へ 行きます。",
+      items: [
+        {
+          type: "true_false",
+          question: "この人は あさごはんを 食べません。",
+          answer: "×",
+          explanation: "The passage says breakfast comes before leaving.",
+          review: "Topic 4 — daily routines (p. 45)",
+        },
+      ],
+    },
   ],
 };
 
@@ -95,11 +109,14 @@ describe("QuizView", () => {
     expect(
       screen.getByText("Particles and polite past-tense forms from Topic 6."),
     ).toBeInTheDocument();
-    // 問題I and 問題II — the I-prefix regex matches both headers.
-    expect(screen.getAllByText(/問題I/)).toHaveLength(2);
-    expect(screen.getByText(/問題II/)).toBeInTheDocument();
+    // 問題I, 問題II, 問題III — the I-prefix regex matches all three headers.
+    expect(screen.getAllByText(/問題I/)).toHaveLength(3);
+    expect(screen.getByText(/問題II\b/)).toBeInTheDocument();
     expect(screen.getByText(/適切なことばを選んでください/)).toBeInTheDocument();
     expect(screen.getByText("Choose the word that fits the blank.")).toBeInTheDocument();
+
+    // The reading section renders its passage above the ○× statements.
+    expect(screen.getByText(/あさごはんを 食べてから、大学へ 行きます/)).toBeInTheDocument();
 
     const body = JSON.parse(String(fetchMock.mock.calls.at(-1)?.[1]?.body));
     expect(body.kind).toBe("grammar");
@@ -119,13 +136,16 @@ describe("QuizView", () => {
     fireEvent.change(screen.getByPlaceholderText("こたえ"), {
       target: { value: "食べた" },
     });
+    // Still one unanswered: the ○× statement locks checking too.
+    expect(check).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "×" }));
     expect(check).toBeEnabled();
     fireEvent.click(check);
 
     // Score, per-item marking, and the explanation for the miss.
-    await waitFor(() => expect(screen.getByText("1")).toBeInTheDocument());
-    expect(screen.getByText("/ 2")).toBeInTheDocument();
-    expect(screen.getByText(/50%/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("2")).toBeInTheDocument());
+    expect(screen.getByText("/ 3")).toBeInTheDocument();
+    expect(screen.getByText(/67%/)).toBeInTheDocument();
     expect(screen.getByText(/食べました（たべました）/)).toBeInTheDocument();
     expect(screen.getByText(/Past polite form/)).toBeInTheDocument();
 
@@ -145,10 +165,11 @@ describe("QuizView", () => {
       String(url).endsWith("/api/quiz/feedback"),
     );
     const feedbackBody = JSON.parse(String(feedbackCall?.[1]?.body));
-    expect(feedbackBody.score).toEqual({ correct: 1, total: 2 });
-    expect(feedbackBody.results).toHaveLength(2);
+    expect(feedbackBody.score).toEqual({ correct: 2, total: 3 });
+    expect(feedbackBody.results).toHaveLength(3);
     expect(feedbackBody.results[1].correct).toBe(false);
     expect(feedbackBody.results[1].review).toMatch(/Topic 6/);
+    expect(feedbackBody.results[2].correct).toBe(true);
 
     expect(screen.getByRole("button", { name: /Retake this test/ })).toBeInTheDocument();
     // Renamed from "New test, same settings" / "New test": both the score
@@ -186,10 +207,11 @@ describe("QuizView", () => {
     fireEvent.change(screen.getByPlaceholderText("こたえ"), {
       target: { value: "tabemashita" },
     });
+    fireEvent.click(screen.getByRole("button", { name: "×" }));
     fireEvent.click(screen.getByRole("button", { name: /Check answers/ }));
 
-    // 2/2: the romaji answer graded as たべました.
-    await waitFor(() => expect(screen.getByText("2")).toBeInTheDocument());
+    // 3/3: the romaji answer graded as たべました.
+    await waitFor(() => expect(screen.getByText("3")).toBeInTheDocument());
     expect(screen.getByText(/100%/)).toBeInTheDocument();
     expect(screen.getByText(/Nothing to review from this paper/)).toBeInTheDocument();
   });

@@ -1,8 +1,10 @@
 import { z } from "zod";
 
-/** One generated test item. answer is authoritative; the client grades. */
+/** One generated test item. answer is authoritative; the client grades.
+ * true_false is the reading section's ○×: question is a statement about the
+ * section's passage and answer is exactly ○ or ×. */
 export const QuizItemSchema = z.object({
-  type: z.enum(["multiple_choice", "fill_blank"]),
+  type: z.enum(["multiple_choice", "fill_blank", "true_false"]),
   question: z.string().min(1),
   // Japanese text of the sentence being drilled, when distinct from question.
   sentence: z.string().optional(),
@@ -25,6 +27,9 @@ export const QuizItemSchema = z.object({
 export const QuizSectionSchema = z.object({
   instruction_ja: z.string().min(1),
   instruction_en: z.string().min(1),
+  // Reading sections carry the short passage their ○× statements are about,
+  // rendered above the items in the style of the printed papers.
+  passage: z.string().optional(),
   items: z.array(QuizItemSchema).min(1).max(8),
 });
 
@@ -176,7 +181,17 @@ export function romajiToHiragana(input: string): string | null {
  * keyboard (converted to hiragana before comparing). Without answer_kana the
  * exact form is required — the reading of a kanji answer cannot be inferred
  * client-side, and the UI shows the expected answer on mismatch. */
+/** ○ and × each have several Unicode spellings, and the model does not always
+ * pick the one the buttons send. */
+function canonicalMark(text: string): string {
+  return text.trim().replace(/[○◯〇⭕]/g, "○").replace(/[×✕✖❌]/g, "×");
+}
+
 export function isCorrect(item: QuizItem, given: string): boolean {
+  if (item.type === "true_false") {
+    return canonicalMark(given) !== "" && canonicalMark(given) === canonicalMark(item.answer);
+  }
+
   const accepted = new Set(
     [item.answer, item.answer_kana]
       .filter((form): form is string => Boolean(form))

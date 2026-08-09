@@ -364,6 +364,14 @@ export function QuizView({
                       </p>
                     )}
                   </div>
+                  {section.passage && (
+                    <div
+                      lang="ja"
+                      className="mt-4 rounded-2xl border border-stone-200 bg-white p-5 text-base leading-8 shadow-sm"
+                    >
+                      <JaText text={section.passage} />
+                    </div>
+                  )}
                   <div className="mt-4 space-y-4">
                     {section.items.map((item, itemIndex) => {
                       const index = offset + itemIndex;
@@ -615,6 +623,33 @@ function QuizItemView({
             >
               <span className="mr-1.5 text-stone-400">{CIRCLED[choiceIndex] ?? ""}</span>
               <JaText text={choice} />
+            </button>
+          ))}
+        </div>
+      ) : item.type === "true_false" ? (
+        <div className="mt-3 flex gap-2">
+          {["○", "×"].map((mark) => (
+            <button
+              key={mark}
+              onClick={() => !checked && onAnswer(mark)}
+              aria-pressed={given === mark}
+              className={[
+                "w-20 rounded-lg border px-3 py-2 text-center text-lg font-medium",
+                given === mark
+                  ? "border-stone-900 bg-stone-900 text-white"
+                  : "border-stone-300 bg-white hover:bg-stone-100",
+                // isCorrect canonicalises ○/◯ and ×/✕ spellings, so the
+                // right button highlights even when the model picked a
+                // different codepoint than the buttons send.
+                checked && isCorrect(item, mark)
+                  ? "!border-green-600 !bg-green-50 !text-green-900"
+                  : "",
+                checked && given === mark && !isCorrect(item, mark)
+                  ? "!border-red-500 !bg-red-50 !text-red-900"
+                  : "",
+              ].join(" ")}
+            >
+              {mark}
             </button>
           ))}
         </div>
