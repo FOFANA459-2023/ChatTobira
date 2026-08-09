@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  chunksForLesson,
   flattenItems,
   focusTokens,
   isCorrect,
+  lessonByPage,
   normalizeAnswer,
   rankChunksByFocus,
   romajiToHiragana,
@@ -164,6 +166,92 @@ describe("splitUnderline", () => {
       "外国",
       "学生",
     ]);
+  });
+});
+
+describe("lessonByPage", () => {
+  const page = (pdf_page: number, content: string) => ({ pdf_page, content });
+
+  it("maps pages to lessons from running 第N課 headers, full-width digits included", () => {
+    const lessons = lessonByPage([
+      page(30, "はじめに"),
+      page(37, "第１課 わたしのこと。本文…"),
+      page(38, "練習問題"),
+      page(42, "第2課 まいにちの生活。"),
+      page(43, "会話練習"),
+    ]);
+    expect(lessons.get(30)).toBe(0); // front matter
+    expect(lessons.get(37)).toBe(1);
+    expect(lessons.get(38)).toBe(1); // carried forward between headers
+    expect(lessons.get(42)).toBe(2);
+    expect(lessons.get(43)).toBe(2);
+  });
+
+  it("ignores contents pages that list every lesson at once", () => {
+    const lessons = lessonByPage([
+      page(5, "目次 第1課… 第2課… 第3課… 第4課… 第5課…"),
+      page(33, "第1課 スタート"),
+    ]);
+    expect(lessons.get(5)).toBe(0);
+    expect(lessons.get(33)).toBe(1);
+  });
+
+  it("ignores appendix cross-references to earlier lessons", () => {
+    // Seen in the real book: answer pages around p.152 cite 第３課 long after
+    // Lesson 6 started. The lesson number only steps forward.
+    const lessons = lessonByPage([
+      page(33, "第1課"),
+      page(39, "第2課"),
+      page(63, "第3課"),
+      page(93, "第4課"),
+      page(111, "第5課"),
+      page(143, "第6課 ほんぶん"),
+      page(152, "解答 第3課の答え"),
+      page(167, "第7課 ほんぶん"),
+    ]);
+    expect(lessons.get(152)).toBe(6);
+    expect(lessons.get(167)).toBe(7);
+  });
+
+  it("tolerates one skipped header but not a wild jump", () => {
+    const lessons = lessonByPage([
+      page(10, "第1課 スタート"),
+      page(20, "第3課 ほんぶん"), // 2's header page was blank-skipped: allowed
+      page(30, "第9課 これは目次の残骸"), // +6: not believable, ignored
+    ]);
+    expect(lessons.get(20)).toBe(3);
+    expect(lessons.get(30)).toBe(3);
+  });
+});
+
+describe("chunksForLesson", () => {
+  const chunk = (pdf_page: number) => ({ pdf_page });
+  const lessons = new Map([
+    [1, 0],
+    [10, 1],
+    [11, 1],
+    [20, 2],
+    [21, 2],
+    [30, 3],
+  ]);
+  const chunks = [chunk(1), chunk(10), chunk(11), chunk(20), chunk(21), chunk(30)];
+
+  it("draws only from the scoped lesson when it can fill the sample", () => {
+    const picked = chunksForLesson(chunks, lessons, 2, 2);
+    expect(picked.map((c) => lessons.get(c.pdf_page))).toEqual([2, 2]);
+  });
+
+  it("pads a thin lesson from earlier lessons only — never later, never front matter", () => {
+    const picked = chunksForLesson(chunks, lessons, 2, 5);
+    const drawn = picked.map((c) => lessons.get(c.pdf_page));
+    expect(drawn.filter((l) => l === 2)).toHaveLength(2);
+    expect(drawn).not.toContain(3); // untaught material never appears
+    expect(drawn).not.toContain(0); // front matter never appears
+    expect(drawn.filter((l) => l === 1)).toHaveLength(2);
+  });
+
+  it("returns empty when the mapping has nothing for that lesson, so the caller can fall back", () => {
+    expect(chunksForLesson(chunks, lessons, 9, 5)).toEqual([]);
   });
 });
 

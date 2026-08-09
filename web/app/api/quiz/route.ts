@@ -5,7 +5,13 @@ import { generateObject } from "ai";
 import { z } from "zod";
 
 import { isProviderDead, noteProviderFailure } from "@/lib/providers";
-import { focusTokens, QuizSchema, rankChunksByFocus } from "@/lib/quiz";
+import {
+  chunksForLesson,
+  focusTokens,
+  lessonByPage,
+  QuizSchema,
+  rankChunksByFocus,
+} from "@/lib/quiz";
 import { createClient } from "@/lib/supabase/server";
 import { serviceClient } from "@/lib/supabase/service";
 import { trialCookie, trialUsed, TRIALS } from "@/lib/trial";
@@ -251,9 +257,10 @@ export async function POST(request: Request) {
   // can actually open.
   const { data: chunks, error } = await db
     .from("chunks")
-    .select("content, metadata, book_page")
+    .select("content, metadata, book_page, pdf_page")
     .eq("document_id", documentId)
-    .limit(200);
+    .order("pdf_page")
+    .limit(500);
   if (error) {
     return Response.json({ error: "retrieval_failed" }, { status: 502 });
   }
@@ -267,25 +274,46 @@ export async function POST(request: Request) {
     );
   }
 
+  type QuizChunk = {
+    content: string;
+    metadata: Record<string, unknown> | null;
+    book_page: string | null;
+    pdf_page: number;
+  };
+  const allChunks = chunks as QuizChunk[];
+
+  // Textbook chunks carry no lesson metadata, so the lesson each page belongs
+  // to is derived from the 第N課 headers in the text itself. A lesson-scoped
+  // test then draws from that lesson's actual pages — never a random sample
+  // of the book — with earlier lessons as filler only when the lesson is
+  // thin, and a fall back to text matching when the mapping finds nothing.
+  const lessons = lessonByPage(allChunks);
+  const scopeDivisionForContent = focusTokens(focus ?? "")
+    .filter((token) => /^t\d{1,2}$/.test(token))
+    .map((token) => Number(token.slice(1)));
+  const contentScope =
+    scopeDivisionForContent.length > 0 ? Math.max(...scopeDivisionForContent) : null;
+
+  let picked: QuizChunk[] =
+    contentScope !== null ? chunksForLesson(allChunks, lessons, contentScope, 10) : [];
+  if (picked.length === 0) {
+    picked = rankChunksByFocus(allChunks, focus ?? "", 10);
+  }
+
   // ~10 focused excerpts with tight character caps: quiz latency is dominated
   // by prompt size, and focused excerpts out-drill a loose pile. Excerpts are
-  // headed by the textbook name and printed page — never "Material N", which
-  // the model would echo into review references students cannot follow.
-  const sample = rankChunksByFocus(
-    chunks as {
-      content: string;
-      metadata: Record<string, unknown> | null;
-      book_page: string | null;
-    }[],
-    focus ?? "",
-    10,
-  )
+  // headed by the textbook name, its lesson, and printed page — never
+  // "Material N", which the model would echo into review references students
+  // cannot follow.
+  const sample = picked
     .map((c) => {
+      const lesson = lessons.get(c.pdf_page) ?? 0;
       const grammarPoints = Array.isArray(c.metadata?.["grammar_points"])
         ? (c.metadata["grammar_points"] as string[]).filter(Boolean).join("、")
         : "";
       const header = [
         `"${doc.title}"`,
+        lesson > 0 ? `${/intermediate/i.test(doc.title) ? "Lesson" : "Topic"} ${lesson}` : null,
         c.book_page ? `page ${c.book_page}` : null,
         grammarPoints ? `teaches: ${grammarPoints}` : null,
       ]
@@ -301,34 +329,32 @@ export async function POST(request: Request) {
   // student's own book or they cannot follow them.
   const division = /intermediate/i.test(doc.title) ? "Lesson" : "Topic";
 
-  // Furigana scope: a student testing from division N has been taught the
-  // kanji of divisions 1..N, so those carry no reading aids. The scope comes
-  // from the focus when one names a division; a whole-book test treats the
-  // book's own kanji as taught.
-  const focusDivisions = focusTokens(focus ?? "")
-    .filter((token) => /^t\d{1,2}$/.test(token))
-    .map((token) => Number(token.slice(1)));
-  const scopeDivision = focusDivisions.length > 0 ? Math.max(...focusDivisions) : null;
-  // The excerpts carry the textbook's own ruby as 漢字《かんじ》; without the
-  // explicit "do not copy" the model faithfully reproduces a reading on every
-  // kanji and the scope rule is drowned out.
+  // Furigana boundary: the tested lesson's own kanji are still being learned,
+  // so THEY carry readings too — only lessons strictly below the scope go
+  // bare. Scoped to Lesson 3: no furigana for Lessons 1–2, furigana on
+  // everything from Lesson 3 up. A whole-book test annotates every kanji
+  // word, the same rule with the whole book as the current material.
+  const scopeDivision = contentScope;
   const furiganaRule = `${
     scopeDivision
-      ? `Furigana scope: this test is scoped to ${division} ${scopeDivision}. Write NO
-furigana for kanji taught in ${division} 1 through ${division} ${scopeDivision} —
-students are expected to read them. Every kanji word from BEYOND ${division}
-${scopeDivision} MUST carry its reading, written 漢字（かんじ） immediately
-after the word — the app displays it as small hiragana above the kanji, and a
-beyond-scope word without its reading is unreadable to the student. This is
-required, not optional.`
-      : `Furigana scope: this test covers the whole book, so treat every kanji that
-appears in the excerpts as already taught and write NO furigana for it. Any
-kanji word from OUTSIDE this textbook MUST carry its reading, written
-漢字（かんじ） immediately after the word. This is required, not optional.`
+      ? `Furigana rule: this test is scoped to ${division} ${scopeDivision}.${
+          scopeDivision > 1
+            ? ` Write NO furigana
+for kanji taught in ${division} 1 through ${division} ${scopeDivision - 1} —
+students already read them.`
+            : ""
+        } EVERY kanji word from ${division} ${scopeDivision} itself
+or beyond MUST carry its reading, written 漢字（かんじ） immediately after the
+word — the app displays it as small hiragana above the kanji. This is
+required, not optional: a test with no furigana anywhere is wrong.`
+      : `Furigana rule: EVERY kanji word MUST carry its reading, written
+漢字（かんじ） immediately after the word — the app displays it as small
+hiragana above the kanji. This is required, not optional.`
   }
 Exception: never annotate a word whose reading or writing is itself being
-tested. The excerpts show the textbook's own readings as 漢字《かんじ》 — do
-NOT copy those wholesale; apply the scope rule above instead.`;
+tested (it would give the answer away). The excerpts show the textbook's own
+readings as 漢字《かんじ》 — rewrite them in the （ ） style, subject to the
+rule above.`;
 
   // Both papers end with the 5-question reading section, like the real ones.
   const reading = 5;

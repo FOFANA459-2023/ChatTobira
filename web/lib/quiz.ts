@@ -299,6 +299,75 @@ function shuffled<T>(items: T[]): T[] {
   return [...items].sort(() => Math.random() - 0.5);
 }
 
+// 第３課 / 第3課 / Lesson 3 — the lesson headers the textbooks actually print.
+const LESSON_MARK = /(?:第\s*([0-9０-９]{1,2})\s*課|Lesson\s+(\d{1,2})\b)/g;
+
+function markedLesson(match: RegExpMatchArray): number {
+  const digits = match[1] ?? match[2];
+  return Number(digits.replace(/[０-９]/g, (d) => String("０１２３４５６７８９".indexOf(d))));
+}
+
+/** Map each pdf page to the lesson it belongs to, from the 第N課 headers in
+ * the page text. Textbook chunks carry no lesson metadata, so this derived
+ * mapping is what makes "test me on Lesson 3" select Lesson 3's pages instead
+ * of sampling the whole book at random.
+ *
+ * Two kinds of noise are filtered by the monotonic walk: contents pages list
+ * every lesson at once (ignored — only pages naming exactly one lesson count),
+ * and appendix/answer pages cross-reference earlier lessons (ignored — the
+ * lesson number may only step forward, at most two at a time). Pages before
+ * the first header map to 0, front matter. */
+export function lessonByPage(
+  chunks: { content: string; pdf_page: number }[],
+): Map<number, number> {
+  const perPage = new Map<number, Set<number>>();
+  for (const chunk of chunks) {
+    const seen = perPage.get(chunk.pdf_page) ?? new Set<number>();
+    for (const match of chunk.content.matchAll(LESSON_MARK)) {
+      const lesson = markedLesson(match);
+      if (lesson >= 1 && lesson <= 30) seen.add(lesson);
+    }
+    perPage.set(chunk.pdf_page, seen);
+  }
+
+  const lessons = new Map<number, number>();
+  let current = 0;
+  for (const page of [...perPage.keys()].sort((a, b) => a - b)) {
+    const marks = perPage.get(page)!;
+    if (marks.size === 1) {
+      const [only] = [...marks];
+      if (only > current && only <= current + 2) current = only;
+    }
+    lessons.set(page, current);
+  }
+  return lessons;
+}
+
+/** Chunks for a lesson-scoped test: the scoped lesson's own pages first, then
+ * — only if the lesson is too thin to fill the sample — earlier lessons,
+ * nearest first. Never later lessons (untaught material) and never front
+ * matter. Empty when the mapping found nothing for that lesson, so the caller
+ * can fall back to text matching instead of serving the wrong lesson. */
+export function chunksForLesson<T extends { pdf_page: number }>(
+  chunks: T[],
+  lessons: Map<number, number>,
+  scope: number,
+  take: number,
+): T[] {
+  const lessonOf = (chunk: T) => lessons.get(chunk.pdf_page) ?? 0;
+  const inLesson = chunks.filter((c) => lessonOf(c) === scope);
+  if (inLesson.length === 0) return [];
+
+  const picked = shuffled(inLesson).slice(0, take);
+  if (picked.length < take) {
+    const earlier = shuffled(
+      chunks.filter((c) => lessonOf(c) > 0 && lessonOf(c) < scope),
+    ).sort((a, b) => lessonOf(b) - lessonOf(a));
+    picked.push(...earlier.slice(0, take - picked.length));
+  }
+  return picked;
+}
+
 /** Pick the chunks a focused quiz should be generated from.
  *
  * With no focus (or one that matches nothing) the whole book is fair game and
