@@ -127,6 +127,15 @@ class DailyQuotaError(RuntimeError):
     """
 
 
+class ModelRejectedError(RuntimeError):
+    """One model refuses the request's shape (400 INVALID_ARGUMENT).
+
+    Seen live: the lite models reject thinking_config outright. The request is
+    fine for other models, so the cascade retires this pair and moves on —
+    a 400 from one model must never end a 290-page run.
+    """
+
+
 class OutputTruncatedError(RuntimeError):
     """The response JSON was cut off by the output-token ceiling.
 
@@ -195,6 +204,32 @@ def _is_transient_transport(exc: BaseException) -> bool:
     stop=stop_after_attempt(4),
     reraise=True,
 )
+def _generation_config(model: str, temperature: float):
+    from google.genai import types
+
+    kwargs: dict = {
+        "response_mime_type": "application/json",
+        "response_schema": RESPONSE_SCHEMA,
+        # Transcription, not composition. Any creativity here is an error —
+        # but see REPETITION_BREAK_TEMPERATURE for the one case where greedy
+        # decoding is itself the failure.
+        "temperature": temperature,
+        # Dense scanned pages produce very long markdown; the default budget
+        # truncated a 4-page batch mid-string.
+        "max_output_tokens": 65536,
+    }
+    # Thinking tokens come out of max_output_tokens. Seen live: the model
+    # spent 62,915 tokens thinking about a table-of-contents page, leaving
+    # ~2.6k for JSON, which truncated mid-string even with a single image per
+    # request. Transcription needs no reasoning, so spend the whole budget on
+    # output. The lite models cannot think at all and answer 400
+    # INVALID_ARGUMENT to any thinking_config — also seen live, which is why
+    # this field is per-model and not unconditional.
+    if "lite" not in model:
+        kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+    return types.GenerateContentConfig(**kwargs)
+
+
 def _call_model(
     api_key: str,
     model: str,
@@ -212,23 +247,7 @@ def _call_model(
         response = _client(api_key).models.generate_content(
             model=model,
             contents=parts,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=RESPONSE_SCHEMA,
-                # Transcription, not composition. Any creativity here is an
-                # error — but see REPETITION_BREAK_TEMPERATURE for the one case
-                # where greedy decoding is itself the failure.
-                temperature=temperature,
-                # Dense scanned pages produce very long markdown; the default
-                # budget truncated a 4-page batch mid-string.
-                max_output_tokens=65536,
-                # Thinking tokens come out of max_output_tokens. Seen live: the
-                # model spent 62,915 tokens thinking about a table-of-contents
-                # page, leaving ~2.6k for JSON, which truncated mid-string even
-                # with a single image per request. Transcription needs no
-                # reasoning, so spend the whole budget on output.
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
+            config=_generation_config(model, temperature),
         )
     except Exception as exc:
         message = str(exc)
@@ -240,6 +259,12 @@ def _call_model(
             raise TransientVisionError(message) from exc
         if _is_transient_transport(exc):
             raise TransientVisionError(f"network interruption: {message}") from exc
+        if "INVALID_ARGUMENT" in message or message.startswith("400"):
+            # This model rejects the request's very shape (seen live: lite
+            # models 400-ing on thinking_config). Retrying the same request is
+            # pointless, but the OTHER models may accept it fine — crash the
+            # model, never the run.
+            raise ModelRejectedError(f"{model} rejected the request: {message}") from exc
         raise
 
     try:
@@ -263,6 +288,11 @@ def _call(images: list[Path], count: int, temperature: float = 0.0) -> list[dict
         try:
             return _call_model(keys[key_index], model, images, count, temperature)
         except DailyQuotaError as exc:
+            _exhausted.add((key_index, model))
+            last = exc
+        except ModelRejectedError as exc:
+            # The request shape and this model disagree; that will still be
+            # true on every later page, so retire the pair for the whole run.
             _exhausted.add((key_index, model))
             last = exc
         except TransientVisionError as exc:

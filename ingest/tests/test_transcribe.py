@@ -9,8 +9,11 @@ import pytest
 import ingest.transcribe as transcribe_module
 from ingest.config import CONFIG
 from ingest.transcribe import (
+    ModelRejectedError,
     OutputTruncatedError,
+    _call,
     _cascade,
+    _generation_config,
     _is_daily_quota,
     _is_transient_transport,
     _transcribe_one,
@@ -121,6 +124,41 @@ def test_exhausting_one_key_leaves_the_other_usable(monkeypatch):
 
     assert (0, CONFIG.vision_model) not in pairs
     assert (1, CONFIG.vision_model) in pairs
+
+
+def test_lite_models_get_no_thinking_config():
+    """Seen live: the lite models answer 400 INVALID_ARGUMENT to any
+    thinking_config, while flash NEEDS thinking disabled or it spends the
+    whole output budget deliberating. The config must differ per model."""
+    assert _generation_config("gemini-3.5-flash", 0.0).thinking_config is not None
+    assert _generation_config("gemini-3.5-flash-lite", 0.0).thinking_config is None
+    assert _generation_config("gemini-3.1-flash-lite", 0.0).thinking_config is None
+
+
+def test_a_model_rejecting_the_request_does_not_end_the_run(monkeypatch):
+    """Regression: flash hit its daily quota, the cascade moved to flash-lite,
+    flash-lite 400-ed on the request shape, and the whole run crashed. A 400
+    from one model must retire that model, not the run."""
+    _use_keys(monkeypatch, "key-one")
+    monkeypatch.setattr(transcribe_module, "_exhausted", set())
+
+    calls: list[str] = []
+
+    def fake_call_model(api_key, model, images, count, temperature=0.0):
+        calls.append(model)
+        if model == CONFIG.vision_model:
+            raise ModelRejectedError(f"{model} rejected the request")
+        return [{"markdown": "ok", "has_japanese": True}]
+
+    monkeypatch.setattr(transcribe_module, "_call_model", fake_call_model)
+
+    pages = _call([Path("0001.png")], 1)
+    assert pages == [{"markdown": "ok", "has_japanese": True}]
+    # The rejecting model was tried once, then retired for the whole run:
+    assert calls[0] == CONFIG.vision_model
+    assert (0, CONFIG.vision_model) in transcribe_module._exhausted
+    _call([Path("0002.png")], 1)
+    assert calls.count(CONFIG.vision_model) == 1
 
 
 def test_planning_the_cascade_needs_no_credentials(monkeypatch):
