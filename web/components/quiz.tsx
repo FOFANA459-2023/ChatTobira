@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import { MagicLinkForm } from "@/components/magic-link-form";
 import { NavBar } from "@/components/nav";
 import {
   flattenItems,
@@ -18,7 +19,7 @@ interface Book {
   title: string;
 }
 
-type Phase = "setup" | "loading" | "active" | "done" | "error";
+type Phase = "setup" | "loading" | "active" | "done" | "error" | "trial_exhausted";
 
 const KIND_INFO: Record<
   QuizKind,
@@ -41,7 +42,13 @@ const KIND_INFO: Record<
 // Section numerals as they appear on the paper.
 const ROMAN = ["I", "II", "III", "IV"];
 
-export function QuizView({ initialKind = "grammar" }: { initialKind?: QuizKind }) {
+export function QuizView({
+  initialKind = "grammar",
+  authenticated = true,
+}: {
+  initialKind?: QuizKind;
+  authenticated?: boolean;
+}) {
   const [kind, setKind] = useState<QuizKind>(initialKind);
   const [books, setBooks] = useState<Book[]>([]);
   const [bookId, setBookId] = useState<number | null>(null);
@@ -83,6 +90,11 @@ export function QuizView({ initialKind = "grammar" }: { initialKind?: QuizKind }
         const body = (await response.json().catch(() => ({}))) as {
           error?: string;
         };
+        if (body.error === "trial_exhausted") {
+          setPhase("trial_exhausted");
+          window.scrollTo({ top: 0 });
+          return;
+        }
         setErrorText(
           body.error === "no_material"
             ? "No material is loaded for that selection yet. Try another textbook."
@@ -121,8 +133,20 @@ export function QuizView({ initialKind = "grammar" }: { initialKind?: QuizKind }
 
   return (
     <div className="mx-auto flex min-h-screen max-w-3xl flex-col">
-      <NavBar active={kind} />
+      <NavBar active={kind} authenticated={authenticated} />
       <div className="flex-1 px-4 py-6">
+        {phase === "trial_exhausted" && (
+          <div className="mx-auto mt-16 max-w-sm text-center">
+            <p className="text-sm font-medium text-stone-800">
+              You are out of free trial. Enter your email below and we will
+              send you a sign-in link so you can keep studying.
+            </p>
+            <div className="mt-4 text-left">
+              <MagicLinkForm showAdminLink />
+            </div>
+          </div>
+        )}
+
         {(phase === "setup" || phase === "loading" || phase === "error") && (
           <div className="mx-auto mt-8 max-w-lg">
             <div className="text-center">
@@ -210,6 +234,12 @@ export function QuizView({ initialKind = "grammar" }: { initialKind?: QuizKind }
             </button>
             {phase === "error" && (
               <p className="mt-4 text-center text-sm text-red-700">{errorText}</p>
+            )}
+            {!authenticated && (
+              <p className="mt-3 text-center text-xs text-stone-400">
+                You can sit 1 practice test free — after that, sign in with
+                your invited email.
+              </p>
             )}
             <p className="mt-4 text-center">
               <Link href="/" className="text-sm text-stone-500 underline hover:text-stone-900">

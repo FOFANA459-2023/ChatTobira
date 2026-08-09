@@ -147,8 +147,8 @@ export function Chat({
         <div className="border-t border-stone-200 bg-white px-4 py-5">
           <div className="mx-auto max-w-sm">
             <p className="text-sm font-medium text-stone-800">
-              That is the end of your free trial. Enter your email below and
-              we will send you a sign-in link so you can keep studying.
+              You are out of free trial. Enter your email below and we will
+              send you a sign-in link so you can keep studying.
             </p>
             <div className="mt-3">
               <MagicLinkForm showAdminLink />

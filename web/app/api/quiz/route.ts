@@ -7,6 +7,8 @@ import { z } from "zod";
 import { isProviderDead, noteProviderFailure } from "@/lib/providers";
 import { QuizSchema, rankChunksByFocus } from "@/lib/quiz";
 import { createClient } from "@/lib/supabase/server";
+import { serviceClient } from "@/lib/supabase/service";
+import { trialCookie, trialUsed, TRIALS } from "@/lib/trial";
 
 export const maxDuration = 60;
 
@@ -87,14 +89,20 @@ async function requireUser() {
  * Citable textbooks only: class handouts and answer sheets stay retrievable
  * for chat grounding, but tests are always drawn from a book the student can
  * open. When Foundation 1 & 2 is ingested it appears here automatically.
+ *
+ * Open to trial visitors: they need the picker to sit their one free test, and
+ * a list of textbook titles is the same information the marketing copy gives.
  */
 export async function GET() {
   const { supabase, user } = await requireUser();
-  if (!user) {
-    return Response.json({ error: "not_signed_in" }, { status: 401 });
+  // Signed-in students read under their own RLS; a trial visitor has no
+  // session for RLS to evaluate, so the titles come via the service client.
+  const db = user ? supabase : serviceClient();
+  if (!db) {
+    return Response.json({ books: [] });
   }
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from("documents")
     .select("id, title, is_citable")
     .eq("is_citable", true)
@@ -112,8 +120,16 @@ export async function GET() {
 
 export async function POST(request: Request) {
   const { supabase, user } = await requireUser();
+
+  // One free practice test before signing in, metered separately from the
+  // chat trial so sampling one does not consume the other.
+  let setCookie: string | null = null;
   if (!user) {
-    return Response.json({ error: "not_signed_in" }, { status: 401 });
+    const used = trialUsed(request, "quiz");
+    if (used >= TRIALS.quiz.limit) {
+      return Response.json({ error: "trial_exhausted" }, { status: 401 });
+    }
+    setCookie = trialCookie("quiz", used + 1);
   }
 
   const parsed = BodySchema.safeParse(await request.json());
@@ -126,9 +142,22 @@ export async function POST(request: Request) {
     return Response.json({ error: "model_keys_not_configured" }, { status: 503 });
   }
 
+  // Trial visitors have no session for RLS to evaluate; the cookie above is
+  // what limited them, and this only ever reads course material.
+  const db = user ? supabase : serviceClient();
+  if (!db) {
+    return Response.json(
+      {
+        error: "no_material",
+        message: "Practice tests are unavailable on this deployment.",
+      },
+      { status: 503 },
+    );
+  }
+
   // Only textbooks are quizzable — same rule the picker applies, enforced
   // server-side so a crafted request cannot test from a handout.
-  const { data: doc } = await supabase
+  const { data: doc } = await db
     .from("documents")
     .select("id, title, is_citable")
     .eq("id", documentId)
@@ -144,17 +173,20 @@ export async function POST(request: Request) {
   }
 
   // A quiz costs one model call, so it spends one quota unit like a question.
-  const { data: remaining, error: quotaError } = await supabase.rpc("consume_quota");
-  if (quotaError) {
-    return Response.json({ error: "quota_check_failed" }, { status: 500 });
-  }
-  if (remaining === -1) {
-    return Response.json({ error: "quota_exhausted" }, { status: 429 });
+  // Trial visitors have no quota row; the cookie is their whole allowance.
+  if (user) {
+    const { data: remaining, error: quotaError } = await supabase.rpc("consume_quota");
+    if (quotaError) {
+      return Response.json({ error: "quota_check_failed" }, { status: 500 });
+    }
+    if (remaining === -1) {
+      return Response.json({ error: "quota_exhausted" }, { status: 429 });
+    }
   }
 
   // Fetch wide, then narrow to the student's focus: the focus is free text,
   // so scoping happens by ranking chunk contents, not by a column filter.
-  const { data: chunks, error } = await supabase
+  const { data: chunks, error } = await db
     .from("chunks")
     .select("content, metadata")
     .eq("document_id", documentId)
@@ -227,11 +259,15 @@ inside that scope, and say so in scope_description.`
         system,
         prompt,
       });
-      return Response.json(object);
+      return Response.json(object, {
+        headers: setCookie ? { "Set-Cookie": setCookie } : undefined,
+      });
     } catch (error) {
       // Declined or produced an unusable paper — try the next provider.
       noteProviderFailure(tier.provider, error);
     }
   }
+  // No paper was produced, so the trial visitor keeps their free test: the
+  // cookie is only spent on a request that actually returned something.
   return Response.json({ error: "all_models_unavailable" }, { status: 502 });
 }

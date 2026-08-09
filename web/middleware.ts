@@ -10,12 +10,15 @@ export async function middleware(request: NextRequest) {
 
   const path = request.nextUrl.pathname;
   // /admin is public because it IS the admin's sign-in page; the invite API
-  // behind it still requires an authenticated admin session. The home chat
-  // and its API are public for the 3-question trial — /api/chat meters
-  // anonymous visitors itself. Quiz and every other API stay signed-in only.
+  // behind it still requires an authenticated admin session. The chat and the
+  // quiz are public because both offer a trial — 3 questions and 1 practice
+  // test — and each route meters anonymous visitors itself with its own
+  // cookie. Every other API stays signed-in only.
   const isPublic =
     path === "/" ||
     path === "/api/chat" ||
+    path === "/quiz" ||
+    path === "/api/quiz" ||
     path.startsWith("/login") ||
     path.startsWith("/auth") ||
     path.startsWith("/admin");

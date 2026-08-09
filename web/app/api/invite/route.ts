@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { ADMIN_EMAIL, isAdminEmail } from "@/lib/admin";
 import { createClient } from "@/lib/supabase/server";
+import { serviceClient } from "@/lib/supabase/service";
 
 export const maxDuration = 30;
 
@@ -10,15 +11,12 @@ const BodySchema = z.object({
   email: z.string().trim().toLowerCase().email(),
 });
 
-/** The allowlist table is service-role only by design, so invites go through
- * this privileged client — after the admin check, never before. */
-function serviceClient() {
-  const url =
-    process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !key) return null;
-  return createSupabase(url, key, { auth: { persistSession: false } });
-}
+const PatchSchema = BodySchema.extend({
+  action: z.enum(["suspend", "restore"]),
+});
+
+// Supabase expresses an indefinite ban as a very long duration; "none" lifts it.
+const SUSPEND_DURATION = "876000h"; // ~100 years
 
 async function requireAdmin() {
   const supabase = await createClient();
@@ -32,20 +30,38 @@ async function requireAdmin() {
   }
 }
 
-/** Auth-user lookup by email via the paged admin listing — there is no
- * direct getUserByEmail in the admin API. */
-async function findAuthUser(
-  service: NonNullable<ReturnType<typeof serviceClient>>,
-  email: string,
-): Promise<{ id: string } | null> {
+type Service = NonNullable<ReturnType<typeof serviceClient>>;
+
+interface AuthAccount {
+  id: string;
+  suspended: boolean;
+}
+
+/** Every auth account by lowercased email. There is no getUserByEmail in the
+ * admin API, so the paged listing is the only lookup available; building the
+ * whole map once costs the same as one search and serves the list view too. */
+async function authAccounts(service: Service): Promise<Map<string, AuthAccount>> {
+  const accounts = new Map<string, AuthAccount>();
   for (let page = 1; page <= 10; page++) {
     const { data, error } = await service.auth.admin.listUsers({ page, perPage: 200 });
-    if (error) return null;
-    const match = data.users.find((u) => (u.email ?? "").toLowerCase() === email);
-    if (match) return { id: match.id };
-    if (data.users.length < 200) return null;
+    if (error) break;
+    for (const user of data.users) {
+      const email = (user.email ?? "").toLowerCase();
+      if (!email) continue;
+      // banned_until is a timestamp, and a past one is an expired ban.
+      const until = (user as { banned_until?: string | null }).banned_until;
+      accounts.set(email, {
+        id: user.id,
+        suspended: Boolean(until && new Date(until).getTime() > Date.now()),
+      });
+    }
+    if (data.users.length < 200) break;
   }
-  return null;
+  return accounts;
+}
+
+async function findAuthUser(service: Service, email: string): Promise<AuthAccount | null> {
+  return (await authAccounts(service)).get(email) ?? null;
 }
 
 /** Invite a student: allowlist their email, then send them the sign-in link.
@@ -107,7 +123,7 @@ export async function POST(request: Request) {
   return Response.json({ ok: true, email });
 }
 
-/** Invited students, newest first, for the admin page list. */
+/** Invited students, newest first, each marked suspended or active. */
 export async function GET() {
   if (!(await requireAdmin())) {
     return Response.json({ error: "not_admin" }, { status: 403 });
@@ -127,12 +143,69 @@ export async function GET() {
   if (error) {
     return Response.json({ error: "lookup_failed" }, { status: 500 });
   }
-  return Response.json({ invites: data ?? [] });
+
+  // Suspension lives on the auth account, not the allowlist, so the two have
+  // to be joined here for the list to show which button to offer.
+  const accounts = await authAccounts(service);
+  const invites = (data ?? []).map((row) => {
+    const account = accounts.get((row.email as string).toLowerCase());
+    return {
+      email: row.email as string,
+      created_at: row.created_at as string,
+      suspended: account?.suspended ?? false,
+      // Never signed in: there is no account to suspend yet.
+      registered: Boolean(account),
+    };
+  });
+  return Response.json({ invites });
 }
 
-/** Revoke a student: off the allowlist (blocks re-signup) and the account
- * suspended (kills existing access — their session dies at the next token
- * refresh, within the hour). Re-inviting lifts the suspension. */
+/** Suspend or restore a student.
+ *
+ * Suspension pauses access but keeps everything: the allowlist row stays, the
+ * account stays, and their history stays, so restoring is a single click. The
+ * ban is what actually stops them — an existing session dies at its next token
+ * refresh, within the hour. */
+export async function PATCH(request: Request) {
+  if (!(await requireAdmin())) {
+    return Response.json({ error: "not_admin" }, { status: 403 });
+  }
+
+  const parsed = PatchSchema.safeParse(await request.json().catch(() => ({})));
+  if (!parsed.success) {
+    return Response.json({ error: "bad_request" }, { status: 400 });
+  }
+  const { email, action } = parsed.data;
+  if (isAdminEmail(email)) {
+    return Response.json({ error: "is_admin" }, { status: 400 });
+  }
+
+  const service = serviceClient();
+  if (!service) {
+    return Response.json({ error: "invite_not_configured" }, { status: 503 });
+  }
+
+  const account = await findAuthUser(service, email);
+  if (!account) {
+    // Invited but never signed in, so there is no account to pause. Saying so
+    // beats reporting a success that changed nothing.
+    return Response.json({ error: "never_signed_in" }, { status: 404 });
+  }
+
+  const { error } = await service.auth.admin.updateUserById(account.id, {
+    ban_duration: action === "suspend" ? SUSPEND_DURATION : "none",
+  });
+  if (error) {
+    return Response.json({ error: `${action}_failed` }, { status: 502 });
+  }
+
+  return Response.json({ ok: true, email, suspended: action === "suspend" });
+}
+
+/** Remove a student completely: off the allowlist, and the auth account
+ * deleted outright. Every table that references auth.users cascades, so their
+ * conversations, messages, feedback, and quota rows go with it. Irreversible —
+ * suspend is the reversible option. */
 export async function DELETE(request: Request) {
   if (!(await requireAdmin())) {
     return Response.json({ error: "not_admin" }, { status: 403 });
@@ -152,6 +225,8 @@ export async function DELETE(request: Request) {
     return Response.json({ error: "invite_not_configured" }, { status: 503 });
   }
 
+  // Allowlist first: while the row exists the signup trigger would let them
+  // back in, so removing it before the account closes the re-signup window.
   const { error: allowlistError } = await service
     .from("allowlist")
     .delete()
@@ -160,14 +235,19 @@ export async function DELETE(request: Request) {
     return Response.json({ error: "allowlist_failed" }, { status: 500 });
   }
 
-  const authUser = await findAuthUser(service, email);
-  if (authUser) {
-    // ~100 years; "none" on re-invite lifts it.
-    const { error: banError } = await service.auth.admin.updateUserById(authUser.id, {
-      ban_duration: "876000h",
-    });
-    if (banError) {
-      return Response.json({ error: "suspend_failed", unlisted: true }, { status: 502 });
+  const account = await findAuthUser(service, email);
+  if (account) {
+    const { error: deleteError } = await service.auth.admin.deleteUser(account.id);
+    if (deleteError) {
+      // Off the allowlist but still holding a session. Suspend so the removal
+      // is at least effective, and report the partial result honestly.
+      await service.auth.admin.updateUserById(account.id, {
+        ban_duration: SUSPEND_DURATION,
+      });
+      return Response.json(
+        { error: "delete_failed", unlisted: true, suspended: true },
+        { status: 502 },
+      );
     }
   }
 

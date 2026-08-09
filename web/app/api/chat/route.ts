@@ -1,12 +1,13 @@
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createGroq } from "@ai-sdk/groq";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { createClient as createSupabase, type SupabaseClient } from "@supabase/supabase-js";
 import { convertToModelMessages, streamText, type UIMessage } from "ai";
 import { z } from "zod";
 
 import { contextBlock, systemPrompt } from "@/lib/prompt";
 import { isProviderDead, noteProviderFailure } from "@/lib/providers";
+import { serviceClient } from "@/lib/supabase/service";
+import { trialCookie, trialUsed, TRIALS } from "@/lib/trial";
 import {
   buildCitations,
   embedQuery,
@@ -32,33 +33,6 @@ const BodySchema = z.object({
   conversationId: z.number().int().positive().optional(),
 });
 
-/** Anonymous trial: a visitor may ask this many questions before they must
- * sign in. Counted in a cookie — a determined visitor can clear it, but this
- * is a taster, not a security boundary; the real gate stays the invite. */
-const TRIAL_LIMIT = 3;
-const TRIAL_COOKIE = "tobira_trial";
-
-function trialUsed(request: Request): number {
-  const match = request.headers
-    .get("cookie")
-    ?.match(new RegExp(`(?:^|;\\s*)${TRIAL_COOKIE}=(\\d+)`));
-  return match ? Number(match[1]) : 0;
-}
-
-function trialCookie(used: number): string {
-  return `${TRIAL_COOKIE}=${used}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax`;
-}
-
-/** Retrieval/cache tables are readable by signed-in students only, so the
- * trial reads them through the service role — server-side, read/cache use
- * only, and only after the trial counter allowed the request. */
-function trialRetrievalClient(): SupabaseClient | null {
-  const url = process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !key) return null;
-  return createSupabase(url, key, { auth: { persistSession: false } });
-}
-
 function lastUserText(messages: UIMessage[]): string {
   const last = [...messages].reverse().find((m) => m.role === "user");
   if (!last) return "";
@@ -83,11 +57,11 @@ export async function POST(request: Request) {
   // Anonymous visitors get a short trial; past it, the client shows sign-in.
   let setCookie: string | null = null;
   if (!user) {
-    const used = trialUsed(request);
-    if (used >= TRIAL_LIMIT) {
+    const used = trialUsed(request, "chat");
+    if (used >= TRIALS.chat.limit) {
       return Response.json({ error: "trial_exhausted" }, { status: 401 });
     }
-    setCookie = trialCookie(used + 1);
+    setCookie = trialCookie("chat", used + 1);
   }
 
   const parsed = BodySchema.safeParse(await request.json());
@@ -172,7 +146,7 @@ export async function POST(request: Request) {
   // Signed-in students read under their own RLS; trial visitors read through
   // the service client. A trial without the service key still answers, just
   // ungrounded — a degraded taster beats an error page.
-  const db = user ? supabase : trialRetrievalClient();
+  const db = user ? supabase : serviceClient();
 
   let vectorLiteral: string | null = null;
   let chunks: RetrievedChunk[] = [];

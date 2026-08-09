@@ -10,6 +10,10 @@ import { createClient } from "@/lib/supabase/client";
 interface Invite {
   email: string;
   created_at: string;
+  /** Access paused: the account and all its history are intact. */
+  suspended: boolean;
+  /** Invited but never signed in, so there is no account to suspend yet. */
+  registered: boolean;
 }
 
 type Session = "checking" | "signed_out" | "not_admin" | "admin";
@@ -141,8 +145,55 @@ export default function AdminPage() {
     }
   }
 
-  /** Pull the invite and suspend any existing account for that email. */
-  async function revoke(email: string) {
+  /** Pause or restore access. Nothing is deleted either way. */
+  async function setSuspended(email: string, suspend: boolean) {
+    setBusy(true);
+    setInviteNote(null);
+    try {
+      const response = await fetch("/api/invite", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, action: suspend ? "suspend" : "restore" }),
+      });
+      const body = (await response.json().catch(() => ({}))) as { error?: string };
+      if (response.ok) {
+        setInviteNote({
+          ok: true,
+          text: suspend
+            ? `${email} is suspended. Their account and history are kept — restore returns access.`
+            : `${email} can sign in again.`,
+        });
+        loadInvites();
+      } else if (body.error === "never_signed_in") {
+        setInviteNote({
+          ok: false,
+          text: `${email} has not signed in yet, so there is no account to suspend. Remove the invite instead.`,
+        });
+      } else {
+        setInviteNote({
+          ok: false,
+          text: `Could not ${suspend ? "suspend" : "restore"} ${email}. Try again.`,
+        });
+      }
+    } catch {
+      setInviteNote({
+        ok: false,
+        text: `Could not ${suspend ? "suspend" : "restore"} ${email}. Try again.`,
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Delete the invite and the account outright. Irreversible, so it asks. */
+  async function remove(email: string) {
+    if (
+      !window.confirm(
+        `Remove ${email} completely?\n\nThis deletes their account and everything attached to it — chat history, saved feedback, and usage — and cannot be undone.\n\nTo pause access instead and keep their work, use Suspend.`,
+      )
+    ) {
+      return;
+    }
     setBusy(true);
     setInviteNote(null);
     try {
@@ -151,14 +202,20 @@ export default function AdminPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email }),
       });
+      const body = (await response.json().catch(() => ({}))) as { error?: string };
       if (response.ok) {
-        setInviteNote({ ok: true, text: `${email} can no longer sign in.` });
-        loadInvites();
+        setInviteNote({ ok: true, text: `${email} was removed completely.` });
+      } else if (body.error === "delete_failed") {
+        setInviteNote({
+          ok: false,
+          text: `${email} was un-invited and suspended, but their account could not be deleted. Try Remove again.`,
+        });
       } else {
-        setInviteNote({ ok: false, text: `Could not revoke ${email}. Try again.` });
+        setInviteNote({ ok: false, text: `Could not remove ${email}. Try again.` });
       }
+      loadInvites();
     } catch {
-      setInviteNote({ ok: false, text: `Could not revoke ${email}. Try again.` });
+      setInviteNote({ ok: false, text: `Could not remove ${email}. Try again.` });
     } finally {
       setBusy(false);
     }
@@ -316,29 +373,63 @@ export default function AdminPage() {
                   <p className="text-xs font-medium uppercase tracking-wide text-stone-400">
                     Invited students
                   </p>
-                  <ul className="mt-2 max-h-64 space-y-1.5 overflow-y-auto text-sm">
+                  <ul className="mt-2 max-h-72 space-y-1.5 overflow-y-auto text-sm">
                     {invites.map((invite) => (
                       <li
                         key={invite.email}
                         className="flex items-center justify-between gap-2 text-stone-700"
                       >
-                        <span className="truncate">{invite.email}</span>
-                        <span className="flex shrink-0 items-center gap-2">
+                        <span className="min-w-0 truncate">
+                          <span
+                            className={invite.suspended ? "text-stone-400 line-through" : ""}
+                          >
+                            {invite.email}
+                          </span>
+                          {invite.suspended && (
+                            <span className="ml-1.5 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-800">
+                              Suspended
+                            </span>
+                          )}
+                        </span>
+                        <span className="flex shrink-0 items-center gap-1.5">
                           <span className="text-xs text-stone-400">
                             {new Date(invite.created_at).toLocaleDateString()}
                           </span>
                           <button
-                            onClick={() => revoke(invite.email)}
-                            disabled={busy}
-                            title="Remove the invite and suspend the account"
-                            className="rounded border border-stone-300 px-2 py-0.5 text-xs text-stone-600 hover:border-red-400 hover:bg-red-50 hover:text-red-700 disabled:opacity-50"
+                            onClick={() => setSuspended(invite.email, !invite.suspended)}
+                            disabled={busy || !invite.registered}
+                            title={
+                              !invite.registered
+                                ? "This student has not signed in yet, so there is no account to suspend"
+                                : invite.suspended
+                                  ? "Give this student access again"
+                                  : "Pause access — the account and all their work are kept"
+                            }
+                            className={[
+                              "rounded border px-2 py-0.5 text-xs disabled:opacity-40",
+                              invite.suspended
+                                ? "border-green-300 text-green-700 hover:bg-green-50"
+                                : "border-stone-300 text-stone-600 hover:border-amber-400 hover:bg-amber-50 hover:text-amber-800",
+                            ].join(" ")}
                           >
-                            Revoke
+                            {invite.suspended ? "Restore" : "Suspend"}
+                          </button>
+                          <button
+                            onClick={() => remove(invite.email)}
+                            disabled={busy}
+                            title="Delete this student and all their data permanently"
+                            className="rounded border border-stone-300 px-2 py-0.5 text-xs text-stone-600 hover:border-red-400 hover:bg-red-50 hover:text-red-700 disabled:opacity-40"
+                          >
+                            Remove
                           </button>
                         </span>
                       </li>
                     ))}
                   </ul>
+                  <p className="mt-2 text-xs text-stone-400">
+                    Suspend pauses access and keeps everything. Remove deletes
+                    the student and their work permanently.
+                  </p>
                 </div>
               )}
             </>
