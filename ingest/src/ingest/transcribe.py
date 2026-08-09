@@ -158,6 +158,25 @@ def _is_daily_quota(message: str) -> bool:
     return "PerDay" in message or "RequestsPerDayPerProject" in message
 
 
+def _is_transient_transport(exc: BaseException) -> bool:
+    """Network-layer failure: the request never produced an HTTP response.
+
+    Seen live: httpx.ReadError from [WinError 10053] — something on the local
+    machine (antivirus, VPN, a router timing out an idle-looking socket) killed
+    a vision request mid-flight. These requests legitimately run ~3 minutes for
+    a dense 4-page batch, which is exactly the lifetime that middleboxes cut.
+    Nothing about the page caused it, so retrying the same request is right.
+    """
+    import httpx
+
+    transient = (httpx.TransportError, ConnectionError, TimeoutError)
+    if isinstance(exc, transient):
+        return True
+    # SDK wrappers keep the original failure on the cause chain.
+    cause = exc.__cause__
+    return cause is not None and isinstance(cause, transient)
+
+
 @retry(
     retry=retry_if_exception_type(TransientVisionError),
     wait=wait_exponential(multiplier=8, min=8, max=120),
@@ -207,6 +226,8 @@ def _call_model(
             raise TransientVisionError(message) from exc
         if "503" in message or "UNAVAILABLE" in message:
             raise TransientVisionError(message) from exc
+        if _is_transient_transport(exc):
+            raise TransientVisionError(f"network interruption: {message}") from exc
         raise
 
     try:
@@ -243,6 +264,14 @@ def _call(images: list[Path], count: int, temperature: float = 0.0) -> list[dict
             last = exc
     if truncated is not None:
         raise truncated
+    if isinstance(last, TransientVisionError):
+        # The models still have budget — the network kept failing. Saying
+        # "quota exhausted" here would tell the user to wait until tomorrow
+        # for a problem that a VPN toggle or a router restart fixes now.
+        raise TransientVisionError(
+            "the connection kept dropping on every attempt; check the network "
+            "(VPN, antivirus, proxy) and re-run — progress is checkpointed"
+        ) from last
     raise DailyQuotaError(
         "every vision model on every configured key is out of daily free-tier "
         "quota; re-run tomorrow (the manifest resumes), add GOOGLE_API_KEY_2 "

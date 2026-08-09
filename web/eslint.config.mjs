@@ -13,6 +13,7 @@ const config = [
       "next-env.d.ts",
       ".next/**",
       ".open-next/**",
+      ".wrangler/**",
       "node_modules/**",
       "playwright-report/**",
       "test-results/**",

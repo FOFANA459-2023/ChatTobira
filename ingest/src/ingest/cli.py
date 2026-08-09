@@ -22,7 +22,7 @@ from .config import CONFIG
 from .discover import SourceDoc, discover
 from .embed import embed_documents
 from .manifest import Manifest
-from .transcribe import DailyQuotaError, PageText, transcribe
+from .transcribe import DailyQuotaError, PageText, TransientVisionError, transcribe
 
 app = typer.Typer(add_completion=False, help="ChatTobira ingestion pipeline")
 console = Console()
@@ -136,6 +136,11 @@ def cmd_transcribe(
                 "[red]daily quota exhausted on every vision model[/red] — progress "
                 "is checkpointed; re-run this command tomorrow to continue."
             )
+            raise typer.Exit(75)  # EX_TEMPFAIL
+        except TransientVisionError as exc:
+            # A page-sized traceback for a dropped connection buries the one
+            # actionable fact: nothing is lost and re-running resumes.
+            console.print(f"[red]network failure[/red] — {exc}")
             raise typer.Exit(75)  # EX_TEMPFAIL
 
         _save_pages(_text_path(doc), pages)

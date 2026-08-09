@@ -12,6 +12,7 @@ from ingest.transcribe import (
     OutputTruncatedError,
     _cascade,
     _is_daily_quota,
+    _is_transient_transport,
     _transcribe_one,
 )
 
@@ -39,6 +40,39 @@ def test_daily_quota_detected_from_real_error_shape():
 
 def test_per_minute_throttle_is_not_daily():
     assert not _is_daily_quota("429 ... 'quotaId': 'GenerateRequestsPerMinute' ...")
+
+
+def test_connection_drop_is_transient():
+    """Regression: [WinError 10053] killed a run mid-textbook. The connection
+    was aborted locally (antivirus/VPN/router) during a ~3-minute request —
+    retryable, not fatal, and definitely not the page's fault."""
+    import httpx
+
+    winerror = ConnectionAbortedError(
+        10053, "An established connection was aborted by the software in your host machine"
+    )
+    read_error = httpx.ReadError(str(winerror))
+    read_error.__cause__ = winerror
+
+    assert _is_transient_transport(read_error)
+    assert _is_transient_transport(winerror)
+    assert _is_transient_transport(httpx.ConnectTimeout("connect timed out"))
+    assert _is_transient_transport(TimeoutError("read timed out"))
+
+
+def test_wrapped_transport_failure_is_recognised_via_the_cause_chain():
+    import httpx
+
+    wrapper = RuntimeError("sdk wrapped it")
+    wrapper.__cause__ = httpx.ReadError("connection lost")
+    assert _is_transient_transport(wrapper)
+
+
+def test_real_api_errors_are_not_mistaken_for_network_blips():
+    """400s and schema failures must still surface: retrying a bad request
+    forever would look like a hang, not a fix."""
+    assert not _is_transient_transport(ValueError("bad response schema"))
+    assert not _is_transient_transport(RuntimeError("400 INVALID_ARGUMENT"))
 
 
 def test_cascade_prefers_configured_model_and_skips_exhausted(monkeypatch):
