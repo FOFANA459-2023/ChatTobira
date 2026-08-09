@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 import { ADMIN_EMAIL, isAdminEmail } from "@/lib/admin";
+import { NavBar } from "@/components/nav";
 import { createClient } from "@/lib/supabase/client";
 
 interface Invite {
@@ -170,33 +171,21 @@ export default function AdminPage() {
     }
   }
 
-  async function signOut() {
-    const supabase = createClient();
-    await supabase.auth.signOut();
-    setSession("signed_out");
-    setInvites([]);
-  }
-
   return (
-    <main className="flex min-h-screen items-start justify-center p-6">
+    <div className="flex min-h-screen flex-col">
+      {/* Sign out lives in the navbar once signed in; while signed out this
+          page IS the admin sign-in form, so the navbar offers no auth button
+          of its own — just the way back to the chat and quizzes. */}
+      <NavBar showAuth={session === "admin"} />
+      <main className="flex flex-1 items-start justify-center p-6">
       <div className="mt-12 w-full max-w-md">
         <div className="rounded-2xl border border-stone-200 bg-white p-8 shadow-sm">
-          <div className="flex items-baseline justify-between gap-2">
-            <h1 className="text-2xl font-semibold tracking-tight">
-              <Link href="/" className="hover:text-stone-600">
-                ChatTobira
-              </Link>{" "}
-              <span className="text-base font-normal text-stone-500">Admin</span>
-            </h1>
-            {session === "admin" && (
-              <button
-                onClick={signOut}
-                className="text-sm text-stone-500 underline hover:text-stone-900"
-              >
-                Sign out
-              </button>
-            )}
-          </div>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            <Link href="/" className="hover:text-stone-600">
+              ChatTobira
+            </Link>{" "}
+            <span className="text-base font-normal text-stone-500">Admin</span>
+          </h1>
 
           {session === "checking" && (
             <p className="mt-6 text-sm text-stone-500">Checking session…</p>
@@ -336,6 +325,7 @@ export default function AdminPage() {
           )}
         </div>
       </div>
-    </main>
+      </main>
+    </div>
   );
 }

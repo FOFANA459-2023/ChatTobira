@@ -3,6 +3,7 @@
 import Link from "next/link";
 
 import { MagicLinkForm } from "@/components/magic-link-form";
+import { NavBar } from "@/components/nav";
 
 /** Student sign-in is by invitation: the admin sends the first link from
  * the admin page. This page exists for returning students whose session
@@ -11,7 +12,11 @@ export default function LoginPage() {
   const configured = Boolean(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
 
   return (
-    <main className="flex min-h-screen items-center justify-center p-6">
+    <div className="flex min-h-screen flex-col">
+      {/* This page IS the sign-in form, so the navbar's own auth button is
+          hidden; the page links remain the way back to the chat. */}
+      <NavBar showAuth={false} />
+      <main className="flex flex-1 items-center justify-center p-6">
       <div className="w-full max-w-sm rounded-2xl border border-stone-200 bg-white p-8 shadow-sm">
         <h1 className="text-2xl font-semibold tracking-tight">
           ChatTobira{" "}
@@ -46,6 +51,7 @@ export default function LoginPage() {
           </Link>
         </p>
       </div>
-    </main>
+      </main>
+    </div>
   );
 }

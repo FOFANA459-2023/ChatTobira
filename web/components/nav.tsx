@@ -19,14 +19,18 @@ const PAGES = [
  * Auth controls live at the right end, after the page links: `children`
  * (admin-only actions like Invite students), then Sign out — or a Sign in
  * link for signed-out visitors. Pages behind the auth middleware can omit
- * `authenticated`; only the chat serves signed-out trial visitors. */
+ * `authenticated`; only the chat serves signed-out trial visitors. Pages
+ * that ARE a sign-in form pass `showAuth={false}` so the navbar does not
+ * offer a Sign in button pointing at the very form beside it. */
 export function NavBar({
   active,
   authenticated = true,
+  showAuth = true,
   children,
 }: {
   active?: "chat" | "grammar" | "kanji";
   authenticated?: boolean;
+  showAuth?: boolean;
   children?: ReactNode;
 }) {
   const pathname = usePathname();
@@ -68,27 +72,28 @@ export function NavBar({
 
         {children}
 
-        {authenticated ? (
-          <button
-            onClick={async () => {
-              try {
-                await createClient().auth.signOut();
-              } finally {
-                window.location.assign("/");
-              }
-            }}
-            className="rounded-lg px-3 py-1.5 text-sm text-stone-500 hover:text-stone-900"
-          >
-            Sign out
-          </button>
-        ) : (
-          <Link
-            href="/login"
-            className="rounded-lg bg-stone-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-stone-700"
-          >
-            Sign in
-          </Link>
-        )}
+        {showAuth &&
+          (authenticated ? (
+            <button
+              onClick={async () => {
+                try {
+                  await createClient().auth.signOut();
+                } finally {
+                  window.location.assign("/");
+                }
+              }}
+              className="rounded-lg px-3 py-1.5 text-sm text-stone-500 hover:text-stone-900"
+            >
+              Sign out
+            </button>
+          ) : (
+            <Link
+              href="/login"
+              className="rounded-lg bg-stone-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-stone-700"
+            >
+              Sign in
+            </Link>
+          ))}
       </div>
     </header>
   );
