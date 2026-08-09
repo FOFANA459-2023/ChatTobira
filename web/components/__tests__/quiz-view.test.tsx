@@ -47,7 +47,8 @@ const PAPER: Quiz = {
     {
       instruction_ja: "つぎの文章を読んで、内容と合っていれば○、違っていれば×を選んでください。",
       instruction_en: "Read the passage and mark each statement ○ or ×.",
-      passage: "わたしは まいあさ 七時に おきます。あさごはんを 食べてから、大学へ 行きます。",
+      passage:
+        "わたしは まいあさ 七時に おきます。あさごはんを 食べてから、大学（だいがく）へ 行きます。",
       items: [
         {
           type: "true_false",
@@ -115,8 +116,14 @@ describe("QuizView", () => {
     expect(screen.getByText(/適切なことばを選んでください/)).toBeInTheDocument();
     expect(screen.getByText("Choose the word that fits the blank.")).toBeInTheDocument();
 
-    // The reading section renders its passage above the ○× statements.
-    expect(screen.getByText(/あさごはんを 食べてから、大学へ 行きます/)).toBeInTheDocument();
+    // The reading section renders its passage above the ○× statements, and
+    // the beyond-scope word's furigana renders as ruby ON TOP of the kanji —
+    // the annotation parens never reach the page.
+    expect(screen.getByText(/あさごはんを 食べてから、/)).toBeInTheDocument();
+    const ruby = document.querySelector("ruby");
+    expect(ruby).toHaveTextContent("大学");
+    expect(ruby?.querySelector("rt")).toHaveTextContent("だいがく");
+    expect(screen.queryByText(/（だいがく）/)).not.toBeInTheDocument();
 
     const body = JSON.parse(String(fetchMock.mock.calls.at(-1)?.[1]?.body));
     expect(body.kind).toBe("grammar");

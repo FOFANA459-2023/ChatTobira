@@ -41,7 +41,10 @@ provided course material, in the format of the course's own test papers. Rules:
 - true_false: the question is ONE statement about the section's passage, and
   the answer is exactly ○ (the statement matches the passage) or × (it does
   not). Mix ○ and × answers; × statements must be plausibly wrong, contradicted
-  by the passage, not absurd.
+  by the passage, not absurd. The explanation MUST point back into the passage:
+  quote the short phrase that decides it, then say why in English — e.g.
+  「あさごはんを食べてから大学へ行きます」とあるので、×。The passage says
+  breakfast comes BEFORE leaving, so the statement contradicts it.
 - multiple_choice: exactly 4 choices, one correct, distractors that reflect
   real learner confusions (wrong particle, wrong conjugation, wrong register,
   similar-looking kanji, similar-sounding readings).
@@ -96,16 +99,30 @@ Section 4 — instruction_ja 「つぎの文章を読んで、内容と合って
   from the vocabulary and grammar in the excerpts. Then exactly 5 true_false
   items: each question is one statement about the passage, answer ○ or ×.
   The passage field belongs to the section, not to the items.`,
-  kanji: `Structure the paper as exactly 3 sections, in this order:
+  kanji: `Structure the paper as exactly 4 sections, in this order:
 Section 1 — instruction_ja 「＿＿のことばの読み方として、いちばんいいものを選んでください。」:
-  multiple_choice. A sentence with one kanji word marked 【 】; the choices are
-  4 hiragana readings, one correct.
+  multiple_choice. question is ONLY the sentence with one kanji word marked
+  【 】 — like the printed papers, where the word is just underlined in the
+  sentence. Never repeat the marked word after the sentence and never append
+  …の読み方はどれですか — the section instruction already asks that.
+  The choices are 4 hiragana readings, one correct.
 Section 2 — instruction_ja 「＿＿のことばを漢字で書くとき、いちばんいいものを選んでください。」:
-  multiple_choice. A sentence with one word written in hiragana marked 【 】;
-  the choices are 4 kanji spellings, one correct, distractors visually similar.
+  multiple_choice. question is ONLY the sentence with one word written in
+  hiragana marked 【 】 — same rule: no repetition of the word, no appended
+  re-ask. The choices are 4 kanji spellings, one correct, distractors
+  visually similar.
 Section 3 — instruction_ja 「（　）に入れるのに、いちばんいいことばを選んでください。」:
   multiple_choice. Vocabulary in context: a sentence with （　） and 4 word
-  choices from the material.`,
+  choices from the material.
+Section 4 — instruction_ja 「つぎの文章を読んで、内容と合っていれば○、違っていれば×を選んでください。」:
+  READING. Write this section's "passage": a short original text of 150–250
+  characters in the style of the reading passages on the course's past papers,
+  deliberately dense with the kanji and vocabulary from the excerpts. Then
+  exactly 5 true_false items: each question is one statement about the
+  passage, answer ○ or ×. The passage field belongs to the section.
+Across the WHOLE paper, never test the same word twice: a word whose reading
+is asked in Section 1 must not be the word written in Section 2, the blank in
+Section 3, or the point of a Section 4 statement. Every item, a new word.`,
 };
 
 async function requireUser() {
@@ -290,16 +307,25 @@ export async function POST(request: Request) {
     .filter((token) => /^t\d{1,2}$/.test(token))
     .map((token) => Number(token.slice(1)));
   const scopeDivision = focusDivisions.length > 0 ? Math.max(...focusDivisions) : null;
-  const furiganaRule = scopeDivision
-    ? `Furigana scope: this test is scoped to ${division} ${scopeDivision}. Write NO
+  // The excerpts carry the textbook's own ruby as 漢字《かんじ》; without the
+  // explicit "do not copy" the model faithfully reproduces a reading on every
+  // kanji and the scope rule is drowned out.
+  const furiganaRule = `${
+    scopeDivision
+      ? `Furigana scope: this test is scoped to ${division} ${scopeDivision}. Write NO
 furigana for kanji taught in ${division} 1 through ${division} ${scopeDivision} —
 students are expected to read them. Write furigana 漢字（かんじ） only for kanji
 from beyond ${division} ${scopeDivision}.`
-    : `Furigana scope: this test covers the whole book, so treat every kanji that
+      : `Furigana scope: this test covers the whole book, so treat every kanji that
 appears in the excerpts as already taught and write NO furigana for it. Write
-furigana 漢字（かんじ） only for kanji from outside this textbook.`;
+furigana 漢字（かんじ） only for kanji from outside this textbook.`
+  }
+The excerpts show the textbook's own readings as 漢字《かんじ》 — do NOT copy
+those annotations into your questions; strip them and apply the scope rule
+above instead.`;
 
-  const reading = kind === "grammar" ? 5 : 0;
+  // Both papers end with the 5-question reading section, like the real ones.
+  const reading = 5;
   const perSection = Math.round(count / 3);
   const prompt = `Create a practice test from the textbook excerpts below, all
 from "${doc.title}" — the book the student owns. The paper's format is modelled
@@ -309,7 +335,7 @@ review reference as "${division} N — concept (p. NN)", using the ${division}
 numbers and page numbers as printed in the excerpts.
 ${furiganaRule}
 Exactly ${count + reading} questions in total — ${perSection} in each of the
-3 ${kind === "grammar" ? "non-reading sections, plus exactly 5 in the reading section" : "sections"}. Focus on ${
+3 non-reading sections, plus exactly 5 in the reading section. Focus on ${
     kind === "kanji"
       ? "the kanji and vocabulary that appear in these excerpts"
       : "the grammar patterns drilled in these excerpts"

@@ -8,6 +8,7 @@ import {
   rankChunksByFocus,
   romajiToHiragana,
   scoreQuiz,
+  splitRuby,
   splitUnderline,
   studyPlan,
   type Quiz,
@@ -162,6 +163,47 @@ describe("splitUnderline", () => {
     expect(segments.filter((s) => s.underline).map((s) => s.text)).toEqual([
       "外国",
       "学生",
+    ]);
+  });
+});
+
+describe("splitRuby", () => {
+  it("pairs kanji with the kana reading that follows in full-width parens", () => {
+    expect(splitRuby("大学（だいがく）へ行きます")).toEqual([
+      { base: "大学", reading: "だいがく" },
+      { base: "へ行きます" },
+    ]);
+  });
+
+  it("leaves the （　） answer blank and other parens untouched", () => {
+    // A reading annotation is kanji + kana parens ONLY; the multiple-choice
+    // blank and parenthesised kanji are content.
+    expect(splitRuby("部屋（　）勉強します")).toEqual([
+      { base: "部屋（　）勉強します" },
+    ]);
+    expect(splitRuby("食べます（食べる）")).toEqual([{ base: "食べます（食べる）" }]);
+  });
+
+  it("handles several annotated words in one sentence", () => {
+    const segments = splitRuby("卒業（そつぎょう）して就職（しゅうしょく）する");
+    expect(segments.filter((s) => s.reading)).toEqual([
+      { base: "卒業", reading: "そつぎょう" },
+      { base: "就職", reading: "しゅうしょく" },
+    ]);
+  });
+
+  it("passes plain text through as one segment", () => {
+    expect(splitRuby("まいにち べんきょうします")).toEqual([
+      { base: "まいにち べんきょうします" },
+    ]);
+  });
+
+  it("reads the transcription corpus's 《 》 style too", () => {
+    // The prompt asks for （ ）, but the excerpts write 漢字《かんじ》 and
+    // models imitate what they read — both must render as ruby.
+    expect(splitRuby("将来《しょうらい》の進路")).toEqual([
+      { base: "将来", reading: "しょうらい" },
+      { base: "の進路" },
     ]);
   });
 });

@@ -224,6 +224,26 @@ export function splitUnderline(text: string): { text: string; underline: boolean
   return segments.length > 0 ? segments : [{ text, underline: false }];
 }
 
+/** Split text into ruby segments: kanji followed immediately by a kana
+ * reading in 漢字（かんじ） or 漢字《かんじ》 style becomes a base+reading
+ * pair for <ruby> rendering, which puts the hiragana on top of the kanji the
+ * way the textbook prints it. Both bracket styles occur in the wild — the
+ * prompt asks for （ ）, but the transcribed corpus writes 《 》 and models
+ * imitate what they read. Brackets holding anything but kana (the （　）
+ * answer blank, bracketed kanji) pass through untouched. */
+export function splitRuby(text: string): { base: string; reading?: string }[] {
+  const segments: { base: string; reading?: string }[] = [];
+  const annotated = /([一-鿿々〆ヶ]+)(?:（([ぁ-ゖァ-ヶー]+)）|《([ぁ-ゖァ-ヶー]+)》)/g;
+  let last = 0;
+  for (const match of text.matchAll(annotated)) {
+    if (match.index > last) segments.push({ base: text.slice(last, match.index) });
+    segments.push({ base: match[1], reading: match[2] ?? match[3] });
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) segments.push({ base: text.slice(last) });
+  return segments.length > 0 ? segments : [{ base: text }];
+}
+
 /** Aggregate missed questions into a study plan: which review references were
  * missed, with 1-based question numbers, most-missed first. Deterministic —
  * no model call (and no quota) stands between a student and their feedback. */

@@ -9,12 +9,32 @@ import {
   flattenItems,
   isCorrect,
   scoreQuiz,
+  splitRuby,
   splitUnderline,
   studyPlan,
   type Quiz,
   type QuizItem,
   type QuizKind,
 } from "@/lib/quiz";
+
+/** 漢字（かんじ） annotations rendered as real ruby — the reading sits on top
+ * of the kanji the way the textbook prints furigana. */
+function RubyText({ text }: { text: string }) {
+  return (
+    <>
+      {splitRuby(text).map((part, i) =>
+        part.reading ? (
+          <ruby key={i}>
+            {part.base}
+            <rt className="select-none text-[0.55em] text-stone-500">{part.reading}</rt>
+          </ruby>
+        ) : (
+          <span key={i}>{part.base}</span>
+        ),
+      )}
+    </>
+  );
+}
 
 /** Japanese text with 【 】-marked words rendered as real underlines — the
  * printed papers underline the word an item asks about, and a literal marker
@@ -25,10 +45,10 @@ function JaText({ text }: { text: string }) {
       {splitUnderline(text).map((segment, i) =>
         segment.underline ? (
           <u key={i} className="underline decoration-2 underline-offset-4">
-            {segment.text}
+            <RubyText text={segment.text} />
           </u>
         ) : (
-          <span key={i}>{segment.text}</span>
+          <RubyText key={i} text={segment.text} />
         ),
       )}
     </>
