@@ -91,6 +91,14 @@ class PageText:
 
 from functools import lru_cache
 
+# A dense 4-page batch legitimately generates for ~3 minutes; 6 gives head
+# room. Without ANY timeout the default is to wait forever, and forever is
+# what happened: a black-holed connection (no RST, unlike WinError 10053)
+# left a run blocked in recv() for 3+ hours while its checkpoint sat frozen.
+# On timeout httpx raises a TimeoutException, which is a TransportError, so
+# the existing transient classification retries it.
+REQUEST_TIMEOUT_MS = 6 * 60 * 1000
+
 
 @lru_cache(maxsize=8)
 def _client(api_key: str):
@@ -98,8 +106,12 @@ def _client(api_key: str):
     garbage collector close the underlying httpx transport mid-flight, which
     surfaces as 'Cannot send a request, as the client has been closed'."""
     from google import genai
+    from google.genai import types
 
-    return genai.Client(api_key=api_key)
+    return genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_MS),
+    )
 
 
 class TransientVisionError(RuntimeError):
