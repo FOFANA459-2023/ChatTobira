@@ -12,9 +12,11 @@ function withCookies(cookie: string): Request {
 }
 
 describe("trial metering", () => {
-  it("offers three chat questions and one practice test", () => {
+  it("offers three chat questions, one practice test, and its coaching", () => {
     expect(TRIALS.chat.limit).toBe(3);
     expect(TRIALS.quiz.limit).toBe(1);
+    // 2 feedbacks covers checking the free test and one retake of it.
+    expect(TRIALS.feedback.limit).toBe(2);
   });
 
   it("counts a visitor with no cookie as having spent nothing", () => {

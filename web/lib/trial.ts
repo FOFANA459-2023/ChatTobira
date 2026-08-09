@@ -13,6 +13,9 @@
 export const TRIALS = {
   chat: { cookie: "tobira_trial", limit: 3 },
   quiz: { cookie: "tobira_quiz_trial", limit: 1 },
+  // Post-test coaching accompanies the free test; 2 covers a retake of the
+  // same paper without opening an unmetered model endpoint to anonymous use.
+  feedback: { cookie: "tobira_feedback_trial", limit: 2 },
 } as const;
 
 export type TrialKind = keyof typeof TRIALS;

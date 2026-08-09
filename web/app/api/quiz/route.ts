@@ -20,6 +20,9 @@ const BodySchema = z.object({
   focus: z.string().trim().max(200).optional(),
   kind: z.enum(["grammar", "kanji"]).default("grammar"),
   count: z.number().int().min(9).max(21).default(15),
+  // Question/sentence texts from the student's previous paper, so "New Test"
+  // actually produces new questions instead of shuffling the same ones.
+  avoid: z.array(z.string().max(300)).max(40).optional(),
 });
 
 const SYSTEM = `You create Japanese practice tests for university students from
@@ -42,11 +45,16 @@ provided course material, in the format of the course's own test papers. Rules:
   the material as possible; never drill the same point twice in one paper.
 - explanation: one or two sentences on WHY, in simple English with the
   Japanese pattern or word named.
-- review: for EVERY item, where in the course material the student should go
-  to study this point — the topic or lesson exactly as the material names it,
-  plus the concept, e.g. "Topic 7 — て-form requests". Add the printed book
-  page when the material shows one, e.g. "Topic 7 — て-form requests (p. 94)".
+- review: for EVERY item, where in the TEXTBOOK the student should go to study
+  this point. Students own the textbook and nothing else, so a review must be
+  findable from the book alone: the topic or lesson as the textbook prints it,
+  the concept, and the page number from the excerpt header when one is shown —
+  e.g. "Topic 7 — て-form requests (p. 94)". NEVER write "Material", "excerpt",
+  "source", "handout", "past paper", or a numbered reference to the prompt.
   Identical points must use the identical review string so results aggregate.
+- Variety: every item must drill a different point with a different sentence.
+  Never underline the same word in two items, and never reuse a sentence the
+  paper (or the avoid-list, when one is given) already used.
 - When an item asks about ONE specific word in a sentence (the word to
   conjugate, the word to read, the word to write in kanji), wrap exactly that
   word in 【 】 where it occurs — the app renders it underlined, matching the
@@ -149,7 +157,7 @@ export async function POST(request: Request) {
   if (!parsed.success) {
     return Response.json({ error: "bad_request" }, { status: 400 });
   }
-  const { documentId, focus, kind, count } = parsed.data;
+  const { documentId, focus, kind, count, avoid } = parsed.data;
 
   if (!process.env.GOOGLE_API_KEY || !process.env.GROQ_API_KEY) {
     return Response.json({ error: "model_keys_not_configured" }, { status: 503 });
@@ -199,9 +207,11 @@ export async function POST(request: Request) {
 
   // Fetch wide, then narrow to the student's focus: the focus is free text,
   // so scoping happens by ranking chunk contents, not by a column filter.
+  // book_page comes along so review references can name a page the student
+  // can actually open.
   const { data: chunks, error } = await db
     .from("chunks")
-    .select("content, metadata")
+    .select("content, metadata, book_page")
     .eq("document_id", documentId)
     .limit(200);
   if (error) {
@@ -218,26 +228,54 @@ export async function POST(request: Request) {
   }
 
   // ~10 focused excerpts with tight character caps: quiz latency is dominated
-  // by prompt size, and focused excerpts out-drill a loose pile.
+  // by prompt size, and focused excerpts out-drill a loose pile. Excerpts are
+  // headed by the textbook name and printed page — never "Material N", which
+  // the model would echo into review references students cannot follow.
   const sample = rankChunksByFocus(
-    chunks as { content: string; metadata: Record<string, unknown> | null }[],
+    chunks as {
+      content: string;
+      metadata: Record<string, unknown> | null;
+      book_page: string | null;
+    }[],
     focus ?? "",
     10,
   )
-    .map((c, i) => `--- Material ${i + 1} ---\n${c.content.slice(0, 900)}`)
+    .map((c) => {
+      const grammarPoints = Array.isArray(c.metadata?.["grammar_points"])
+        ? (c.metadata["grammar_points"] as string[]).filter(Boolean).join("、")
+        : "";
+      const header = [
+        `"${doc.title}"`,
+        c.book_page ? `page ${c.book_page}` : null,
+        grammarPoints ? `teaches: ${grammarPoints}` : null,
+      ]
+        .filter(Boolean)
+        .join(", ");
+      return `--- From ${header} ---\n${c.content.slice(0, 900)}`;
+    })
     .join("\n\n");
 
   const perSection = Math.round(count / 3);
-  const prompt = `Create a practice test from the material below, drawn from
-the textbook "${doc.title}". Exactly ${count} questions in total — ${perSection} in
-each of the 3 sections. Focus on ${
+  const prompt = `Create a practice test from the textbook excerpts below, all
+from "${doc.title}" — the book the student owns. The paper's format is modelled
+on the course's past test papers, but every question must be drawn from these
+excerpts. Exactly ${count} questions in total — ${perSection} in each of the 3
+sections. Focus on ${
     kind === "kanji"
-      ? "the kanji and vocabulary that appear in this material"
-      : "the grammar patterns drilled in this material"
+      ? "the kanji and vocabulary that appear in these excerpts"
+      : "the grammar patterns drilled in these excerpts"
   }.${
     focus
       ? `\nThe student asked the test to focus on: "${focus}". Keep every question
 inside that scope, and say so in scope_description.`
+      : ""
+  }${
+    avoid && avoid.length > 0
+      ? `\nThe student just sat a paper with the questions below. Write COMPLETELY
+different questions — different sentences, different target words, different
+vocabulary — while staying inside the same material:\n${avoid
+          .map((q) => `- ${q.slice(0, 200)}`)
+          .join("\n")}`
       : ""
   }\n\n${sample}`;
   const system = `${SYSTEM}\n\n${KIND_SPEC[kind]}`;
@@ -274,7 +312,16 @@ inside that scope, and say so in scope_description.`
         schema: QuizSchema,
         system,
         prompt,
+        // Test papers should vary between sittings; greedy decoding regrows
+        // the same questions from the same excerpts.
+        temperature: 0.8,
       });
+      // A paper that is schema-valid but far too short is still unusable —
+      // seen live: 1 item back from a 9-item request. Let the next tier try.
+      const produced = object.sections.reduce((n, s) => n + s.items.length, 0);
+      if (produced < Math.ceil(count * 0.6)) {
+        throw new Error(`paper too short: ${produced} items for count=${count}`);
+      }
       return Response.json(object, {
         headers: setCookie ? { "Set-Cookie": setCookie } : undefined,
       });

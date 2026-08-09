@@ -79,6 +79,8 @@ export function QuizView({
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const [checked, setChecked] = useState(false);
   const [errorText, setErrorText] = useState("");
+  // AI coaching for the checked paper: null = not requested, "" = loading.
+  const [feedback, setFeedback] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/quiz")
@@ -96,6 +98,15 @@ export function QuizView({
     setPhase("loading");
     setChecked(false);
     setAnswers({});
+    setFeedback(null);
+    // "New Test" must mean new questions: the previous paper's texts ride
+    // along so the generator writes around them.
+    const avoid = quiz
+      ? flattenItems(quiz)
+          .flatMap((item) => [item.question, item.sentence])
+          .filter((text): text is string => Boolean(text))
+          .slice(0, 40)
+      : undefined;
     try {
       const response = await fetch("/api/quiz", {
         method: "POST",
@@ -105,6 +116,7 @@ export function QuizView({
           focus: focus.trim() || undefined,
           kind,
           count: 15,
+          avoid,
         }),
       });
       if (!response.ok) {
@@ -138,6 +150,7 @@ export function QuizView({
   function retake() {
     setAnswers({});
     setChecked(false);
+    setFeedback(null);
     setPhase("active");
     window.scrollTo({ top: 0 });
   }
@@ -146,8 +159,40 @@ export function QuizView({
     setQuiz(null);
     setChecked(false);
     setAnswers({});
+    setFeedback(null);
     setPhase("setup");
     window.scrollTo({ top: 0 });
+  }
+
+  /** Ask the coach about the just-checked paper. Best-effort: on any failure
+   * the deterministic study plan stands alone rather than blocking the score. */
+  async function requestFeedback(paper: Quiz, given: Record<number, string>) {
+    setFeedback("");
+    const paperItems = flattenItems(paper);
+    const { correct: right, total: all } = scoreQuiz(paper, given);
+    try {
+      const response = await fetch("/api/quiz/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind,
+          scope_description: paper.scope_description.slice(0, 500),
+          score: { correct: right, total: all },
+          results: paperItems.slice(0, 30).map((item, i) => ({
+            question: (item.sentence ?? item.question).slice(0, 300),
+            review: item.review.slice(0, 200),
+            correct: isCorrect(item, given[i] ?? ""),
+            given: (given[i] ?? "").slice(0, 120) || undefined,
+            answer: item.answer.slice(0, 120),
+          })),
+        }),
+      });
+      if (!response.ok) throw new Error(String(response.status));
+      const body = (await response.json()) as { feedback?: string };
+      setFeedback(body.feedback?.trim() || null);
+    } catch {
+      setFeedback(null);
+    }
   }
 
   const { correct, total } = quiz ? scoreQuiz(quiz, answers) : { correct: 0, total: 0 };
@@ -289,6 +334,7 @@ export function QuizView({
                 correct={correct}
                 total={total}
                 plan={studyPlan(quiz, answers)}
+                feedback={feedback}
                 onRetake={retake}
                 onNew={backToSetup}
                 onRegenerate={generate}
@@ -345,6 +391,7 @@ export function QuizView({
                   onClick={() => {
                     setChecked(true);
                     setPhase("done");
+                    void requestFeedback(quiz, answers);
                     window.scrollTo({ top: 0, behavior: "smooth" });
                   }}
                   disabled={answered < items.length}
@@ -403,6 +450,7 @@ function ScoreCard({
   correct,
   total,
   plan,
+  feedback,
   onRetake,
   onNew,
   onRegenerate,
@@ -410,6 +458,8 @@ function ScoreCard({
   correct: number;
   total: number;
   plan: { review: string; questions: number[] }[];
+  /** null = unavailable, "" = still being written, otherwise the coaching. */
+  feedback: string | null;
   onRetake: () => void;
   onNew: () => void;
   onRegenerate: () => void;
@@ -438,6 +488,22 @@ function ScoreCard({
           <span className="text-sm text-stone-500">{en}</span>
         </p>
       </div>
+
+      {feedback === "" && (
+        <p className="mt-5 animate-pulse rounded-xl bg-stone-50 p-4 text-sm text-stone-400">
+          Writing your feedback…
+        </p>
+      )}
+      {feedback && (
+        <div className="mt-5 rounded-xl border border-stone-200 bg-white p-4 text-left">
+          <p className="text-xs font-medium uppercase tracking-wide text-stone-500">
+            Your study coach
+          </p>
+          <p className="mt-2 whitespace-pre-line text-sm leading-relaxed text-stone-700">
+            {feedback}
+          </p>
+        </div>
+      )}
 
       {plan.length > 0 ? (
         <div className="mt-5 rounded-xl bg-stone-50 p-4 text-left">

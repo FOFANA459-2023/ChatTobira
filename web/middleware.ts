@@ -19,6 +19,7 @@ export async function middleware(request: NextRequest) {
     path === "/api/chat" ||
     path === "/quiz" ||
     path === "/api/quiz" ||
+    path === "/api/quiz/feedback" ||
     path.startsWith("/login") ||
     path.startsWith("/auth") ||
     path.startsWith("/admin");

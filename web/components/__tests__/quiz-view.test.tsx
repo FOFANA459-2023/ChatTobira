@@ -47,15 +47,26 @@ const PAPER: Quiz = {
   ],
 };
 
+const FEEDBACK = {
+  feedback:
+    "Solid grasp of location particles. Your miss was the polite past tense — review Topic 6 (p. 76) and drill ました forms.",
+};
+
 function mockFetch() {
-  const fetchMock = vi.fn((_url: RequestInfo | URL, init?: RequestInit) =>
-    Promise.resolve(
-      new Response(JSON.stringify(init?.method === "POST" ? PAPER : BOOKS), {
+  const fetchMock = vi.fn((url: RequestInfo | URL, init?: RequestInit) => {
+    const target = String(url);
+    const body = target.endsWith("/api/quiz/feedback")
+      ? FEEDBACK
+      : init?.method === "POST"
+        ? PAPER
+        : BOOKS;
+    return Promise.resolve(
+      new Response(JSON.stringify(body), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       }),
-    ),
-  );
+    );
+  });
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
 }
@@ -127,6 +138,18 @@ describe("QuizView", () => {
     ).not.toBeInTheDocument();
     expect(screen.getAllByText(/Topic 3 — location particles/).length).toBe(1);
 
+    // The AI coach's feedback arrives after checking, alongside the plan.
+    expect(await screen.findByText(/Your study coach/)).toBeInTheDocument();
+    expect(screen.getByText(/drill ました forms/)).toBeInTheDocument();
+    const feedbackCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).endsWith("/api/quiz/feedback"),
+    );
+    const feedbackBody = JSON.parse(String(feedbackCall?.[1]?.body));
+    expect(feedbackBody.score).toEqual({ correct: 1, total: 2 });
+    expect(feedbackBody.results).toHaveLength(2);
+    expect(feedbackBody.results[1].correct).toBe(false);
+    expect(feedbackBody.results[1].review).toMatch(/Topic 6/);
+
     expect(screen.getByRole("button", { name: /Retake this test/ })).toBeInTheDocument();
     // Renamed from "New test, same settings" / "New test": both the score
     // card and the bottom bar now read exactly "New Test".
@@ -134,6 +157,19 @@ describe("QuizView", () => {
     expect(
       screen.queryByRole("button", { name: /same settings/i }),
     ).not.toBeInTheDocument();
+
+    // "New Test" sends the sat paper's texts so the next one avoids them.
+    fireEvent.click(screen.getAllByRole("button", { name: "New Test" })[0]);
+    await waitFor(() => {
+      const regen = fetchMock.mock.calls.filter(
+        ([url, init]) =>
+          String(url).endsWith("/api/quiz") && init?.method === "POST",
+      );
+      const lastBody = JSON.parse(String(regen.at(-1)?.[1]?.body));
+      expect(lastBody.avoid).toEqual(
+        expect.arrayContaining(["毎日、部屋（　）勉強します。", "きのう、すしを【食べる】。"]),
+      );
+    });
   });
 
   it("accepts a romaji answer as correct", async () => {
