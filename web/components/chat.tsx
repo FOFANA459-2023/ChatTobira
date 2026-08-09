@@ -10,7 +10,6 @@ import { FeedbackButtons } from "@/components/feedback-buttons";
 import { MagicLinkForm } from "@/components/magic-link-form";
 import { MicButton } from "@/components/mic-button";
 import { NavBar } from "@/components/nav";
-import { createClient } from "@/lib/supabase/client";
 import type { Citation } from "@/lib/retrieval";
 
 interface MessageMeta {
@@ -61,40 +60,40 @@ export function Chat({
 
   return (
     <div className="mx-auto flex h-screen max-w-3xl flex-col">
-      <NavBar active="chat">
+      <NavBar active="chat" authenticated={authenticated}>
         {isAdmin && (
-          <>
-            <Link
-              href="/admin"
-              className="rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-sm text-stone-700 hover:bg-stone-100"
-            >
-              Invite students
-            </Link>
-            <button
-              onClick={async () => {
-                try {
-                  await createClient().auth.signOut();
-                } finally {
-                  window.location.assign("/");
-                }
-              }}
-              className="rounded-lg px-3 py-1.5 text-sm text-stone-500 hover:text-stone-900"
-            >
-              Sign out
-            </button>
-          </>
+          <Link
+            href="/admin"
+            className="rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-sm text-stone-700 hover:bg-stone-100"
+          >
+            Invite students
+          </Link>
         )}
       </NavBar>
 
       <div className="flex-1 space-y-4 overflow-y-auto px-4 py-6">
         {messages.length === 0 && (
-          <div className="mt-16 text-center text-stone-500">
-            <p lang="ja" className="text-xl">
-              {firstName ? `${firstName}さん、何を勉強しますか？` : "何を勉強しますか？"}
+          <div className="mx-auto mt-16 max-w-xl text-center text-stone-500">
+            <p className="text-xl font-medium text-stone-700">
+              {firstName
+                ? `Welcome to ChatTobira, ${firstName}!`
+                : "Welcome to ChatTobira"}
             </p>
-            <p className="mt-2 text-sm">
-              Ask about grammar, vocabulary, or kanji from your course. Answers
-              cite the textbook page they come from.
+            <p lang="ja" className="mt-1 text-lg">
+              {firstName
+                ? `${firstName}さん、ChatTobiraへようこそ！`
+                : "ChatTobiraへようこそ"}
+            </p>
+            <p className="mt-4 text-sm leading-relaxed">
+              ChatTobira is built to assist students using textbooks, past
+              quizzes and examinations, and other course materials from
+              Ritsumeikan Asia Pacific University (APU). Because these
+              materials are copyright-protected, ChatTobira does not store or
+              retain your chat conversations on the platform.
+            </p>
+            <p className="mt-2 text-sm leading-relaxed">
+              You are welcome to take notes or save your own study materials
+              for personal review later.
             </p>
             {!authenticated && (
               <p className="mt-3 text-xs text-stone-400">

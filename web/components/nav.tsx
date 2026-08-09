@@ -4,6 +4,8 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 
+import { createClient } from "@/lib/supabase/client";
+
 const PAGES = [
   { href: "/", label: "Chat", ja: "チャット" },
   { href: "/quiz?kind=grammar", label: "Grammar test", ja: "文法" },
@@ -12,12 +14,19 @@ const PAGES = [
 
 /** Shared top navigation. The brand always leads home; every page is one
  * click away from every other page. `active` marks the current page since
- * two nav entries share the /quiz pathname. */
+ * two nav entries share the /quiz pathname.
+ *
+ * Auth controls live at the right end, after the page links: `children`
+ * (admin-only actions like Invite students), then Sign out — or a Sign in
+ * link for signed-out visitors. Pages behind the auth middleware can omit
+ * `authenticated`; only the chat serves signed-out trial visitors. */
 export function NavBar({
   active,
+  authenticated = true,
   children,
 }: {
   active?: "chat" | "grammar" | "kanji";
+  authenticated?: boolean;
   children?: ReactNode;
 }) {
   const pathname = usePathname();
@@ -35,7 +44,6 @@ export function NavBar({
       </Link>
 
       <div className="flex flex-wrap items-center gap-2">
-        {children}
         <nav className="flex gap-1 rounded-xl bg-stone-100 p-1">
           {PAGES.map((page, i) => {
             const key = (["chat", "grammar", "kanji"] as const)[i];
@@ -57,6 +65,30 @@ export function NavBar({
             );
           })}
         </nav>
+
+        {children}
+
+        {authenticated ? (
+          <button
+            onClick={async () => {
+              try {
+                await createClient().auth.signOut();
+              } finally {
+                window.location.assign("/");
+              }
+            }}
+            className="rounded-lg px-3 py-1.5 text-sm text-stone-500 hover:text-stone-900"
+          >
+            Sign out
+          </button>
+        ) : (
+          <Link
+            href="/login"
+            className="rounded-lg bg-stone-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-stone-700"
+          >
+            Sign in
+          </Link>
+        )}
       </div>
     </header>
   );

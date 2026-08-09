@@ -163,6 +163,12 @@ def _call_model(model: str, images: list[Path], count: int) -> list[dict]:
                 # Dense scanned pages produce very long markdown; the default
                 # budget truncated a 4-page batch mid-string.
                 max_output_tokens=65536,
+                # Thinking tokens come out of max_output_tokens. Seen live: the
+                # model spent 62,915 tokens thinking about a table-of-contents
+                # page, leaving ~2.6k for JSON, which truncated mid-string even
+                # with a single image per request. Transcription needs no
+                # reasoning, so spend the whole budget on output.
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
         )
     except Exception as exc:
