@@ -241,6 +241,11 @@ export async function POST(request: Request) {
     } catch (error) {
       // Rate limit or outage: try the next tier, retry this one next request.
       // Unfunded or revoked: stop offering it until the isolate recycles.
+      // Logged so an all-tiers failure is diagnosable from the worker logs.
+      console.error(
+        `chat tier ${tier.label} declined:`,
+        error instanceof Error ? error.message : error,
+      );
       noteProviderFailure(tier.provider, error);
     }
   }

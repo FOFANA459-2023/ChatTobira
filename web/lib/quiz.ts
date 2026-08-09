@@ -12,6 +12,10 @@ export const QuizItemSchema = z.object({
   // Grading accepts either script — see isCorrect.
   answer_kana: z.string().optional(),
   explanation: z.string().min(1),
+  // Where in the course material to study this point: the topic or lesson as
+  // printed in the textbook, with the book page when the material shows one.
+  // Shown with the explanation and aggregated into the post-test study plan.
+  review: z.string().min(1),
   grammar_point: z.string().optional(),
 });
 
@@ -74,18 +78,154 @@ function stripReadings(text: string): string {
   return text.replace(/[（(][ぁ-ゖャ-ンゝゞー]+[）)]/g, "").replace(/《[^》]*》/g, "");
 }
 
-/** A written answer is correct in any script the student knows it in:
- * the kanji form, the all-hiragana reading (answer_kana, supplied by the
- * generator), or kanji with furigana attached. Without answer_kana the exact
- * form is required — the reading of a kanji answer cannot be inferred client-
- * side, and the UI shows the expected answer on mismatch. */
+// Hepburn and kunrei spellings side by side: students are taught Hepburn but
+// type what their keyboard IME trained them to (si, tu, zi …). Longest first.
+const ROMAJI: Record<string, string> = {
+  kya: "きゃ", kyu: "きゅ", kyo: "きょ", gya: "ぎゃ", gyu: "ぎゅ", gyo: "ぎょ",
+  sha: "しゃ", shu: "しゅ", sho: "しょ", sya: "しゃ", syu: "しゅ", syo: "しょ",
+  cha: "ちゃ", chu: "ちゅ", cho: "ちょ", tya: "ちゃ", tyu: "ちゅ", tyo: "ちょ",
+  nya: "にゃ", nyu: "にゅ", nyo: "にょ", hya: "ひゃ", hyu: "ひゅ", hyo: "ひょ",
+  mya: "みゃ", myu: "みゅ", myo: "みょ", rya: "りゃ", ryu: "りゅ", ryo: "りょ",
+  bya: "びゃ", byu: "びゅ", byo: "びょ", pya: "ぴゃ", pyu: "ぴゅ", pyo: "ぴょ",
+  ja: "じゃ", ju: "じゅ", jo: "じょ", zya: "じゃ", zyu: "じゅ", zyo: "じょ",
+  shi: "し", chi: "ち", tsu: "つ",
+  ka: "か", ki: "き", ku: "く", ke: "け", ko: "こ",
+  ga: "が", gi: "ぎ", gu: "ぐ", ge: "げ", go: "ご",
+  sa: "さ", si: "し", su: "す", se: "せ", so: "そ",
+  za: "ざ", ji: "じ", zi: "じ", zu: "ず", ze: "ぜ", zo: "ぞ",
+  ta: "た", ti: "ち", tu: "つ", te: "て", to: "と",
+  da: "だ", di: "ぢ", du: "づ", de: "で", do: "ど",
+  na: "な", ni: "に", nu: "ぬ", ne: "ね", no: "の",
+  ha: "は", hi: "ひ", fu: "ふ", hu: "ふ", he: "へ", ho: "ほ",
+  ba: "ば", bi: "び", bu: "ぶ", be: "べ", bo: "ぼ",
+  pa: "ぱ", pi: "ぴ", pu: "ぷ", pe: "ぺ", po: "ぽ",
+  ma: "ま", mi: "み", mu: "む", me: "め", mo: "も",
+  ya: "や", yu: "ゆ", yo: "よ", ra: "ら", ri: "り", ru: "る", re: "れ", ro: "ろ",
+  wa: "わ", wo: "を", a: "あ", i: "い", u: "う", e: "え", o: "お",
+};
+
+/** Convert a romaji answer to hiragana, or null when the text is not romaji
+ * this converter fully understands. Null means "grade the raw text instead",
+ * never "mark it wrong" — an unconvertible answer can still match answer as
+ * typed. */
+export function romajiToHiragana(input: string): string | null {
+  const text = input.toLowerCase().replace(/[\s\-–ー]+/g, "");
+  if (text.length === 0 || !/^[a-z']+$/.test(text)) return null;
+
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    const next = text[i + 1];
+
+    // ん is the ambiguous one. n' is always ん alone. A trailing "nn" is the
+    // IME habit for final ん (tabemasenn). A mid-word "nn" is Hepburn's
+    // ん + syllable-initial n (konnichiwa = こん+にちわ), so only the first n
+    // is consumed. Otherwise n before a non-vowel/non-y or at the end is ん,
+    // and Hepburn writes it as m before b/m/p (shimbun).
+    if (c === "n" && next === "'") {
+      out += "ん";
+      i += 2;
+      continue;
+    }
+    if (c === "n" && next === "n" && i + 2 === text.length) {
+      out += "ん";
+      i += 2;
+      continue;
+    }
+    if (c === "n" && (next === undefined || !"aiueoy".includes(next))) {
+      out += "ん";
+      i += 1;
+      continue;
+    }
+    if (c === "m" && next !== undefined && "bmp".includes(next)) {
+      out += "ん";
+      i += 1;
+      continue;
+    }
+
+    // Small っ: doubled consonant (kitte), or Hepburn's t-before-ch (matcha).
+    if (!"aiueon".includes(c) && (next === c || (c === "t" && next === "c"))) {
+      out += "っ";
+      i += 1;
+      continue;
+    }
+
+    const three = ROMAJI[text.slice(i, i + 3)];
+    const two = ROMAJI[text.slice(i, i + 2)];
+    const one = ROMAJI[c];
+    if (three) {
+      out += three;
+      i += 3;
+    } else if (two) {
+      out += two;
+      i += 2;
+    } else if (one) {
+      out += one;
+      i += 1;
+    } else {
+      return null;
+    }
+  }
+  return out;
+}
+
+/** A written answer is correct in any script the student knows it in: the
+ * kanji form, the all-hiragana reading (answer_kana, supplied by the
+ * generator), kanji with furigana attached, or romaji typed on an English
+ * keyboard (converted to hiragana before comparing). Without answer_kana the
+ * exact form is required — the reading of a kanji answer cannot be inferred
+ * client-side, and the UI shows the expected answer on mismatch. */
 export function isCorrect(item: QuizItem, given: string): boolean {
   const accepted = new Set(
     [item.answer, item.answer_kana]
       .filter((form): form is string => Boolean(form))
       .map((form) => normalizeAnswer(stripReadings(form))),
   );
-  return accepted.has(normalizeAnswer(stripReadings(given)));
+  if (accepted.has(normalizeAnswer(stripReadings(given)))) return true;
+
+  const asKana = romajiToHiragana(given.trim());
+  return asKana !== null && accepted.has(normalizeAnswer(asKana));
+}
+
+/** Split Japanese text on 【 】 target-word markers for rendering.
+ *
+ * The generator wraps the one word an item asks about in 【 】 — the printed
+ * papers underline that word, and a literal ＿＿ next to it reads as a line
+ * beside the word rather than under it. The UI renders marked segments with a
+ * real underline and drops the brackets. */
+export function splitUnderline(text: string): { text: string; underline: boolean }[] {
+  const segments: { text: string; underline: boolean }[] = [];
+  const marker = /【([^】]+)】/g;
+  let last = 0;
+  for (const match of text.matchAll(marker)) {
+    if (match.index > last) {
+      segments.push({ text: text.slice(last, match.index), underline: false });
+    }
+    segments.push({ text: match[1], underline: true });
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) segments.push({ text: text.slice(last), underline: false });
+  return segments.length > 0 ? segments : [{ text, underline: false }];
+}
+
+/** Aggregate missed questions into a study plan: which review references were
+ * missed, with 1-based question numbers, most-missed first. Deterministic —
+ * no model call (and no quota) stands between a student and their feedback. */
+export function studyPlan(
+  quiz: Quiz,
+  answers: Record<number, string>,
+): { review: string; questions: number[] }[] {
+  const missed = new Map<string, number[]>();
+  flattenItems(quiz).forEach((item, index) => {
+    if (isCorrect(item, answers[index] ?? "")) return;
+    const list = missed.get(item.review) ?? [];
+    list.push(index + 1);
+    missed.set(item.review, list);
+  });
+  return [...missed.entries()]
+    .map(([review, questions]) => ({ review, questions }))
+    .sort((a, b) => b.questions.length - a.questions.length);
 }
 
 /** A chunk as fetched for quiz generation. */

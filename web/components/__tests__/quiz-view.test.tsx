@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { QuizView } from "../quiz";
@@ -25,6 +25,7 @@ const PAPER: Quiz = {
           choices: ["で", "に", "を", "へ"],
           answer: "で",
           explanation: "で marks the place where an action happens.",
+          review: "Topic 3 — location particles (p. 33)",
         },
       ],
     },
@@ -34,9 +35,12 @@ const PAPER: Quiz = {
       items: [
         {
           type: "fill_blank",
-          question: "「食べる」を正しい形にしてください: きのう、すしを＿＿。",
+          question: "正しい形にしてください。",
+          sentence: "きのう、すしを【食べる】。",
           answer: "食べました",
+          answer_kana: "たべました",
           explanation: "Past polite form of 食べる.",
+          review: "Topic 6 — polite past tense (p. 76)",
         },
       ],
     },
@@ -95,6 +99,11 @@ describe("QuizView", () => {
     const check = screen.getByRole("button", { name: /Check answers/ });
     expect(check).toBeDisabled();
 
+    // The 【 】-marked target word renders as a real underline, brackets gone.
+    const underlined = document.querySelector("u");
+    expect(underlined).toHaveTextContent("食べる");
+    expect(screen.queryByText(/【/)).not.toBeInTheDocument();
+
     fireEvent.click(screen.getByRole("button", { name: /① で/ }));
     fireEvent.change(screen.getByPlaceholderText("こたえ"), {
       target: { value: "食べた" },
@@ -106,9 +115,47 @@ describe("QuizView", () => {
     await waitFor(() => expect(screen.getByText("1")).toBeInTheDocument());
     expect(screen.getByText("/ 2")).toBeInTheDocument();
     expect(screen.getByText(/50%/)).toBeInTheDocument();
-    expect(screen.getByText("食べました")).toBeInTheDocument();
+    expect(screen.getByText(/食べました（たべました）/)).toBeInTheDocument();
     expect(screen.getByText(/Past polite form/)).toBeInTheDocument();
+
+    // Every item shows its review reference; the study plan aggregates ONLY
+    // the missed one and leaves the correctly-answered topic out.
+    const planBox = screen.getByText(/Where to study next/).closest("div")!;
+    expect(within(planBox as HTMLElement).getByText(/Topic 6 — polite past tense/)).toBeInTheDocument();
+    expect(
+      within(planBox as HTMLElement).queryByText(/Topic 3 — location particles/),
+    ).not.toBeInTheDocument();
+    expect(screen.getAllByText(/Topic 3 — location particles/).length).toBe(1);
+
     expect(screen.getByRole("button", { name: /Retake this test/ })).toBeInTheDocument();
+    // Renamed from "New test, same settings" / "New test": both the score
+    // card and the bottom bar now read exactly "New Test".
+    expect(screen.getAllByRole("button", { name: "New Test" })).toHaveLength(2);
+    expect(
+      screen.queryByRole("button", { name: /same settings/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("accepts a romaji answer as correct", async () => {
+    mockFetch();
+    window.scrollTo = vi.fn();
+    render(<QuizView initialKind="grammar" />);
+
+    const select = await screen.findByLabelText(/Textbook/);
+    fireEvent.change(select, { target: { value: "1" } });
+    fireEvent.click(screen.getByRole("button", { name: /Start the Grammar Practice Test/ }));
+
+    await screen.findByText("Grammar Practice Test");
+    fireEvent.click(screen.getByRole("button", { name: /① で/ }));
+    fireEvent.change(screen.getByPlaceholderText("こたえ"), {
+      target: { value: "tabemashita" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Check answers/ }));
+
+    // 2/2: the romaji answer graded as たべました.
+    await waitFor(() => expect(screen.getByText("2")).toBeInTheDocument());
+    expect(screen.getByText(/100%/)).toBeInTheDocument();
+    expect(screen.getByText(/Nothing to review from this paper/)).toBeInTheDocument();
   });
 
   it("starts in kanji mode when linked with ?kind=kanji", async () => {

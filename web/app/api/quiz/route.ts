@@ -42,10 +42,20 @@ provided course material, in the format of the course's own test papers. Rules:
   the material as possible; never drill the same point twice in one paper.
 - explanation: one or two sentences on WHY, in simple English with the
   Japanese pattern or word named.
+- review: for EVERY item, where in the course material the student should go
+  to study this point — the topic or lesson exactly as the material names it,
+  plus the concept, e.g. "Topic 7 — て-form requests". Add the printed book
+  page when the material shows one, e.g. "Topic 7 — て-form requests (p. 94)".
+  Identical points must use the identical review string so results aggregate.
+- When an item asks about ONE specific word in a sentence (the word to
+  conjugate, the word to read, the word to write in kanji), wrap exactly that
+  word in 【 】 where it occurs — the app renders it underlined, matching the
+  printed papers. Use ＿＿ only for a blank the student fills.
 - scope_description: 1–2 sentences in English telling the student what this
   test covers — name the specific grammar points or vocabulary drilled, and
   the textbook or lesson area they come from.
-- Never reference "the source", file names, or page numbers in questions.`;
+- Never reference "the source", file names, or page numbers in questions or
+  explanations; page numbers belong in review only.`;
 
 // Section plans mirror the papers students actually sit: the 文法復習シート
 // for grammar, the JLPT-style 文字・語彙 sections for kanji.
@@ -55,8 +65,11 @@ Section 1 — instruction_ja 「（　）に入る適切なことばを選んで
   multiple_choice. Short sentences or two-line dialogues with （　）; choices
   are particles, question words, or forms drilled in the material.
 Section 2 — instruction_ja 「＿＿のことばを正しい形にしてください。」:
-  fill_blank. The sentence shows ＿＿ and the question names the dictionary
-  form to conjugate, e.g. 「食べる」を正しい形にしてください.
+  fill_blank. The sentence contains the DICTIONARY form of one word wrapped in
+  【 】 at the place it occurs, e.g. きのう、すしを【食べる】。 The student
+  rewrites the marked word in the form the sentence needs; the answer is that
+  correct form. Do not put a ＿＿ blank in these sentences — the marked word
+  itself is what changes.
 Section 3 — instruction_ja 「例のように文を完成させてください。」:
   fill_blank. Complete the sentence using the sentence pattern being drilled;
   the question states what to do with the given fragment.`,
@@ -236,8 +249,11 @@ inside that scope, and say so in scope_description.`
   // than strict schema enforcement and its own docs warn it can return empty
   // content, so a malformed paper throws inside generateObject and simply
   // falls through to Gemini — which is exactly why Gemini stays in the chain.
+  // NOT the chat model: generateObject needs response_format json_schema,
+  // which Groq only implements on the gpt-oss models — llama-3.3 rejects it,
+  // which silently sent every quiz to Gemini and its 20-requests/day budget.
   const tiers = [
-    { provider: "groq", model: groq(process.env.CHAT_MODEL ?? "llama-3.3-70b-versatile") },
+    { provider: "groq", model: groq(process.env.QUIZ_MODEL ?? "openai/gpt-oss-120b") },
   ];
   if (process.env.DEEPSEEK_API_KEY && !isProviderDead("deepseek")) {
     const deepseek = createDeepSeek({ apiKey: process.env.DEEPSEEK_API_KEY });
@@ -263,7 +279,13 @@ inside that scope, and say so in scope_description.`
         headers: setCookie ? { "Set-Cookie": setCookie } : undefined,
       });
     } catch (error) {
-      // Declined or produced an unusable paper — try the next provider.
+      // Declined or produced an unusable paper — try the next provider. The
+      // reason is logged because a silent cascade turns "every tier failed"
+      // into an undiagnosable 502.
+      console.error(
+        `quiz generation failed on ${tier.provider}:`,
+        error instanceof Error ? error.message : error,
+      );
       noteProviderFailure(tier.provider, error);
     }
   }

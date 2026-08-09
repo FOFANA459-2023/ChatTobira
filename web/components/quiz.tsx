@@ -9,10 +9,31 @@ import {
   flattenItems,
   isCorrect,
   scoreQuiz,
+  splitUnderline,
+  studyPlan,
   type Quiz,
   type QuizItem,
   type QuizKind,
 } from "@/lib/quiz";
+
+/** Japanese text with 【 】-marked words rendered as real underlines — the
+ * printed papers underline the word an item asks about, and a literal marker
+ * or a ＿＿ beside the word reads as a line NEXT to it, not under it. */
+function JaText({ text }: { text: string }) {
+  return (
+    <>
+      {splitUnderline(text).map((segment, i) =>
+        segment.underline ? (
+          <u key={i} className="underline decoration-2 underline-offset-4">
+            {segment.text}
+          </u>
+        ) : (
+          <span key={i}>{segment.text}</span>
+        ),
+      )}
+    </>
+  );
+}
 
 interface Book {
   id: number;
@@ -267,6 +288,7 @@ export function QuizView({
               <ScoreCard
                 correct={correct}
                 total={total}
+                plan={studyPlan(quiz, answers)}
                 onRetake={retake}
                 onNew={backToSetup}
                 onRegenerate={generate}
@@ -291,8 +313,8 @@ export function QuizView({
                     <p className="mt-0.5 text-xs text-stone-500">{section.instruction_en}</p>
                     {section.items.some((item) => item.type === "fill_blank") && (
                       <p className="mt-0.5 text-xs text-stone-400">
-                        Answers are accepted in hiragana, kanji, or kanji with
-                        furigana — any correct form counts.
+                        Answers are accepted in hiragana, kanji, or romaji
+                        (English letters) — any correct form counts.
                       </p>
                     )}
                   </div>
@@ -354,7 +376,7 @@ export function QuizView({
                   onClick={generate}
                   className="rounded-xl border border-stone-300 bg-white px-5 py-2.5 text-sm hover:bg-stone-100"
                 >
-                  New test, same settings
+                  New Test
                 </button>
                 <button
                   onClick={backToSetup}
@@ -380,12 +402,14 @@ export function QuizView({
 function ScoreCard({
   correct,
   total,
+  plan,
   onRetake,
   onNew,
   onRegenerate,
 }: {
   correct: number;
   total: number;
+  plan: { review: string; questions: number[] }[];
   onRetake: () => void;
   onNew: () => void;
   onRegenerate: () => void;
@@ -401,17 +425,51 @@ function ScoreCard({
           : ["がんばりましょう！", "Review the explanations below, then try again."];
 
   return (
-    <div className="rounded-2xl border border-stone-200 bg-white p-6 text-center shadow-sm">
-      <p className="text-4xl font-semibold">
-        {correct} <span className="text-xl font-normal text-stone-400">/ {total}</span>
-      </p>
-      <p className="mt-1 text-sm text-stone-500">{percent}%</p>
-      <p className="mt-3">
-        <span lang="ja" className="font-medium">
-          {ja}
-        </span>{" "}
-        <span className="text-sm text-stone-500">{en}</span>
-      </p>
+    <div className="rounded-2xl border border-stone-200 bg-white p-6 shadow-sm">
+      <div className="text-center">
+        <p className="text-4xl font-semibold">
+          {correct} <span className="text-xl font-normal text-stone-400">/ {total}</span>
+        </p>
+        <p className="mt-1 text-sm text-stone-500">{percent}%</p>
+        <p className="mt-3">
+          <span lang="ja" className="font-medium">
+            {ja}
+          </span>{" "}
+          <span className="text-sm text-stone-500">{en}</span>
+        </p>
+      </div>
+
+      {plan.length > 0 ? (
+        <div className="mt-5 rounded-xl bg-stone-50 p-4 text-left">
+          <p className="text-xs font-medium uppercase tracking-wide text-stone-500">
+            Where to study next
+          </p>
+          <p className="mt-1 text-xs text-stone-500">
+            Based on this test, these are the parts of the course to review —
+            most missed first.
+          </p>
+          <ul className="mt-2 space-y-1.5 text-sm text-stone-700">
+            {plan.map(({ review, questions }) => (
+              <li key={review} className="flex items-baseline gap-2">
+                <span className="text-stone-400">•</span>
+                <span>
+                  {review}{" "}
+                  <span className="text-xs text-stone-400">
+                    ({questions.length === 1 ? "question" : "questions"}{" "}
+                    {questions.join(", ")})
+                  </span>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        <p className="mt-5 rounded-xl bg-green-50 p-4 text-center text-sm text-green-800">
+          Nothing to review from this paper — everything correct. Try a New
+          Test, or change the focus to drill something different.
+        </p>
+      )}
+
       <div className="mt-4 flex flex-wrap justify-center gap-2">
         <button
           onClick={onRetake}
@@ -423,7 +481,7 @@ function ScoreCard({
           onClick={onRegenerate}
           className="rounded-xl border border-stone-300 bg-white px-4 py-2 text-sm hover:bg-stone-100"
         >
-          New test
+          New Test
         </button>
         <button
           onClick={onNew}
@@ -462,11 +520,11 @@ function QuizItemView({
             {correct ? "○" : "✕"}
           </span>
         )}
-        ({index + 1}) {item.question}
+        ({index + 1}) <JaText text={item.question} />
       </p>
       {item.sentence && (
-        <p lang="ja" className="mt-2 text-base">
-          {item.sentence}
+        <p lang="ja" className="mt-2 text-base leading-8">
+          <JaText text={item.sentence} />
         </p>
       )}
 
@@ -490,7 +548,7 @@ function QuizItemView({
               ].join(" ")}
             >
               <span className="mr-1.5 text-stone-400">{CIRCLED[choiceIndex] ?? ""}</span>
-              {choice}
+              <JaText text={choice} />
             </button>
           ))}
         </div>
@@ -522,6 +580,9 @@ function QuizItemView({
             </p>
           )}
           <p className={correct ? "" : "mt-1"}>{item.explanation}</p>
+          <p className="mt-1.5 border-t border-black/5 pt-1.5 text-xs opacity-80">
+            <span className="font-medium">Review:</span> {item.review}
+          </p>
         </div>
       )}
     </div>
