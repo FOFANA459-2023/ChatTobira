@@ -93,12 +93,13 @@ Section 3 — instruction_ja 「例のように文を完成させてください
   fill_blank. Complete the sentence using the sentence pattern being drilled;
   the question states what to do with the given fragment.
 Section 4 — instruction_ja 「つぎの文章を読んで、内容と合っていれば○、違っていれば×を選んでください。」:
-  READING. Write this section's "passage": a short original text of 150–250
-  characters in the style of the reading passages on the course's past papers
-  (a student's diary, a letter, a note about daily life or campus life), built
-  from the vocabulary and grammar in the excerpts. Then exactly 5 true_false
-  items: each question is one statement about the passage, answer ○ or ×.
-  The passage field belongs to the section, not to the items.`,
+  READING. Write this section's "passage": an original text of 300–450
+  characters (about 8–12 sentences) in the style of the reading passages on
+  the course's past papers (a student's diary, a letter, a note about daily
+  life or campus life), built from the vocabulary and grammar in the excerpts.
+  Then exactly 5 true_false items: each question is one statement about the
+  passage, answer ○ or ×. The passage field belongs to the section, not to
+  the items.`,
   kanji: `Structure the paper as exactly 4 sections, in this order:
 Section 1 — instruction_ja 「＿＿のことばの読み方として、いちばんいいものを選んでください。」:
   multiple_choice. question is ONLY the sentence with one kanji word marked
@@ -115,11 +116,12 @@ Section 3 — instruction_ja 「（　）に入れるのに、いちばんいい
   multiple_choice. Vocabulary in context: a sentence with （　） and 4 word
   choices from the material.
 Section 4 — instruction_ja 「つぎの文章を読んで、内容と合っていれば○、違っていれば×を選んでください。」:
-  READING. Write this section's "passage": a short original text of 150–250
-  characters in the style of the reading passages on the course's past papers,
-  deliberately dense with the kanji and vocabulary from the excerpts. Then
-  exactly 5 true_false items: each question is one statement about the
-  passage, answer ○ or ×. The passage field belongs to the section.
+  READING. Write this section's "passage": an original text of 300–450
+  characters (about 8–12 sentences) in the style of the reading passages on
+  the course's past papers, deliberately dense with the kanji and vocabulary
+  from the excerpts. Then exactly 5 true_false items: each question is one
+  statement about the passage, answer ○ or ×. The passage field belongs to
+  the section.
 Across the WHOLE paper, never test the same word twice: a word whose reading
 is asked in Section 1 must not be the word written in Section 2, the blank in
 Section 3, or the point of a Section 4 statement. Every item, a new word.`,
@@ -314,15 +316,19 @@ export async function POST(request: Request) {
     scopeDivision
       ? `Furigana scope: this test is scoped to ${division} ${scopeDivision}. Write NO
 furigana for kanji taught in ${division} 1 through ${division} ${scopeDivision} —
-students are expected to read them. Write furigana 漢字（かんじ） only for kanji
-from beyond ${division} ${scopeDivision}.`
+students are expected to read them. Every kanji word from BEYOND ${division}
+${scopeDivision} MUST carry its reading, written 漢字（かんじ） immediately
+after the word — the app displays it as small hiragana above the kanji, and a
+beyond-scope word without its reading is unreadable to the student. This is
+required, not optional.`
       : `Furigana scope: this test covers the whole book, so treat every kanji that
-appears in the excerpts as already taught and write NO furigana for it. Write
-furigana 漢字（かんじ） only for kanji from outside this textbook.`
+appears in the excerpts as already taught and write NO furigana for it. Any
+kanji word from OUTSIDE this textbook MUST carry its reading, written
+漢字（かんじ） immediately after the word. This is required, not optional.`
   }
-The excerpts show the textbook's own readings as 漢字《かんじ》 — do NOT copy
-those annotations into your questions; strip them and apply the scope rule
-above instead.`;
+Exception: never annotate a word whose reading or writing is itself being
+tested. The excerpts show the textbook's own readings as 漢字《かんじ》 — do
+NOT copy those wholesale; apply the scope rule above instead.`;
 
   // Both papers end with the 5-question reading section, like the real ones.
   const reading = 5;
