@@ -12,6 +12,7 @@
     "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy"
   },
   "dependencies": {
+    "@ai-sdk/deepseek": "1.0.49",
     "@ai-sdk/google": "^2.0.0",
     "@ai-sdk/groq": "^2.0.0",
     "@ai-sdk/react": "^2.0.0",

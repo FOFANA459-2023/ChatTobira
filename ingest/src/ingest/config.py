@@ -56,6 +56,22 @@ class Config:
         return _req("GOOGLE_API_KEY")
 
     @property
+    def google_api_keys(self) -> list[str]:
+        """Every Google key configured, in order.
+
+        Free-tier daily buckets are per Cloud project, not per account, so a
+        key from a second project genuinely doubles the pages transcribable in
+        a day rather than just reshuffling the same quota. Set GOOGLE_API_KEY_2
+        (through _5) to use them; one key remains perfectly valid.
+        """
+        keys = [os.getenv("GOOGLE_API_KEY", "").strip()]
+        keys += [os.getenv(f"GOOGLE_API_KEY_{n}", "").strip() for n in range(2, 6)]
+        found = [k for k in keys if k]
+        if not found:
+            raise RuntimeError("GOOGLE_API_KEY is not set. Copy .env.example to .env and fill it in.")
+        return found
+
+    @property
     def database_url(self) -> str:
         """Direct Postgres connection. Remember: an '@' in the password must be
         URL-encoded as %40 or everything after it parses as the hostname."""

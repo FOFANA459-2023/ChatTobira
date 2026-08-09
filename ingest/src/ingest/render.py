@@ -90,3 +90,39 @@ def render_pages(doc: SourceDoc, pdf_path: Path) -> list[Path]:
 def page_count(pdf_path: Path) -> int:
     with pymupdf.open(pdf_path) as pdf:
         return pdf.page_count
+
+
+# A scanned blank verso is not pure white — it carries scanner speckle, paper
+# texture, and show-through from the printed side — so "any dark pixel at all"
+# would never fire. These thresholds were calibrated against the real rendered
+# pages of Foundation 1 & 2; see `ingest blank-check`, which reprints the
+# measurement for any document.
+BLANK_SHRINK = 2  # halve twice: 200 DPI -> ~50 DPI, 16x fewer bytes to scan
+BLANK_DARK_LEVEL = 200  # 0=black, 255=white; below this counts as ink
+BLANK_INK_RATIO = 0.0015  # inked fraction under which the page carries nothing
+
+
+def ink_ratio(image: Path) -> float:
+    """Fraction of clearly-inked pixels on a rendered page.
+
+    Downsampled first: scanning 22MB of full-resolution samples per page in
+    Python costs more than the API call it is meant to save.
+    """
+    pixmap = pymupdf.Pixmap(str(image))
+    pixmap.shrink(BLANK_SHRINK)
+    gray = pymupdf.Pixmap(pymupdf.csGRAY, pixmap)
+    data = gray.samples
+    if not data:
+        return 0.0
+    return sum(1 for b in data if b < BLANK_DARK_LEVEL) / len(data)
+
+
+def is_blank(image: Path) -> bool:
+    """True when a page carries no transcribable content.
+
+    Sending these to the vision model costs a request from a hard daily cap and
+    returns empty markdown either way. Deliberately conservative: a wrongly
+    skipped page silently loses textbook content, while a wrongly kept one only
+    wastes a call.
+    """
+    return ink_ratio(image) < BLANK_INK_RATIO

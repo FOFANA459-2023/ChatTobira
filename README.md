@@ -97,5 +97,24 @@ running; on paid it is a few dollars and finishes in under an hour.
 
 Groq free is 30 RPM / 1,000 requests per day. 100 students asking 10 questions is
 exactly that cap, so the serving path depends on the semantic cache, a per-user
-daily quota, and Groq → Gemini fallback through Cloudflare AI Gateway. Budget
-about $5–10/month for exam-week overflow.
+daily quota, and a provider cascade. Budget about $5–10/month for exam-week
+overflow.
+
+**Chat and quiz cascade: Groq → DeepSeek → Gemini.** Groq's free 1,000/day is
+spent first. DeepSeek then absorbs the overflow — it has no daily request cap at
+all, only a concurrency limit, so it is what actually removes the daily wall.
+Gemini stays last and is rarely reached, which leaves the Google key for vision
+and embeddings, the two jobs no other provider here can do.
+
+DeepSeek is **prepaid with no free tier**. With a zero balance it answers 402 and
+the cascade falls straight through to Gemini, so `DEEPSEEK_API_KEY` is safe to
+set before topping up — the first 402 retires the tier for that isolate rather
+than costing a round-trip per request. Leave the variable blank to keep the
+original Groq → Gemini behaviour.
+
+**Transcription quota.** Vision is the heaviest Google consumer, and its free
+tier caps *requests* per day. Three things stretch it: thinking is disabled
+(it was consuming 62k of the 64k output budget and truncating the JSON),
+blank pages are detected locally and never sent, and `GOOGLE_API_KEY_2` through
+`_5` add keys from other Cloud projects — daily buckets are per project *and*
+per model, so N keys × M models gives N×M independent budgets.

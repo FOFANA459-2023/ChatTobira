@@ -1,3 +1,4 @@
+import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createGroq } from "@ai-sdk/groq";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createClient as createSupabase, type SupabaseClient } from "@supabase/supabase-js";
@@ -5,6 +6,7 @@ import { convertToModelMessages, streamText, type UIMessage } from "ai";
 import { z } from "zod";
 
 import { contextBlock, systemPrompt } from "@/lib/prompt";
+import { isProviderDead, noteProviderFailure } from "@/lib/providers";
 import {
   buildCitations,
   embedQuery,
@@ -211,28 +213,66 @@ export async function POST(request: Request) {
   const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
   const google = createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY });
 
-  // Groq free tier is 30 requests/minute and 1,000/day; when it declines, fall
-  // back to Gemini rather than surfacing an error to the student.
-  let modelUsed = process.env.CHAT_MODEL ?? "llama-3.3-70b-versatile";
-  let result = streamText({
-    model: groq(modelUsed),
-    system,
-    messages: modelMessages,
-    temperature: 0.3,
+  // Provider cascade, cheapest-and-freest first. Groq's free tier (30/min,
+  // 1,000/day) is spent before anything is billed. DeepSeek then absorbs the
+  // overflow: it has no daily request cap at all, only a concurrency limit, so
+  // it is what actually removes the daily wall. Gemini stays last — rarely
+  // reached now, which leaves the Google key for vision and embeddings, the
+  // two jobs no other provider in this stack can do.
+  const tiers: {
+    provider: string;
+    label: string;
+    start: () => ReturnType<typeof streamText>;
+  }[] = [];
+  const chatOptions = { system, messages: modelMessages, temperature: 0.3 };
+
+  const groqModel = process.env.CHAT_MODEL ?? "llama-3.3-70b-versatile";
+  tiers.push({
+    provider: "groq",
+    label: groqModel,
+    start: () => streamText({ model: groq(groqModel), ...chatOptions }),
   });
 
-  try {
-    // Resolves once the provider accepts the request; rejects on 429/5xx
-    // before any tokens stream, which is exactly the fallback window.
-    await result.warnings;
-  } catch {
-    modelUsed = process.env.FALLBACK_MODEL ?? "gemini-3.6-flash";
-    result = streamText({
-      model: google(modelUsed),
-      system,
-      messages: modelMessages,
-      temperature: 0.3,
+  // Skipped once it has answered 402 (unfunded balance) or 401 (bad key):
+  // that verdict holds until the account is topped up, and re-asking every
+  // request would just add a round-trip in front of Gemini.
+  if (process.env.DEEPSEEK_API_KEY && !isProviderDead("deepseek")) {
+    const deepseek = createDeepSeek({ apiKey: process.env.DEEPSEEK_API_KEY });
+    const deepseekModel = process.env.DEEPSEEK_MODEL ?? "deepseek-v4-flash";
+    tiers.push({
+      provider: "deepseek",
+      label: deepseekModel,
+      start: () => streamText({ model: deepseek(deepseekModel), ...chatOptions }),
     });
+  }
+
+  const geminiModel = process.env.FALLBACK_MODEL ?? "gemini-3.6-flash";
+  tiers.push({
+    provider: "google",
+    label: geminiModel,
+    start: () => streamText({ model: google(geminiModel), ...chatOptions }),
+  });
+
+  let result: ReturnType<typeof streamText> | undefined;
+  let modelUsed = "";
+  for (const tier of tiers) {
+    const attempt = tier.start();
+    try {
+      // Resolves once the provider accepts the request; rejects on 429/5xx
+      // before any tokens stream, which is exactly the fallback window.
+      await attempt.warnings;
+      result = attempt;
+      modelUsed = tier.label;
+      break;
+    } catch (error) {
+      // Rate limit or outage: try the next tier, retry this one next request.
+      // Unfunded or revoked: stop offering it until the isolate recycles.
+      noteProviderFailure(tier.provider, error);
+    }
+  }
+
+  if (!result) {
+    return Response.json({ error: "all_models_unavailable" }, { status: 502 });
   }
 
   return result.toUIMessageStreamResponse({

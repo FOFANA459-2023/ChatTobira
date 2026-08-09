@@ -17,6 +17,7 @@ from pathlib import Path
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from .config import CONFIG
+from .render import is_blank
 
 PROMPT = """\
 You are transcribing pages from Japanese language teaching material used in a \
@@ -84,14 +85,14 @@ class PageText:
 from functools import lru_cache
 
 
-@lru_cache(maxsize=1)
-def _client():
-    """One shared client. Constructing a client per request lets the garbage
-    collector close the underlying httpx transport mid-flight, which surfaces
-    as 'Cannot send a request, as the client has been closed'."""
+@lru_cache(maxsize=8)
+def _client(api_key: str):
+    """One shared client per key. Constructing a client per request lets the
+    garbage collector close the underlying httpx transport mid-flight, which
+    surfaces as 'Cannot send a request, as the client has been closed'."""
     from google import genai
 
-    return genai.Client(api_key=CONFIG.google_api_key)
+    return genai.Client(api_key=api_key)
 
 
 class TransientVisionError(RuntimeError):
@@ -125,13 +126,23 @@ MODEL_CASCADE = [
     "gemini-3.1-flash-lite",
 ]
 
-_exhausted: set[str] = set()
+# (key index, model) pairs whose daily bucket is spent for this run.
+_exhausted: set[tuple[int, str]] = set()
 
 
-def _cascade() -> list[str]:
+def _cascade() -> list[tuple[int, str]]:
+    """(key index, model) pairs still worth trying, best model first.
+
+    Daily free-tier buckets are per project AND per model, so N keys × M models
+    gives N×M independent budgets. Models vary before keys so the best model is
+    used on every key before dropping to a weaker one.
+    """
     preferred = CONFIG.vision_model
     models = [preferred] + [m for m in MODEL_CASCADE if m != preferred]
-    return [m for m in models if m not in _exhausted]
+    key_count = len(CONFIG.google_api_keys)
+    return [
+        (k, m) for m in models for k in range(key_count) if (k, m) not in _exhausted
+    ]
 
 
 def _is_daily_quota(message: str) -> bool:
@@ -144,7 +155,7 @@ def _is_daily_quota(message: str) -> bool:
     stop=stop_after_attempt(4),
     reraise=True,
 )
-def _call_model(model: str, images: list[Path], count: int) -> list[dict]:
+def _call_model(api_key: str, model: str, images: list[Path], count: int) -> list[dict]:
     from google.genai import types
 
     parts: list = [PROMPT % count]
@@ -152,7 +163,7 @@ def _call_model(model: str, images: list[Path], count: int) -> list[dict]:
         parts.append(types.Part.from_bytes(data=image.read_bytes(), mime_type="image/png"))
 
     try:
-        response = _client().models.generate_content(
+        response = _client(api_key).models.generate_content(
             model=model,
             contents=parts,
             config=types.GenerateContentConfig(
@@ -192,19 +203,21 @@ def _call_model(model: str, images: list[Path], count: int) -> list[dict]:
 
 
 def _call(images: list[Path], count: int) -> list[dict]:
-    """Try each model in the cascade until one has daily budget left."""
+    """Try each key/model pair until one has daily budget left."""
     last: Exception | None = None
-    for model in _cascade():
+    keys = CONFIG.google_api_keys
+    for key_index, model in _cascade():
         try:
-            return _call_model(model, images, count)
+            return _call_model(keys[key_index], model, images, count)
         except DailyQuotaError as exc:
-            _exhausted.add(model)
+            _exhausted.add((key_index, model))
             last = exc
         except TransientVisionError as exc:
             last = exc
     raise DailyQuotaError(
-        "every vision model in the cascade is out of daily free-tier quota; "
-        "re-run tomorrow (the manifest resumes) or add billing"
+        "every vision model on every configured key is out of daily free-tier "
+        "quota; re-run tomorrow (the manifest resumes), add GOOGLE_API_KEY_2 "
+        "from a second Cloud project, or add billing"
     ) from last
 
 
@@ -226,18 +239,29 @@ def transcribe(
 
     for offset in range(0, len(images), batch_size):
         batch = images[offset : offset + batch_size]
-        try:
-            pages = _call(batch, len(batch))
-        except OutputTruncatedError:
-            # A dense batch overflowed the output budget even at 64k tokens.
-            # One page per request always fits.
-            pages = []
-            for image in batch:
-                pages.extend(_call([image], 1))
-                if CONFIG.vision_throttle > 0:
-                    time.sleep(CONFIG.vision_throttle)
 
-        for i, page in enumerate(pages):
+        # Blank pages never reach the model. They return empty markdown either
+        # way, and a request is the scarce resource here — the free tier caps
+        # requests per day, not tokens.
+        live = [(i, img) for i, img in enumerate(batch) if not is_blank(img)]
+        transcribed: dict[int, dict] = {}
+
+        if live:
+            live_images = [img for _, img in live]
+            try:
+                pages = _call(live_images, len(live_images))
+            except OutputTruncatedError:
+                # A dense batch overflowed the output budget even at 64k tokens.
+                # One page per request always fits.
+                pages = []
+                for image in live_images:
+                    pages.extend(_call([image], 1))
+                    if CONFIG.vision_throttle > 0:
+                        time.sleep(CONFIG.vision_throttle)
+            transcribed = {index: page for (index, _), page in zip(live, pages)}
+
+        for i in range(len(batch)):
+            page = transcribed.get(i, {})
             book_page = page.get("book_page")
             results.append(
                 PageText(

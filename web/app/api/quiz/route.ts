@@ -1,8 +1,10 @@
+import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createGroq } from "@ai-sdk/groq";
 import { generateObject } from "ai";
 import { z } from "zod";
 
+import { isProviderDead, noteProviderFailure } from "@/lib/providers";
 import { QuizSchema, rankChunksByFocus } from "@/lib/quiz";
 import { createClient } from "@/lib/supabase/server";
 
@@ -197,24 +199,39 @@ inside that scope, and say so in scope_description.`
   const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
   const google = createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY });
 
-  // Groq first: sub-second token rates make it the fast path, and its daily
-  // budget is healthier than gemini-3.6-flash's 20 requests/day. Gemini only
-  // catches the failure case.
-  try {
-    const { object } = await generateObject({
-      model: groq(process.env.CHAT_MODEL ?? "llama-3.3-70b-versatile"),
-      schema: QuizSchema,
-      system,
-      prompt,
+  // Same cascade as the chat route: Groq's free tier first, DeepSeek for the
+  // overflow it cannot cover, Gemini last. DeepSeek offers JSON mode rather
+  // than strict schema enforcement and its own docs warn it can return empty
+  // content, so a malformed paper throws inside generateObject and simply
+  // falls through to Gemini — which is exactly why Gemini stays in the chain.
+  const tiers = [
+    { provider: "groq", model: groq(process.env.CHAT_MODEL ?? "llama-3.3-70b-versatile") },
+  ];
+  if (process.env.DEEPSEEK_API_KEY && !isProviderDead("deepseek")) {
+    const deepseek = createDeepSeek({ apiKey: process.env.DEEPSEEK_API_KEY });
+    tiers.push({
+      provider: "deepseek",
+      model: deepseek(process.env.DEEPSEEK_MODEL ?? "deepseek-v4-flash"),
     });
-    return Response.json(object);
-  } catch {
-    const { object } = await generateObject({
-      model: google(process.env.FALLBACK_MODEL ?? "gemini-3.6-flash"),
-      schema: QuizSchema,
-      system,
-      prompt,
-    });
-    return Response.json(object);
   }
+  tiers.push({
+    provider: "google",
+    model: google(process.env.FALLBACK_MODEL ?? "gemini-3.6-flash"),
+  });
+
+  for (const tier of tiers) {
+    try {
+      const { object } = await generateObject({
+        model: tier.model,
+        schema: QuizSchema,
+        system,
+        prompt,
+      });
+      return Response.json(object);
+    } catch (error) {
+      // Declined or produced an unusable paper — try the next provider.
+      noteProviderFailure(tier.provider, error);
+    }
+  }
+  return Response.json({ error: "all_models_unavailable" }, { status: 502 });
 }
