@@ -76,21 +76,9 @@ export async function POST(request: Request) {
     return Response.json({ error: "empty_question" }, { status: 400 });
   }
 
-  // Persist under RLS as the signed-in student; trial visitors have no row
-  // to write to and no history. Failures here must never block an answer —
-  // history is valuable, the answer is the product.
-  if (user && !conversationId) {
-    const { data: conversation } = await supabase
-      .from("conversations")
-      .insert({ user_id: user.id, scope, title: question.slice(0, 60) })
-      .select("id")
-      .single();
-    conversationId = (conversation as { id: number } | null)?.id;
-  }
-  if (user && conversationId) {
-    await supabase
-      .from("messages")
-      .insert({ conversation_id: conversationId, role: "user", content: question });
+  if (!process.env.GOOGLE_API_KEY || !process.env.GROQ_API_KEY) {
+    // Misconfiguration must be nameable from the outside, not a bare 500.
+    return Response.json({ error: "model_keys_not_configured" }, { status: 503 });
   }
 
   async function persistAssistant(
@@ -113,10 +101,49 @@ export async function POST(request: Request) {
     return (data as { id: number } | null)?.id;
   }
 
-  // Quota first: an exhausted student costs zero model calls. Atomic in SQL,
-  // so parallel requests cannot double-spend. Trial visitors are metered by
-  // the cookie above instead.
-  if (user) {
+  // Small talk skips the whole retrieval stack — no embedding round-trip, no
+  // cache probe, no vector search. Faster first token, and no absurd
+  // textbook citation under "hello".
+  const trivial = isSmallTalk(question);
+
+  // Signed-in students read under their own RLS; trial visitors read through
+  // the service client. A trial without the service key still answers, just
+  // ungrounded — a degraded taster beats an error page.
+  const db = user ? supabase : serviceClient();
+
+  // Three independent round-trips run concurrently instead of as a waterfall;
+  // at ~100ms per Supabase RPC and 200–400ms per embedding this is the
+  // cheapest few hundred milliseconds of first-token latency in the route.
+  //
+  // Persist under RLS as the signed-in student; trial visitors have no row
+  // to write to and no history. Failures here must never block an answer —
+  // history is valuable, the answer is the product.
+  const persistUserTurn = async (): Promise<number | undefined> => {
+    if (!user) return conversationId;
+    let cid = conversationId;
+    if (!cid) {
+      const { data: conversation } = await supabase
+        .from("conversations")
+        .insert({ user_id: user.id, scope, title: question.slice(0, 60) })
+        .select("id")
+        .single();
+      cid = (conversation as { id: number } | null)?.id;
+    }
+    if (cid) {
+      await supabase
+        .from("messages")
+        .insert({ conversation_id: cid, role: "user", content: question });
+    }
+    return cid;
+  };
+
+  // Atomic in SQL, so parallel requests cannot double-spend. An exhausted
+  // student still costs zero GENERATION calls — the embedding may have been
+  // spent by the time the verdict lands, which trades a cheap, high-quota
+  // call in the rare exhausted case for latency in the common one. Trial
+  // visitors are metered by the cookie above instead.
+  const checkQuota = async (): Promise<Response | null> => {
+    if (!user) return null;
     const { data: remaining, error: quotaError } = await supabase.rpc("consume_quota");
     if (quotaError) {
       return Response.json({ error: "quota_check_failed" }, { status: 500 });
@@ -131,52 +158,53 @@ export async function POST(request: Request) {
         { status: 429 },
       );
     }
-  }
+    return null;
+  };
 
-  if (!process.env.GOOGLE_API_KEY || !process.env.GROQ_API_KEY) {
-    // Misconfiguration must be nameable from the outside, not a bare 500.
-    return Response.json({ error: "model_keys_not_configured" }, { status: 503 });
-  }
-
-  // Small talk skips the whole retrieval stack — no embedding round-trip, no
-  // cache probe, no vector search. Faster first token, and no absurd
-  // textbook citation under "hello".
-  const trivial = isSmallTalk(question);
-
-  // Signed-in students read under their own RLS; trial visitors read through
-  // the service client. A trial without the service key still answers, just
-  // ungrounded — a degraded taster beats an error page.
-  const db = user ? supabase : serviceClient();
+  const [persistedId, quotaVerdict, embedding] = await Promise.all([
+    persistUserTurn(),
+    checkQuota(),
+    !trivial && db ? embedQuery(question).catch(() => null) : Promise.resolve(null),
+  ]);
+  conversationId = persistedId ?? conversationId;
+  if (quotaVerdict) return quotaVerdict;
 
   let vectorLiteral: string | null = null;
   let chunks: RetrievedChunk[] = [];
 
   if (!trivial && db) {
-    let embedding: number[];
-    try {
-      embedding = await embedQuery(question);
-    } catch {
+    if (!embedding) {
       return Response.json({ error: "embedding_failed" }, { status: 502 });
     }
     vectorLiteral = `[${embedding.join(",")}]`;
 
+    // Cache probe and vector retrieval both need only the embedding, so they
+    // run together: a hit discards the retrieval, a miss — the common case as
+    // the corpus grows — has its chunks already in hand instead of paying a
+    // second round-trip.
+    const [{ data: cached }, retrieval] = await Promise.all([
+      db.rpc("cache_get", {
+        query_embedding: vectorLiteral,
+        query_scope: scope,
+      }),
+      retrieve(db, embedding, tokensForQuery(question), scope, 8).then(
+        (rows) => ({ ok: true as const, rows }),
+        () => ({ ok: false as const, rows: [] as RetrievedChunk[] }),
+      ),
+    ]);
+
     // Semantic cache: 100 students ask the same ~30 grammar questions, and a
     // hit here costs no Groq/Gemini quota at all.
-    const { data: cached } = await db.rpc("cache_get", {
-      query_embedding: vectorLiteral,
-      query_scope: scope,
-    });
     if (cached && cached.length > 0) {
       const hit = cached[0] as { answer: string; citations: Citation[] };
       await persistAssistant(hit.answer, hit.citations, "cache");
       return cachedAnswerResponse(hit.answer, hit.citations, conversationId, setCookie);
     }
 
-    try {
-      chunks = await retrieve(db, embedding, tokensForQuery(question), scope, 8);
-    } catch {
+    if (!retrieval.ok) {
       return Response.json({ error: "retrieval_failed" }, { status: 502 });
     }
+    chunks = retrieval.rows;
   }
 
   const citations = buildCitations(chunks);

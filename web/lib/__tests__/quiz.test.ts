@@ -226,6 +226,14 @@ describe("focusTokens", () => {
     expect(focusTokens("T7")).toEqual(["t7"]);
   });
 
+  it("normalises the Intermediate books' Lesson naming to the same marker", () => {
+    // Foundation prints "Topic N", Intermediate prints "Lesson N"; the chunk
+    // metadata uses one t-marker for both.
+    expect(focusTokens("Lesson 5")).toEqual(["t5"]);
+    expect(focusTokens("L7")).toEqual(["t7"]);
+    expect(focusTokens("lesson 12、〜ておく")).toEqual(["t12", "ておく"]);
+  });
+
   it("strips the tilde from grammar-pattern labels", () => {
     expect(focusTokens("〜ておく")).toEqual(["ておく"]);
   });

@@ -279,7 +279,7 @@ export function QuizView({
                     value={focus}
                     onChange={(e) => setFocus(e.target.value)}
                     maxLength={200}
-                    placeholder="e.g. 〜ておく、Topic 13、te-form…"
+                    placeholder="e.g. 〜ておく、Topic 13 / Lesson 5、te-form…"
                     className="w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-stone-500"
                   />
                   <span className="mt-1 block text-xs text-stone-400">
@@ -360,7 +360,7 @@ export function QuizView({
                     {section.items.some((item) => item.type === "fill_blank") && (
                       <p className="mt-0.5 text-xs text-stone-400">
                         Answers are accepted in hiragana, kanji, or romaji
-                        (English letters) — any correct form counts.
+                        (English letters).
                       </p>
                     )}
                   </div>

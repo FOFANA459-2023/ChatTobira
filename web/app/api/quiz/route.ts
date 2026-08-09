@@ -47,11 +47,11 @@ provided course material, in the format of the course's own test papers. Rules:
   Japanese pattern or word named.
 - review: for EVERY item, where in the TEXTBOOK the student should go to study
   this point. Students own the textbook and nothing else, so a review must be
-  findable from the book alone: the topic or lesson as the textbook prints it,
-  the concept, and the page number from the excerpt header when one is shown —
-  e.g. "Topic 7 — て-form requests (p. 94)". NEVER write "Material", "excerpt",
-  "source", "handout", "past paper", or a numbered reference to the prompt.
-  Identical points must use the identical review string so results aggregate.
+  findable from the book alone: the division as the textbook prints it, the
+  concept, and the page number from the excerpt header when one is shown.
+  NEVER write "Material", "excerpt", "source", "handout", "past paper", or a
+  numbered reference to the prompt. Identical points must use the identical
+  review string so results aggregate.
 - Variety: every item must drill a different point with a different sentence.
   Never underline the same word in two items, and never reuse a sentence the
   paper (or the avoid-list, when one is given) already used.
@@ -136,7 +136,13 @@ export async function GET() {
     id: d.id as number,
     title: d.title as string,
   }));
-  return Response.json({ books });
+  // The catalogue changes only when a book is ingested, and it is identical
+  // for every caller — let the edge answer repeat loads instead of a worker
+  // and two Supabase round-trips per page view.
+  return Response.json(
+    { books },
+    { headers: { "Cache-Control": "public, max-age=60, s-maxage=300, stale-while-revalidate=3600" } },
+  );
 }
 
 export async function POST(request: Request) {
@@ -255,12 +261,20 @@ export async function POST(request: Request) {
     })
     .join("\n\n");
 
+  // The books name their divisions differently: the Foundation volumes are
+  // split into "Topic 1, 2, …", the Intermediate Tobira volumes into
+  // "Lesson 1, 2, …". Review references must use the word printed in the
+  // student's own book or they cannot follow them.
+  const division = /intermediate/i.test(doc.title) ? "Lesson" : "Topic";
+
   const perSection = Math.round(count / 3);
   const prompt = `Create a practice test from the textbook excerpts below, all
 from "${doc.title}" — the book the student owns. The paper's format is modelled
 on the course's past test papers, but every question must be drawn from these
-excerpts. Exactly ${count} questions in total — ${perSection} in each of the 3
-sections. Focus on ${
+excerpts. This textbook divides its content into ${division}s: write every
+review reference as "${division} N — concept (p. NN)", using the ${division}
+numbers and page numbers as printed in the excerpts. Exactly ${count} questions
+in total — ${perSection} in each of the 3 sections. Focus on ${
     kind === "kanji"
       ? "the kanji and vocabulary that appear in these excerpts"
       : "the grammar patterns drilled in these excerpts"

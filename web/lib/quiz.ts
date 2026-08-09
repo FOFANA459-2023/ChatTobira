@@ -236,13 +236,15 @@ export interface FocusableChunk {
 
 /** Search tokens from the student's free-text focus ("〜ておく、Topic 13").
  *
- * "Topic 13" / "T13" normalise to a t13 marker matched against chunk topic
- * metadata; everything else is matched as a literal substring of the chunk
- * text. Bare digits and the word "topic" are dropped — "13" alone would match
+ * "Topic 13" / "T13" / "Lesson 13" / "L13" all normalise to a t13 marker
+ * matched against chunk topic metadata — the Foundation books print "Topic",
+ * the Intermediate books print "Lesson", and the metadata uses one marker for
+ * both. Everything else is matched as a literal substring of the chunk text.
+ * Bare digits and the division words alone are dropped — "13" would match
  * unrelated page numbers, not the topic.
  */
 export function focusTokens(focus: string): string[] {
-  const topics = [...focus.matchAll(/(?:topic|t)\s*(\d{1,2})/gi)].map(
+  const topics = [...focus.matchAll(/(?:topic|lesson|[tl])\s*(\d{1,2})/gi)].map(
     (m) => `t${m[1]}`,
   );
   const words = focus
@@ -252,7 +254,7 @@ export function focusTokens(focus: string): string[] {
       (t) =>
         t.length > 0 &&
         !/^\d+$/.test(t) &&
-        !/^(topic|t\d{1,2})$/.test(t) &&
+        !/^(topic|lesson|[tl]\d{1,2})$/.test(t) &&
         (t.length >= 2 || /[぀-ヿ一-鿿]/.test(t)),
     );
   return [...new Set([...topics, ...words])];
