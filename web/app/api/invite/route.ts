@@ -92,15 +92,22 @@ export async function POST(request: Request) {
     return Response.json({ error: "invite_not_configured" }, { status: 503 });
   }
 
-  const { error: allowlistError } = await service
+  // The allowlist row must exist BEFORE the send — the signup trigger
+  // rejects user creation for non-allowlisted emails — but an invite is only
+  // real once the email goes out, so a failed send rolls this row back below.
+  // .select() reports whether the row was newly inserted: a pre-existing
+  // invite must never be revoked by a failed RE-send.
+  const { data: inserted, error: allowlistError } = await service
     .from("allowlist")
     .upsert(
       { email, note: "invited via admin page", invited_by: ADMIN_EMAIL },
       { onConflict: "email", ignoreDuplicates: true },
-    );
+    )
+    .select("email");
   if (allowlistError) {
     return Response.json({ error: "allowlist_failed" }, { status: 500 });
   }
+  const newlyInvited = (inserted ?? []).length > 0;
 
   // Re-inviting someone previously revoked lifts their suspension.
   const existing = await findAuthUser(service, email);
@@ -120,9 +127,23 @@ export async function POST(request: Request) {
     options: { emailRedirectTo: `${new URL(request.url).origin}/auth/confirm` },
   });
   if (otpError) {
-    // Allowlisted but the email did not go out (usually a rate limit). The
-    // student can still request their own link from /login.
-    return Response.json({ error: "send_failed", allowlisted: true }, { status: 502 });
+    // The email did not go out, so a brand-new invite is rolled back — the
+    // student list must only show people who actually received a link. The
+    // OTP call may have created a bare auth account before the send failed;
+    // that is removed too, or a later /login attempt would sneak past the
+    // allowlist trigger. Re-invites of already-listed students keep
+    // everything: their standing invite is not hostage to one failed email.
+    if (newlyInvited) {
+      if (!existing) {
+        const created = await findAuthUser(service, email);
+        if (created) await service.auth.admin.deleteUser(created.id);
+      }
+      await service.from("allowlist").delete().eq("email", email);
+    }
+    return Response.json(
+      { error: "send_failed", allowlisted: !newlyInvited },
+      { status: 502 },
+    );
   }
 
   return Response.json({ ok: true, email });

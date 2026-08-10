@@ -125,15 +125,22 @@ export default function AdminPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email }),
       });
-      const body = (await response.json().catch(() => ({}))) as { error?: string };
+      const body = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        allowlisted?: boolean;
+      };
       if (response.ok) {
         setInviteNote({ ok: true, text: `Invite sent to ${email}.` });
         setInviteEmail("");
         loadInvites();
       } else if (body.error === "send_failed") {
+        // allowlisted distinguishes a failed RE-send (their standing invite
+        // survives) from a failed new invite (rolled back, list unchanged).
         setInviteNote({
           ok: false,
-          text: `${email} was added to the invite list, but the email could not be sent right now. They can request a sign-in link themselves on the login page.`,
+          text: body.allowlisted
+            ? `${email} is already invited, but the fresh sign-in email could not be sent right now. They can request a link themselves on the login page.`
+            : `The invite email to ${email} could not be sent, so they were NOT added. Fix email sending (SMTP) or try again in a moment.`,
         });
         loadInvites();
       } else if (body.error === "bad_email") {
