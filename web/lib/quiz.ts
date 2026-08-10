@@ -299,24 +299,40 @@ function shuffled<T>(items: T[]): T[] {
   return [...items].sort(() => Math.random() - 0.5);
 }
 
-// 第３課 / 第3課 / Lesson 3 — the lesson headers the textbooks actually print.
-const LESSON_MARK = /(?:第\s*([0-9０-９]{1,2})\s*課|Lesson\s+(\d{1,2})\b)/g;
+// 第３課 / 第3課 / Lesson 3 / Topic 3 — the division headers the textbooks
+// actually print: the Intermediate Tobira volumes mark lessons as 第N課, and
+// the Foundation 1 & 2 book puts an English "Topic N" running header on nearly
+// every page (Foundation 1 is Topics 1–5, Foundation 2 is Topics 6–10 — one
+// continuous numbering through the one book).
+const LESSON_MARK = /(?:第\s*([0-9０-９]{1,2})\s*課|Lesson\s+(\d{1,2})\b|Topic\s*(\d{1,2})\b)/g;
 
 function markedLesson(match: RegExpMatchArray): number {
-  const digits = match[1] ?? match[2];
+  const digits = match[1] ?? match[2] ?? match[3];
   return Number(digits.replace(/[０-９]/g, (d) => String("０１２３４５６７８９".indexOf(d))));
 }
 
-/** Map each pdf page to the lesson it belongs to, from the 第N課 headers in
- * the page text. Textbook chunks carry no lesson metadata, so this derived
- * mapping is what makes "test me on Lesson 3" select Lesson 3's pages instead
- * of sampling the whole book at random.
+/** Map each pdf page to the lesson it belongs to, from the 第N課 / Topic N
+ * headers in the page text. Textbook chunks carry no lesson metadata, so this
+ * derived mapping is what makes "test me on Lesson 3" (or "Topic 3") select
+ * that division's pages instead of sampling the whole book at random.
  *
  * Two kinds of noise are filtered by the monotonic walk: contents pages list
  * every lesson at once (ignored — only pages naming exactly one lesson count),
  * and appendix/answer pages cross-reference earlier lessons (ignored — the
  * lesson number may only step forward, at most two at a time). Pages before
- * the first header map to 0, front matter. */
+ * the first header map to 0, front matter.
+ *
+ * One exception to forward-only: a RESTART. The Foundation 1 & 2 book runs
+ * Topics 1–10 twice — main text, then the kanji/vocabulary section, which
+ * starts its own Topic 1 partway through the book. A drop back to 1 or 2 is
+ * accepted as a new pass only when the next two marked pages continue the NEW
+ * numbering and do not fit the old one. Both conditions matter: a lone
+ * cross-reference has no follow-through, and a cross-reference right before
+ * the old sequence's next header (seen in Tobira: a 第1課 citation on p.53,
+ * then 第3課 opens on p.63) is followed by marks the old walk explains, so it
+ * stays noise. Both passes of a topic map to the same number, which is
+ * exactly right: a Topic 3 test should draw from Topic 3's grammar pages and
+ * its kanji pages alike. */
 export function lessonByPage(
   chunks: { content: string; pdf_page: number }[],
 ): Map<number, number> {
@@ -330,14 +346,40 @@ export function lessonByPage(
     perPage.set(chunk.pdf_page, seen);
   }
 
-  const lessons = new Map<number, number>();
-  let current = 0;
+  // Pages naming exactly one lesson, in page order — the walk's evidence.
+  const marked: { page: number; n: number }[] = [];
   for (const page of [...perPage.keys()].sort((a, b) => a - b)) {
     const marks = perPage.get(page)!;
-    if (marks.size === 1) {
-      const [only] = [...marks];
-      if (only > current && only <= current + 2) current = only;
+    if (marks.size === 1) marked.push({ page, n: [...marks][0] });
+  }
+
+  const currentAt = new Map<number, number>();
+  let current = 0;
+  for (const [i, { page, n }] of marked.entries()) {
+    if (n > current && n <= current + 2) {
+      current = n;
+    } else if (n < current && n <= 2) {
+      const a = marked[i + 1];
+      const b = marked[i + 2];
+      const continuesNew =
+        a !== undefined &&
+        b !== undefined &&
+        a.n >= n &&
+        a.n <= n + 2 &&
+        b.n >= a.n &&
+        b.n <= a.n + 2;
+      const fitsOld =
+        a !== undefined && (a.n === current || (a.n > current && a.n <= current + 2));
+      if (continuesNew && !fitsOld) current = n;
     }
+    currentAt.set(page, current);
+  }
+
+  // Every page inherits the lesson of the last marked page at or before it.
+  const lessons = new Map<number, number>();
+  current = 0;
+  for (const page of [...perPage.keys()].sort((a, b) => a - b)) {
+    current = currentAt.get(page) ?? current;
     lessons.set(page, current);
   }
   return lessons;

@@ -222,6 +222,88 @@ describe("lessonByPage", () => {
     expect(lessons.get(20)).toBe(3);
     expect(lessons.get(30)).toBe(3);
   });
+
+  it("maps the Foundation book's 'Topic N' running headers", () => {
+    // The Foundation 1 & 2 volume prints an English "Topic N" header on
+    // nearly every content page; the contents pages list every topic at once
+    // and the index glues the word to the number ("Topic1 Topic2 …").
+    const lessons = lessonByPage([
+      page(7, "Contents … Topic 1 … Topic 2 … Topic 3 … Topic 4 … Topic 5"),
+      page(19, "Topic 1 はじめまして"),
+      page(25, "れんしゅう"), // carried forward between headers
+      page(33, "Topic 2 かいもの"),
+      page(51, "Topic 3 今何時ですか"),
+      page(193, "Index: Topic1 Topic2 Topic3 Topic4 Topic5"), // multi: ignored
+    ]);
+    expect(lessons.get(7)).toBe(0); // contents page is front matter
+    expect(lessons.get(19)).toBe(1);
+    expect(lessons.get(25)).toBe(1);
+    expect(lessons.get(33)).toBe(2);
+    expect(lessons.get(51)).toBe(3);
+    expect(lessons.get(193)).toBe(3); // index keeps the last real division
+  });
+
+  it("reads a glued TopicN header when it is the page's only marker", () => {
+    const lessons = lessonByPage([
+      page(19, "Topic 1 はじめまして"),
+      page(30, "Topic2 かいもの"),
+    ]);
+    expect(lessons.get(30)).toBe(2);
+  });
+
+  it("accepts a numbering restart when the following pages confirm it", () => {
+    // The Foundation 1 & 2 book runs Topics 1–10 twice: main text, then the
+    // kanji/vocabulary section starts over at Topic 1. Both passes of a topic
+    // must map to the same number.
+    const lessons = lessonByPage([
+      page(19, "Topic 1"),
+      page(51, "Topic 3"),
+      page(78, "Topic 5"),
+      page(112, "Topic 7"),
+      page(146, "Topic 9"),
+      page(164, "Topic 10 りょこう"),
+      page(183, "Topic 10 まとめ"),
+      page(195, "Topic 1 かんじ"),
+      page(196, "Topic 1 れんしゅう"),
+      page(201, "Topic 2 かんじ"),
+      page(208, "Topic 3 かんじ"),
+    ]);
+    expect(lessons.get(183)).toBe(10);
+    expect(lessons.get(195)).toBe(1);
+    expect(lessons.get(201)).toBe(2);
+    expect(lessons.get(208)).toBe(3);
+  });
+
+  it("still ignores a lone low cross-reference with no follow-through", () => {
+    // An answer page citing Topic 1 late in the book is noise, not a restart:
+    // nothing after it continues the sequence.
+    const lessons = lessonByPage([
+      page(19, "Topic 1"),
+      page(51, "Topic 3"),
+      page(78, "Topic 5"),
+      page(112, "Topic 7"),
+      page(146, "Topic 9"),
+      page(164, "Topic 10 りょこう"),
+      page(189, "Topic 1 の答え"),
+      page(200, "ふろく"),
+    ]);
+    expect(lessons.get(189)).toBe(10);
+    expect(lessons.get(200)).toBe(10);
+  });
+
+  it("keeps a cross-reference as noise when later marks fit the old sequence", () => {
+    // Seen in Tobira Intermediate: p.53 cites 第1課 in passing, and the next
+    // header (第3課, p.63) continues the original walk — so no restart.
+    const lessons = lessonByPage([
+      page(17, "第1課"),
+      page(39, "第2課"),
+      page(53, "第1課で勉強したこと"),
+      page(63, "第3課"),
+      page(93, "第4課"),
+    ]);
+    expect(lessons.get(53)).toBe(2);
+    expect(lessons.get(63)).toBe(3);
+  });
 });
 
 describe("chunksForLesson", () => {
