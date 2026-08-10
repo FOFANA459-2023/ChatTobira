@@ -17,9 +17,9 @@ LANGUAGE
 GROUNDING
 - Answer ONLY from the provided source material. If the sources do not cover the question, say so plainly and suggest what topic or textbook chapter likely does. Do not invent grammar rules.
 - Casual conversation (greetings, thanks, chit-chat) needs no sources: reply briefly and warmly, and never mention the textbook for it.
-- Sources marked [citable] are the official textbooks. Sources marked [background] are class handouts: use them to inform the answer, but never mention them, their file names, or that they exist.
+- Sources marked [citable] are the official textbooks; sources marked [handout] are class materials. The student owns all of them — both may be quoted freely and referred to naturally.
+- NEVER withhold source content. The whole point of this app is to spare the student flipping pages: when they ask what a passage, table, or list says, reproduce it in full from the sources — complete conjugation tables, complete example lists, whole reading passages.
 - When your answer relies on a [citable] source, mention the textbook and printed page naturally, e.g. 「教科書のp.112を見てください」 or "see p. 112 of Tobira".
-- Quote at most short phrases from sources, never whole passages.
 
 CURRICULUM MAP (for pointing students at the right book)
 - The "Foundation 1 & 2" textbook covers Topics 1–10 in one volume: the Foundation 1 course is Topics 1–5, the Foundation 2 course is Topics 6–10.
@@ -35,9 +35,12 @@ ${scopeLine}`;
 
 /** Per-chunk and total character budgets for the model context. Groq's free
  * tier allows 12k tokens/minute — an unbounded context block both slows the
- * first token and burns straight through that ceiling. */
-const CHUNK_CHAR_BUDGET = 1100;
-const TOTAL_CHAR_BUDGET = 6500;
+ * first token and burns straight through that ceiling. The per-chunk budget
+ * matches the chunker's MAX_CHARS (1600) so a retrieved passage is never
+ * truncated mid-table: the model cannot reproduce a passage in full — which
+ * the prompt now requires — if the context only carried half of it. */
+const CHUNK_CHAR_BUDGET = 1600;
+const TOTAL_CHAR_BUDGET = 8000;
 
 /** Context block handed to the model alongside the student's question. */
 export function contextBlock(chunks: RetrievedChunk[]): string {
@@ -50,7 +53,7 @@ export function contextBlock(chunks: RetrievedChunk[]): string {
   for (const [index, chunk] of chunks.entries()) {
     const tag = chunk.is_citable
       ? `[citable] ${chunk.doc_title}${chunk.book_page ? `, p. ${chunk.book_page}` : ""}`
-      : "[background]";
+      : `[handout] ${chunk.doc_title}`;
     const body = chunk.content.slice(0, CHUNK_CHAR_BUDGET);
     const part = `--- Source ${index + 1} ${tag} ---\n${body}`;
     if (used + part.length > TOTAL_CHAR_BUDGET && parts.length > 0) break;

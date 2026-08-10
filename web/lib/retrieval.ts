@@ -143,10 +143,10 @@ function plainText(markdown: string): string {
 
 /** Build the citation list from retrieved chunks.
  *
- * HARD RULE: only textbook chunks (is_citable) may ever appear here. Class
- * handouts ground the answer but are never named. Enforced here, server-side,
- * regardless of what the model says. Quotes are capped so the app excerpts
- * rather than reproduces the commercial textbooks. Chunks below the
+ * Only textbook chunks (is_citable) appear here — a citation is a pointer to
+ * a printed page the student can open, and handouts have no such page (the
+ * model may still quote and name them freely in the answer itself). Quotes
+ * are capped only to keep the citation card compact. Chunks below the
  * similarity floor never cite: an off-topic question retrieves *something*,
  * but decorating "hello" with a textbook reference helps nobody.
  */
