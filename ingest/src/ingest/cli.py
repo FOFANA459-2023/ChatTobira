@@ -247,6 +247,75 @@ def cmd_invite(
     )
 
 
+@app.command("backup")
+def cmd_backup() -> None:
+    """Mirror source files and transcripts to the private Supabase bucket.
+
+    Content-addressed: an unchanged corpus uploads nothing but the index."""
+    from . import backup
+
+    manifest = Manifest()
+    to_upload, unchanged = backup.plan_backup(manifest)
+    console.print(f"{len(unchanged)} object(s) already backed up, {len(to_upload)} to upload")
+
+    with backup.client() as http:
+        backup.ensure_bucket(http)
+        for item in to_upload:
+            mb = item.size / (1 << 20)
+            console.print(f"[cyan]upload[/cyan]  {item.path} ({mb:.1f} MB)")
+            backup.upload(
+                http, item.object_key, item.local.read_bytes(), backup.content_type_of(item.path)
+            )
+            # The first backup run stored objects under raw filename keys
+            # before a Japanese filename hit InvalidKey; sweep that scheme's
+            # object out as its replacement lands.
+            previous = manifest.get("backup", item.path)
+            if previous and not previous.get("object"):
+                backup.delete(http, item.path)
+            manifest.mark("backup", item.path, item.sha, object=item.object_key, size=item.size)
+
+        # The manifest itself and the index ride along on every run: they are
+        # tiny, and they are what a bare machine needs first.
+        backup.upload(http, "work/manifest.json", manifest.path.read_bytes(), "application/json")
+        backup.write_index(http, to_upload + unchanged)
+
+    console.print(f"[green]backed up[/green] {len(to_upload)} object(s); index updated")
+
+
+@app.command("restore")
+def cmd_restore(
+    force: bool = typer.Option(False, help="Overwrite local files even if they exist"),
+) -> None:
+    """Pull sources and transcripts down from the backup bucket.
+
+    On a fresh machine: clone the repo, fill in .env, run `ingest restore`,
+    and `ingest push` works immediately — no re-transcription."""
+    from . import backup
+
+    with backup.client() as http:
+        index = json.loads(backup.download(http, backup.INDEX_KEY))
+        fetched = skipped = 0
+        for entry in index:
+            target = backup.restore_target(entry["path"])
+            if target is None:
+                continue
+            if target.exists() and not force:
+                skipped += 1
+                continue
+            console.print(f"[cyan]fetch[/cyan]   {entry['path']}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(backup.download(http, entry["object"]))
+            fetched += 1
+
+        manifest_bytes = backup.download(http, "work/manifest.json")
+        manifest_path = CONFIG.work_dir / "manifest.json"
+        if force or not manifest_path.exists():
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_bytes(manifest_bytes)
+
+    console.print(f"[green]restored[/green] {fetched} object(s), {skipped} already present")
+
+
 @app.command("all")
 def cmd_all(
     only: str = typer.Option("", help="Substring filter on the document path"),

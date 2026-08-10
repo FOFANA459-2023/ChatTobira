@@ -82,6 +82,8 @@ ingest transcribe                  # pages -> Markdown via Gemini vision
 ingest chunk                       # split by grammar point, tokenize, embed
 ingest push                        # upsert chunks + embeddings to Supabase
 ingest verify                      # CJK coverage + orphan checks
+ingest backup                      # mirror sources + transcripts to a private bucket
+ingest restore                     # pull them back down on a fresh machine
 ```
 
 Or end to end:
@@ -92,6 +94,12 @@ ingest all
 
 Roughly 950 pages. On the Google free tier expect about a day of throttled
 running; on paid it is a few dollars and finishes in under an hour.
+
+No machine is irreplaceable: `ingest backup` mirrors the source files and the
+`.work/text` transcripts into a **private** Supabase Storage bucket (objects are
+content-addressed; `index.json` maps them back to paths). On a new machine,
+clone the repo, fill in `.env`, run `ingest restore`, and `ingest push` works
+immediately — nothing is re-transcribed. The bucket is never read by the app.
 
 ## Free-tier ceiling
 

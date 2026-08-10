@@ -79,6 +79,18 @@ class Config:
         URL-encoded as %40 or everything after it parses as the hostname."""
         return _req("DATABASE_URL")
 
+    @property
+    def supabase_url(self) -> str:
+        return _req("SUPABASE_URL")
+
+    @property
+    def supabase_service_key(self) -> str:
+        return _req("SUPABASE_SERVICE_ROLE_KEY")
+
+    # Private bucket for `ingest backup` / `ingest restore`. Never served by
+    # the web app — it exists so losing this machine loses nothing.
+    backup_bucket: str = os.getenv("BACKUP_BUCKET", "chattobira-backup")
+
     # Derived working directories -------------------------------------------
 
     @property
