@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 import { ADMIN_EMAIL, isAdminEmail } from "@/lib/admin";
+import { EMAIL_SHAPE, normalizeEmail } from "@/lib/email";
 import { NavBar } from "@/components/nav";
 import { createClient } from "@/lib/supabase/client";
 
@@ -107,8 +108,15 @@ export default function AdminPage() {
 
   async function invite(event: React.FormEvent) {
     event.preventDefault();
-    const email = inviteEmail.trim().toLowerCase();
+    // Fold full-width IME characters and pasted "Name <email>" forms before
+    // shape-checking: school addresses routinely arrive that way, and raw
+    // validation read as ".ac.jp is blocked".
+    const email = normalizeEmail(inviteEmail);
     if (!email) return;
+    if (!EMAIL_SHAPE.test(email)) {
+      setInviteNote({ ok: false, text: "That does not look like an email address." });
+      return;
+    }
     setBusy(true);
     setInviteNote(null);
     try {
@@ -311,8 +319,14 @@ export default function AdminPage() {
                 just enter their name on first visit.
               </p>
               <form onSubmit={invite} className="mt-5 flex gap-2">
+                {/* type="text", not "email": the native email check runs on
+                    the RAW input, and a full-width ＠ from a Japanese IME or
+                    a pasted 「山田 <yt01@…>」 failed it before our normaliser
+                    could run. Validation happens after normalizeEmail. */}
                 <input
-                  type="email"
+                  type="text"
+                  inputMode="email"
+                  autoComplete="off"
                   required
                   value={inviteEmail}
                   onChange={(e) => setInviteEmail(e.target.value)}

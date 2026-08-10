@@ -2,13 +2,18 @@ import { createClient as createSupabase } from "@supabase/supabase-js";
 import { z } from "zod";
 
 import { ADMIN_EMAIL, isAdminEmail } from "@/lib/admin";
+import { normalizeEmail } from "@/lib/email";
 import { createClient } from "@/lib/supabase/server";
 import { serviceClient } from "@/lib/supabase/service";
 
 export const maxDuration = 30;
 
+// normalizeEmail first: school addresses arrive with full-width characters
+// from Japanese IMEs (＠, ｅｄ, trailing 全角 space) and as Outlook's
+// "Name <email>" form. Validating the raw text rejected every one of them,
+// which looked like a ban on .ac.jp domains from the admin page.
 const BodySchema = z.object({
-  email: z.string().trim().toLowerCase().email(),
+  email: z.string().transform(normalizeEmail).pipe(z.string().email()),
 });
 
 const PatchSchema = BodySchema.extend({

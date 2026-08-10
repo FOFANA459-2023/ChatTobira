@@ -4,9 +4,10 @@ import Link from "next/link";
 import { useState } from "react";
 
 import { isAdminEmail } from "@/lib/admin";
+import { EMAIL_SHAPE, normalizeEmail } from "@/lib/email";
 import { createClient } from "@/lib/supabase/client";
 
-type Status = "idle" | "sending" | "sent" | "not_invited" | "admin" | "error";
+type Status = "idle" | "sending" | "sent" | "not_invited" | "admin" | "bad_email" | "error";
 
 /** Email → magic-link form, shared by the login page and the chat's
  * out-of-trial panel. The admin email is refused here: the admin account
@@ -24,7 +25,13 @@ export function MagicLinkForm({
 
   async function sendLink(event: React.FormEvent) {
     event.preventDefault();
-    const address = email.trim();
+    // Students type school addresses with the IME still on — full-width ＠
+    // and letters — which must normalise, not fail.
+    const address = normalizeEmail(email);
+    if (!EMAIL_SHAPE.test(address)) {
+      setStatus("bad_email");
+      return;
+    }
     if (isAdminEmail(address)) {
       setStatus("admin");
       return;
@@ -55,8 +62,13 @@ export function MagicLinkForm({
   return (
     <div>
       <form onSubmit={sendLink} className="space-y-3">
+        {/* type="text", not "email": the native check runs on the raw input
+            and rejects full-width IME characters before sendLink can
+            normalise them. */}
         <input
-          type="email"
+          type="text"
+          inputMode="email"
+          autoComplete="email"
           required
           disabled={disabled}
           value={email}
@@ -84,6 +96,12 @@ export function MagicLinkForm({
           This email is not on the invite list yet. ChatTobira is limited to
           invited students — ask the admin to invite you, and your sign-in
           link will arrive by email.
+        </p>
+      )}
+      {status === "bad_email" && (
+        <p className="mt-4 text-sm text-amber-700">
+          That does not look like an email address — please check it and try
+          again.
         </p>
       )}
       {status === "admin" && (
