@@ -153,9 +153,7 @@ def write_index(http: httpx.Client, items: list[BackupItem]) -> None:
     """index.json is what makes restore possible: Storage's list endpoint is
     folder-by-folder, but a restore needs the flat truth in one read — and the
     object keys are content hashes, so only the index knows the real paths."""
-    index = [
-        {"path": i.path, "object": i.object_key, "sha": i.sha, "size": i.size} for i in items
-    ]
+    index = [{"path": i.path, "object": i.object_key, "sha": i.sha, "size": i.size} for i in items]
     upload(
         http,
         INDEX_KEY,
