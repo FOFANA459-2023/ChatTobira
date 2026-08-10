@@ -111,8 +111,8 @@ export function Chat({
               key={message.id}
               className={
                 message.role === "user"
-                  ? "ml-auto max-w-[85%] rounded-2xl rounded-br-sm bg-stone-900 px-4 py-2.5 text-sm text-white"
-                  : "max-w-[85%] rounded-2xl rounded-bl-sm border border-stone-200 bg-white px-4 py-3 text-sm shadow-sm"
+                  ? "ml-auto max-w-[85%] break-words rounded-2xl rounded-br-sm bg-stone-900 px-4 py-2.5 text-sm text-white"
+                  : "max-w-[85%] break-words rounded-2xl rounded-bl-sm border border-stone-200 bg-white px-4 py-3 text-sm shadow-sm"
               }
             >
               {message.parts.map((part, index) =>

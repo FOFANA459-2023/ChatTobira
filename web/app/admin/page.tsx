@@ -15,6 +15,9 @@ interface Invite {
   suspended: boolean;
   /** Invited but never signed in, so there is no account to suspend yet. */
   registered: boolean;
+  /** They used their sign-in link at least once. False means the email is
+   * unread — or was eaten by a university mail filter. */
+  accepted: boolean;
 }
 
 type Session = "checking" | "signed_out" | "not_admin" | "admin";
@@ -128,6 +131,7 @@ export default function AdminPage() {
       const body = (await response.json().catch(() => ({}))) as {
         error?: string;
         allowlisted?: boolean;
+        reason?: string;
       };
       if (response.ok) {
         setInviteNote({ ok: true, text: `Invite sent to ${email}.` });
@@ -136,11 +140,12 @@ export default function AdminPage() {
       } else if (body.error === "send_failed") {
         // allowlisted distinguishes a failed RE-send (their standing invite
         // survives) from a failed new invite (rolled back, list unchanged).
+        const why = body.reason ? ` (${body.reason})` : "";
         setInviteNote({
           ok: false,
           text: body.allowlisted
-            ? `${email} is already invited, but the fresh sign-in email could not be sent right now. They can request a link themselves on the login page.`
-            : `The invite email to ${email} could not be sent, so they were NOT added. Fix email sending (SMTP) or try again in a moment.`,
+            ? `${email} is already invited, but the fresh sign-in email could not be sent right now${why}. They can request a link themselves on the login page.`
+            : `The invite email to ${email} could not be sent, so they were NOT added${why}.`,
         });
         loadInvites();
       } else if (body.error === "bad_email") {
@@ -411,9 +416,19 @@ export default function AdminPage() {
                               Suspended
                             </span>
                           )}
+                          {!invite.suspended && !invite.accepted && (
+                            <span
+                              title="The sign-in email went out but the link has never been used — ask the student to check junk/quarantine, or re-invite to send a fresh link."
+                              className="ml-1.5 rounded bg-stone-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-stone-500"
+                            >
+                              Link not used yet
+                            </span>
+                          )}
                         </span>
                         <span className="flex shrink-0 items-center gap-1.5">
-                          <span className="text-xs text-stone-400">
+                          {/* The date is context, not a control — phones give
+                              the room to the buttons instead. */}
+                          <span className="hidden text-xs text-stone-400 sm:inline">
                             {new Date(invite.created_at).toLocaleDateString()}
                           </span>
                           <button

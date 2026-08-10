@@ -91,6 +91,17 @@ class Config:
     # the web app — it exists so losing this machine loses nothing.
     backup_bucket: str = os.getenv("BACKUP_BUCKET", "chattobira-backup")
 
+    # Gmail account that sends the auth emails (Supabase custom SMTP). The
+    # bounce sweep reads ITS inbox over IMAP: recipient-side rejections come
+    # back to the sender as mailer-daemon messages, invisible to the API.
+    @property
+    def smtp_sender(self) -> str:
+        return _req("SMTP_SENDER")
+
+    @property
+    def smtp_app_password(self) -> str:
+        return _req("SMTP_APP_PASSWORD").replace(" ", "")
+
     # Derived working directories -------------------------------------------
 
     @property

@@ -40,6 +40,9 @@ type Service = NonNullable<ReturnType<typeof serviceClient>>;
 interface AuthAccount {
   id: string;
   suspended: boolean;
+  /** Clicked their link at least once. An account row alone proves nothing:
+   * the OTP send itself creates one before any email arrives. */
+  confirmed: boolean;
 }
 
 /** Every auth account by lowercased email. There is no getUserByEmail in the
@@ -58,6 +61,7 @@ async function authAccounts(service: Service): Promise<Map<string, AuthAccount>>
       accounts.set(email, {
         id: user.id,
         suspended: Boolean(until && new Date(until).getTime() > Date.now()),
+        confirmed: Boolean(user.email_confirmed_at),
       });
     }
     if (data.users.length < 200) break;
@@ -140,8 +144,14 @@ export async function POST(request: Request) {
       }
       await service.from("allowlist").delete().eq("email", email);
     }
+    // The provider's own words distinguish a rate limit from broken SMTP —
+    // without them the admin is left guessing which knob to turn.
     return Response.json(
-      { error: "send_failed", allowlisted: !newlyInvited },
+      {
+        error: "send_failed",
+        allowlisted: !newlyInvited,
+        reason: otpError.message.slice(0, 200),
+      },
       { status: 502 },
     );
   }
@@ -181,6 +191,10 @@ export async function GET() {
       suspended: account?.suspended ?? false,
       // Never signed in: there is no account to suspend yet.
       registered: Boolean(account),
+      // The email went out, but the link has never been used — either it is
+      // sitting unread, or the university mail gateway swallowed it. This is
+      // the flag that tells the admin who to chase.
+      accepted: account?.confirmed ?? false,
     };
   });
   return Response.json({ invites });

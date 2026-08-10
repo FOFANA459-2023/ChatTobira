@@ -316,6 +316,40 @@ def cmd_restore(
     console.print(f"[green]restored[/green] {fetched} object(s), {skipped} already present")
 
 
+@app.command("bounces")
+def cmd_bounces(
+    days: int = typer.Option(7, help="How many days of bounce messages to scan"),
+    dry_run: bool = typer.Option(False, help="Report what would be revoked without deleting"),
+) -> None:
+    """Revoke invites whose email bounced.
+
+    Gmail accepts a message and the invite API reports success; the
+    university gateway rejects it minutes later and the bounce lands in the
+    sending inbox. This reads that inbox and removes any student whose invite
+    provably never arrived and who has never signed in."""
+    from . import bounces
+
+    found = bounces.fetch_bounces(days=days)
+    if not found:
+        console.print("no bounce messages found — every sent invite was accepted downstream")
+        return
+
+    for b in found:
+        console.print(f"[yellow]bounce[/yellow]  {b.recipient} at {b.bounced_at:%Y-%m-%d %H:%M}")
+    if dry_run:
+        console.print("[dim]dry run — nothing deleted[/dim]")
+        return
+
+    revoked = bounces.sweep(found)
+    for address in revoked:
+        console.print(f"[red]revoked[/red] {address} — invite removed, they were never reachable")
+    console.print(
+        f"[bold]{len(revoked)} invite(s) revoked[/bold]"
+        if revoked
+        else "bounces were stale or students already signed in — nothing revoked"
+    )
+
+
 @app.command("all")
 def cmd_all(
     only: str = typer.Option("", help="Substring filter on the document path"),

@@ -1,0 +1,40 @@
+# Revoke invites whose email bounced — see ingest/src/ingest/bounces.py.
+#
+# The invite API only sees Gmail ACCEPT the message; a university gateway
+# rejecting it minutes later shows up solely as a mailer-daemon bounce in the
+# sending inbox. This sweep reads that inbox on a schedule so blocked
+# deliveries cannot leave phantom students in the invited list, and it runs
+# here — not on anyone's laptop — so the cleanup survives any machine.
+#
+# Requires repo secrets: DATABASE_URL, SMTP_SENDER, SMTP_APP_PASSWORD.
+# Without them the job exits green doing nothing, same pattern as deploy.
+
+name: Bounce sweep
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: ingest/pyproject.toml
+      - run: pip install -e ./ingest
+      - name: Sweep bounced invites
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SMTP_SENDER: ${{ secrets.SMTP_SENDER }}
+          SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
+        run: |
+          if [ -z "$DATABASE_URL" ] || [ -z "$SMTP_SENDER" ] || [ -z "$SMTP_APP_PASSWORD" ]; then
+            echo "Secrets not configured — skipping sweep."
+            exit 0
+          fi
+          ingest bounces --days 3
