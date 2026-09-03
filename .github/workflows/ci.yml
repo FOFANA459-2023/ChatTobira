@@ -332,13 +332,48 @@ jobs:
   #
   # Requires repo secrets CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.
   # -------------------------------------------------------------------------
+  reviewed-via-pr:
+    name: Gate / reviewed via pull request
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      reviewed: ${{ steps.check.outputs.reviewed }}
+    steps:
+      # Branch protection is the primary control, but it lives in repo
+      # settings: it does not exist until someone turns it on, an admin can
+      # bypass it, and neither leaves a trace in this repository. This asks
+      # GitHub whether the commit about to be deployed actually belongs to a
+      # MERGED pull request. A direct push to main therefore builds nothing
+      # and ships nothing, whatever the settings say.
+      - id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          merged=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
+            --jq '[.[] | select(.merged_at != null)] | length')
+          if [ "$merged" -gt 0 ]; then
+            echo "reviewed=true" >> "$GITHUB_OUTPUT"
+            echo "Commit ${{ github.sha }} came from a merged pull request."
+          else
+            echo "reviewed=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Refusing to deploy ${{ github.sha }}: no merged pull request is"
+            echo "::error::associated with it. Every change reaching students is reviewed"
+            echo "::error::first — open a pull request instead of pushing to main."
+            exit 1
+          fi
+
   deploy:
     name: Deploy / Cloudflare Workers
-    needs: [ci-ok, web-detect]
+    needs: [ci-ok, web-detect, reviewed-via-pr]
     # Skips cleanly until the CLOUDFLARE_* repo secrets are configured.
     if: >
       github.ref == 'refs/heads/main' &&
       github.event_name == 'push' &&
+      needs.reviewed-via-pr.outputs.reviewed == 'true' &&
       needs.web-detect.outputs.exists == 'true' &&
       needs.web-detect.outputs.can_deploy == 'true'
     runs-on: ubuntu-latest
