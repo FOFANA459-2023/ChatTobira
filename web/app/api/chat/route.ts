@@ -18,7 +18,7 @@ import {
   type RetrievedChunk,
   type StudyScope,
 } from "@/lib/retrieval";
-import { createClient } from "@/lib/supabase/server";
+import { createClient, isSupabaseConfigured } from "@/lib/supabase/server";
 
 export const maxDuration = 60;
 
@@ -47,6 +47,13 @@ function lastUserText(messages: UIMessage[]): string {
 }
 
 export async function POST(request: Request) {
+  // Fail closed and name the problem, the way middleware does for every
+  // non-public route. createClient() throws on construction without
+  // credentials, and that throw is outside any try here.
+  if (!isSupabaseConfigured()) {
+    return Response.json({ error: "supabase_not_configured" }, { status: 503 });
+  }
+
   const supabase = await createClient();
   let user = null;
   try {

@@ -17,6 +17,21 @@
 
 const BASE = process.argv[2] ?? process.env.SMOKE_URL ?? "http://127.0.0.1:8787";
 const BOOT_TIMEOUT_MS = 120_000;
+// Every probe is bounded. Without this a single hung connection stalls the
+// whole run forever: Docker publishes the port before the worker inside is
+// listening, so an early probe can connect to the proxy and then wait on a
+// response that never comes. Node exits 13 on the unsettled await and the
+// failure looks like "the app is broken" rather than "we asked too early".
+const ATTEMPT_TIMEOUT_MS = 10_000;
+
+/** GET/POST with a deadline, so no single request can hang the gate. */
+function request(path, init = {}) {
+  return fetch(`${BASE}${path}`, {
+    redirect: "manual",
+    signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS),
+    ...init,
+  });
+}
 
 /** Each check names what would be broken in production if it failed. */
 const CHECKS = [
@@ -24,7 +39,7 @@ const CHECKS = [
     name: "login page renders",
     why: "students who are signed out land here; a 500 locks everyone out",
     async run() {
-      const response = await fetch(`${BASE}/login`, { redirect: "manual" });
+      const response = await request("/login");
       assert(response.status === 200, `expected 200, got ${response.status}`);
       const body = await response.text();
       assert(body.includes("<html"), "response was not an HTML document");
@@ -39,7 +54,7 @@ const CHECKS = [
     name: "chat page renders for a signed-out visitor",
     why: "the 3-question trial lives here; it is the app's front door",
     async run() {
-      const response = await fetch(`${BASE}/`, { redirect: "manual" });
+      const response = await request("/");
       assert(
         response.status === 200 || response.status === 307,
         `expected 200 or a redirect, got ${response.status}`,
@@ -50,7 +65,7 @@ const CHECKS = [
     name: "admin page renders",
     why: "it is its own sign-in page, so it must be reachable while signed out",
     async run() {
-      const response = await fetch(`${BASE}/admin`, { redirect: "manual" });
+      const response = await request("/admin");
       assert(response.status === 200, `expected 200, got ${response.status}`);
     },
   },
@@ -58,7 +73,7 @@ const CHECKS = [
     name: "chat API rejects a malformed body without a 500",
     why: "a crash here is an unhandled exception reaching every student",
     async run() {
-      const response = await fetch(`${BASE}/api/chat`, {
+      const response = await request("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ nonsense: true }),
@@ -75,7 +90,7 @@ const CHECKS = [
     name: "upload API refuses an anonymous caller",
     why: "uploads cost vision quota and are stored against an account",
     async run() {
-      const response = await fetch(`${BASE}/api/upload`, {
+      const response = await request("/api/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
@@ -90,7 +105,7 @@ const CHECKS = [
     name: "admin-only API refuses an anonymous caller",
     why: "the invite list must never be readable without an admin session",
     async run() {
-      const response = await fetch(`${BASE}/api/invite`, { redirect: "manual" });
+      const response = await request("/api/invite");
       assert(
         [401, 403, 503].includes(response.status),
         `expected 401/403/503, got ${response.status}`,
@@ -101,7 +116,7 @@ const CHECKS = [
     name: "unknown route 404s rather than crashing",
     why: "scanners hit random paths constantly",
     async run() {
-      const response = await fetch(`${BASE}/definitely-not-a-page`, { redirect: "manual" });
+      const response = await request("/definitely-not-a-page");
       assert(
         response.status === 404 || response.status === 307,
         `expected 404 or a redirect, got ${response.status}`,
@@ -117,19 +132,32 @@ function assert(condition, message) {
 async function waitForBoot() {
   const deadline = Date.now() + BOOT_TIMEOUT_MS;
   let last = "not attempted";
-  while (Date.now() < deadline) {
-    try {
-      await fetch(`${BASE}/login`, { redirect: "manual" });
-      return;
-    } catch (error) {
-      last = error instanceof Error ? error.message : String(error);
-      await new Promise((r) => setTimeout(r, 1000));
+
+  // A ref'd timer for the duration of the wait. Two things conspire without
+  // it: AbortSignal.timeout() is deliberately unref'd, and the FIRST probe
+  // runs before any other timer exists — so if that probe's connection holds
+  // no ref'd handle (Docker publishes the port before the worker inside is
+  // listening, and the connection just sits there), the event loop drains
+  // mid-await and node exits 13. That reads as "the app is broken" when the
+  // truth is "we asked too early", which is the worst way for a gate to fail.
+  const keepAlive = setInterval(() => {}, 1000);
+  try {
+    while (Date.now() < deadline) {
+      try {
+        await request("/login");
+        return;
+      } catch (error) {
+        last = error instanceof Error ? error.message : String(error);
+        await new Promise((r) => setTimeout(r, 1000));
+      }
     }
+    throw new Error(
+      `worker did not accept connections at ${BASE} within ` +
+        `${BOOT_TIMEOUT_MS / 1000}s (last error: ${last})`,
+    );
+  } finally {
+    clearInterval(keepAlive);
   }
-  throw new Error(
-    `worker did not accept connections at ${BASE} within ` +
-      `${BOOT_TIMEOUT_MS / 1000}s (last error: ${last})`,
-  );
 }
 
 const start = Date.now();

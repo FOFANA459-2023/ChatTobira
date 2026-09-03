@@ -231,7 +231,7 @@ jobs:
           echo "Runs unprivileged."
 
       - name: Scan for known vulnerabilities
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: chattobira-ingest:ci
           severity: HIGH,CRITICAL
@@ -284,7 +284,7 @@ jobs:
           node web/scripts/smoke.mjs http://127.0.0.1:8787
 
       - name: Scan for known vulnerabilities
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: chattobira-web:ci
           severity: HIGH,CRITICAL

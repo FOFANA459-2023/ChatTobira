@@ -5,7 +5,7 @@ import { generateText } from "ai";
 import { z } from "zod";
 
 import { isProviderDead, noteProviderFailure } from "@/lib/providers";
-import { createClient } from "@/lib/supabase/server";
+import { createClient, isSupabaseConfigured } from "@/lib/supabase/server";
 import { trialCookie, trialUsed, TRIALS } from "@/lib/trial";
 
 export const maxDuration = 30;
@@ -50,6 +50,12 @@ help. Rules:
  * plan lists WHAT was missed; this explains what the misses have in common
  * and how to attack them, which a tally cannot do. */
 export async function POST(request: Request) {
+  // Public route: middleware lets the trial through, so its fail-closed
+  // guard never runs here and createClient() would throw a bare 500.
+  if (!isSupabaseConfigured()) {
+    return Response.json({ error: "supabase_not_configured" }, { status: 503 });
+  }
+
   const supabase = await createClient();
   let user = null;
   try {

@@ -85,6 +85,14 @@ COPY --from=deps --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/.open-next ./.open-next
 COPY --chown=node:node package.json wrangler.jsonc ./
 
+# wrangler writes its local state under .wrangler at boot. WORKDIR creates
+# /app owned by root and COPY --chown only covers the files copied, not the
+# directory itself, so the unprivileged user cannot mkdir there and workerd
+# dies with EACCES the moment the container starts — a failure that no build
+# step and no unit test can see. Not chowned recursively: node_modules is
+# ~1 GB and already arrives owned by node.
+RUN mkdir -p /app/.wrangler && chown node:node /app /app/.wrangler
+
 USER node
 
 ENV PORT=8787 \
