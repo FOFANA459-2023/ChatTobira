@@ -3,38 +3,19 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import { Answer, RichText } from "@/components/answer";
 import { MagicLinkForm } from "@/components/magic-link-form";
 import { NavBar } from "@/components/nav";
 import {
   flattenItems,
   isCorrect,
   scoreQuiz,
-  splitRuby,
   splitUnderline,
   studyPlan,
   type Quiz,
   type QuizItem,
   type QuizKind,
 } from "@/lib/quiz";
-
-/** 漢字（かんじ） annotations rendered as real ruby — the reading sits on top
- * of the kanji the way the textbook prints furigana. */
-function RubyText({ text }: { text: string }) {
-  return (
-    <>
-      {splitRuby(text).map((part, i) =>
-        part.reading ? (
-          <ruby key={i}>
-            {part.base}
-            <rt className="select-none text-[0.55em] text-stone-500">{part.reading}</rt>
-          </ruby>
-        ) : (
-          <span key={i}>{part.base}</span>
-        ),
-      )}
-    </>
-  );
-}
 
 /** Japanese text with 【 】-marked words rendered as real underlines — the
  * printed papers underline the word an item asks about, and a literal marker
@@ -45,10 +26,10 @@ function JaText({ text }: { text: string }) {
       {splitUnderline(text).map((segment, i) =>
         segment.underline ? (
           <u key={i} className="underline decoration-2 underline-offset-4">
-            <RubyText text={segment.text} />
+            <RichText text={segment.text} />
           </u>
         ) : (
-          <RubyText key={i} text={segment.text} />
+          <RichText key={i} text={segment.text} />
         ),
       )}
     </>
@@ -346,7 +327,9 @@ export function QuizView({
                   </p>
                 )}
               </div>
-              <p className="mt-1 text-sm text-stone-500">{quiz.scope_description}</p>
+              <p className="mt-1 text-sm leading-7 text-stone-500">
+                <JaText text={quiz.scope_description} />
+              </p>
             </div>
 
             {checked && (
@@ -370,10 +353,10 @@ export function QuizView({
               return (
                 <section key={sectionIndex}>
                   <div className="border-b-2 border-stone-800 pb-2">
-                    <p className="font-semibold">
+                    <p className="font-semibold leading-8">
                       問題{ROMAN[sectionIndex] ?? sectionIndex + 1}{" "}
                       <span lang="ja" className="font-medium">
-                        {section.instruction_ja}
+                        <JaText text={section.instruction_ja} />
                       </span>
                     </p>
                     <p className="mt-0.5 text-xs text-stone-500">{section.instruction_en}</p>
@@ -527,9 +510,9 @@ function ScoreCard({
           <p className="text-xs font-medium uppercase tracking-wide text-stone-500">
             Your study coach
           </p>
-          <p className="mt-2 whitespace-pre-line text-sm leading-relaxed text-stone-700">
-            {feedback}
-          </p>
+          <div className="mt-2 text-sm text-stone-700">
+            <Answer text={feedback} />
+          </div>
         </div>
       )}
 
@@ -542,12 +525,12 @@ function ScoreCard({
             Based on this test, these are the parts of the course to review —
             most missed first.
           </p>
-          <ul className="mt-2 space-y-1.5 text-sm text-stone-700">
+          <ul className="mt-2 space-y-1.5 text-sm leading-7 text-stone-700">
             {plan.map(({ review, questions }) => (
               <li key={review} className="flex items-baseline gap-2">
                 <span className="text-stone-400">•</span>
                 <span>
-                  {review}{" "}
+                  <JaText text={review} />{" "}
                   <span className="text-xs text-stone-400">
                     ({questions.length === 1 ? "question" : "questions"}{" "}
                     {questions.join(", ")})
@@ -608,7 +591,7 @@ function QuizItemView({
 
   return (
     <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm">
-      <p className="text-sm font-medium">
+      <p className="text-sm font-medium leading-8">
         {checked && (
           <span className={correct ? "mr-1 text-green-600" : "mr-1 text-red-600"}>
             {correct ? "○" : "✕"}
@@ -629,7 +612,7 @@ function QuizItemView({
               key={choice}
               onClick={() => !checked && onAnswer(choice)}
               className={[
-                "rounded-lg border px-3 py-2 text-left text-sm",
+                "rounded-lg border px-3 py-2 text-left text-sm leading-7",
                 given === choice
                   ? "border-stone-900 bg-stone-900 text-white"
                   : "border-stone-300 bg-white hover:bg-stone-100",
@@ -685,7 +668,7 @@ function QuizItemView({
 
       {checked && (
         <div
-          className={`mt-3 rounded-lg px-3 py-2 text-sm ${
+          className={`mt-3 rounded-lg px-3 py-2 text-sm leading-7 ${
             correct ? "bg-green-50 text-green-900" : "bg-amber-50 text-amber-900"
           }`}
         >
@@ -693,16 +676,22 @@ function QuizItemView({
             <p>
               Answer:{" "}
               <span lang="ja">
-                {item.answer}
-                {item.answer_kana && item.answer_kana !== item.answer
-                  ? `（${item.answer_kana}）`
-                  : ""}
+                <JaText
+                  text={
+                    item.answer_kana && item.answer_kana !== item.answer
+                      ? `${item.answer}（${item.answer_kana}）`
+                      : item.answer
+                  }
+                />
               </span>
             </p>
           )}
-          <p className={correct ? "" : "mt-1"}>{item.explanation}</p>
+          <p className={correct ? "" : "mt-1"}>
+            <JaText text={item.explanation} />
+          </p>
           <p className="mt-1.5 border-t border-black/5 pt-1.5 text-xs opacity-80">
-            <span className="font-medium">Review:</span> {item.review}
+            <span className="font-medium">Review:</span>{" "}
+            <JaText text={item.review} />
           </p>
         </div>
       )}

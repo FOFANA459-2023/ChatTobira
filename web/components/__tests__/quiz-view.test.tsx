@@ -153,7 +153,15 @@ describe("QuizView", () => {
     await waitFor(() => expect(screen.getByText("2")).toBeInTheDocument());
     expect(screen.getByText("/ 3")).toBeInTheDocument();
     expect(screen.getByText(/67%/)).toBeInTheDocument();
-    expect(screen.getByText(/食べました（たべました）/)).toBeInTheDocument();
+    // The expected answer and its reading are set as ruby — one word with
+    // the hiragana above the kanji, not a word followed by a bracketed
+    // respelling of itself.
+    // 食べました（たべました） reduces to 食(た)べました: only the reading the
+    // kanji itself spells sits above it, and the okurigana stays on the line.
+    const answerRuby = document.querySelector("ruby");
+    expect(answerRuby).toHaveTextContent("食");
+    expect(answerRuby?.querySelector("rt")).toHaveTextContent("た");
+    expect(screen.queryByText(/（たべました）/)).not.toBeInTheDocument();
     expect(screen.getByText(/Past polite form/)).toBeInTheDocument();
 
     // Every item shows its review reference; the study plan aggregates ONLY

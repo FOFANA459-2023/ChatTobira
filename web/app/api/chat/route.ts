@@ -54,6 +54,41 @@ export async function POST(request: Request) {
     return Response.json({ error: "supabase_not_configured" }, { status: 503 });
   }
 
+  // The body is parsed before anything reaches the network, because the
+  // question inside it is what the embedding call needs and that call is the
+  // longest single hop in the route. Firing it here rather than after
+  // authentication lets the two overlap instead of queueing.
+  const parsed = BodySchema.safeParse(await request.json());
+  if (!parsed.success) {
+    return Response.json({ error: "bad_request" }, { status: 400 });
+  }
+  const { messages, scope, uploadIds } = parsed.data;
+  let { conversationId } = parsed.data;
+
+  const question = lastUserText(messages);
+  if (!question) {
+    return Response.json({ error: "empty_question" }, { status: 400 });
+  }
+
+  if (!process.env.GOOGLE_API_KEY || !process.env.GROQ_API_KEY) {
+    // Misconfiguration must be nameable from the outside, not a bare 500.
+    return Response.json({ error: "model_keys_not_configured" }, { status: 503 });
+  }
+
+  // Small talk skips the whole retrieval stack — no embedding round-trip, no
+  // cache probe, no vector search. Faster first token, and no absurd
+  // textbook citation under "hello".
+  const trivial = isSmallTalk(question);
+  // When the question arrived, so the stored turn keeps its real order even
+  // though it is written after the answer has finished streaming.
+  const askedAt = new Date().toISOString();
+
+  // In flight while the auth round trip below happens. Nothing about an
+  // embedding depends on who is asking; the only cost of starting early is
+  // one wasted embed when a trial visitor turns out to be past their limit,
+  // paid on the highest-quota model in the stack.
+  const embedding = trivial ? Promise.resolve(null) : embedQuery(question).catch(() => null);
+
   const supabase = await createClient();
   let user = null;
   try {
@@ -74,77 +109,73 @@ export async function POST(request: Request) {
     setCookie = trialCookie("chat", used + 1);
   }
 
-  const parsed = BodySchema.safeParse(await request.json());
-  if (!parsed.success) {
-    return Response.json({ error: "bad_request" }, { status: 400 });
-  }
-  const { messages, scope, uploadIds } = parsed.data;
-  let { conversationId } = parsed.data;
-
-  const question = lastUserText(messages);
-  if (!question) {
-    return Response.json({ error: "empty_question" }, { status: 400 });
-  }
-
-  if (!process.env.GOOGLE_API_KEY || !process.env.GROQ_API_KEY) {
-    // Misconfiguration must be nameable from the outside, not a bare 500.
-    return Response.json({ error: "model_keys_not_configured" }, { status: 503 });
-  }
-
-  async function persistAssistant(
+  /** Both message rows for this turn, written once the answer is complete.
+   *
+   * Neither row is on the path to a first token: nothing the student sees
+   * depends on them, and inserting the question before answering it only
+   * spent a round trip in front of the model. One statement for the pair
+   * costs one round trip instead of two, and the explicit timestamps keep
+   * the question ahead of its answer in history. */
+  async function persistTurn(
     answer: string,
     citations: Citation[],
     model: string,
-  ): Promise<number | undefined> {
-    if (!conversationId || !answer) return undefined;
-    const { data } = await supabase
-      .from("messages")
-      .insert({
+  ): Promise<void> {
+    if (!conversationId || !answer) return;
+    await supabase.from("messages").insert([
+      {
+        conversation_id: conversationId,
+        role: "user",
+        content: question,
+        created_at: askedAt,
+      },
+      {
         conversation_id: conversationId,
         role: "assistant",
         content: answer,
         citations,
         model,
-      })
-      .select("id")
-      .single();
-    return (data as { id: number } | null)?.id;
+        created_at: new Date().toISOString(),
+      },
+    ]);
   }
-
-  // Small talk skips the whole retrieval stack — no embedding round-trip, no
-  // cache probe, no vector search. Faster first token, and no absurd
-  // textbook citation under "hello".
-  const trivial = isSmallTalk(question);
 
   // Signed-in students read under their own RLS; trial visitors read through
   // the service client. A trial without the service key still answers, just
   // ungrounded — a degraded taster beats an error page.
   const db = user ? supabase : serviceClient();
 
-  // Three independent round-trips run concurrently instead of as a waterfall;
-  // at ~100ms per Supabase RPC and 200–400ms per embedding this is the
-  // cheapest few hundred milliseconds of first-token latency in the route.
+  // Everything the answer is waiting on runs concurrently instead of as a
+  // waterfall: at ~100ms per Supabase round trip and 200–400ms for an
+  // embedding, this is the cheapest half-second of first-token latency in
+  // the route.
   //
-  // Persist under RLS as the signed-in student; trial visitors have no row
-  // to write to and no history. Failures here must never block an answer —
-  // history is valuable, the answer is the product.
-  const persistUserTurn = async (): Promise<number | undefined> => {
-    if (!user) return conversationId;
-    let cid = conversationId;
-    if (!cid) {
-      const { data: conversation } = await supabase
-        .from("conversations")
-        .insert({ user_id: user.id, scope, title: question.slice(0, 60) })
-        .select("id")
-        .single();
-      cid = (conversation as { id: number } | null)?.id;
-    }
-    if (cid) {
-      await supabase
-        .from("messages")
-        .insert({ conversation_id: cid, role: "user", content: question });
-    }
-    return cid;
+  // The conversation row is the one write that cannot wait — its id rides
+  // out with the answer's metadata, and the client needs it to keep the next
+  // turn in the same conversation.
+  const ensureConversation = async (): Promise<number | undefined> => {
+    if (!user || conversationId) return conversationId;
+    const { data: conversation } = await supabase
+      .from("conversations")
+      .insert({ user_id: user.id, scope, title: question.slice(0, 60) })
+      .select("id")
+      .single();
+    return (conversation as { id: number } | null)?.id;
+  };
+
+  // Files the student attached to this turn. Read under their own RLS, so
+  // one student can never attach another's upload by guessing an id.
+  const fetchAttached = async (): Promise<AttachedUpload[]> => {
+    if (!user || !uploadIds || uploadIds.length === 0) return [];
+    const { data: rows } = await supabase
+      .from("uploads")
+      .select("filename, extracted")
+      .in("id", uploadIds)
+      .not("extracted", "is", null);
+    return ((rows ?? []) as { filename: string; extracted: string }[]).map((r) => ({
+      filename: r.filename,
+      extracted: r.extracted,
+    }));
   };
 
   // Atomic in SQL, so parallel requests cannot double-spend. An exhausted
@@ -171,28 +202,14 @@ export async function POST(request: Request) {
     return null;
   };
 
-  const [persistedId, quotaVerdict, embedding] = await Promise.all([
-    persistUserTurn(),
+  const [persistedId, quotaVerdict, queryVector, attached] = await Promise.all([
+    ensureConversation(),
     checkQuota(),
-    !trivial && db ? embedQuery(question).catch(() => null) : Promise.resolve(null),
+    embedding,
+    fetchAttached(),
   ]);
   conversationId = persistedId ?? conversationId;
   if (quotaVerdict) return quotaVerdict;
-
-  // Files the student attached to this turn. Read under their own RLS, so
-  // one student can never attach another's upload by guessing an id.
-  let attached: AttachedUpload[] = [];
-  if (user && uploadIds && uploadIds.length > 0) {
-    const { data: rows } = await supabase
-      .from("uploads")
-      .select("filename, extracted")
-      .in("id", uploadIds)
-      .not("extracted", "is", null);
-    attached = ((rows ?? []) as { filename: string; extracted: string }[]).map((r) => ({
-      filename: r.filename,
-      extracted: r.extracted,
-    }));
-  }
 
   // An answer built from a private file must never enter the shared answer
   // cache: qa_cache is keyed by question embedding and study scope only, so
@@ -205,10 +222,10 @@ export async function POST(request: Request) {
   let chunks: RetrievedChunk[] = [];
 
   if (!trivial && db) {
-    if (!embedding) {
+    if (!queryVector) {
       return Response.json({ error: "embedding_failed" }, { status: 502 });
     }
-    vectorLiteral = `[${embedding.join(",")}]`;
+    vectorLiteral = `[${queryVector.join(",")}]`;
 
     // Cache probe and vector retrieval both need only the embedding, so they
     // run together: a hit discards the retrieval, a miss — the common case as
@@ -221,7 +238,7 @@ export async function POST(request: Request) {
             query_scope: scope,
           })
         : Promise.resolve({ data: null }),
-      retrieve(db, embedding, tokensForQuery(question), scope, 8).then(
+      retrieve(db, queryVector, tokensForQuery(question), scope, 8).then(
         (rows) => ({ ok: true as const, rows }),
         () => ({ ok: false as const, rows: [] as RetrievedChunk[] }),
       ),
@@ -231,7 +248,7 @@ export async function POST(request: Request) {
     // hit here costs no Groq/Gemini quota at all.
     if (cached && cached.length > 0) {
       const hit = cached[0] as { answer: string; citations: Citation[] };
-      await persistAssistant(hit.answer, hit.citations, "cache");
+      await persistTurn(hit.answer, hit.citations, "cache");
       return cachedAnswerResponse(hit.answer, hit.citations, conversationId, setCookie);
     }
 
@@ -329,7 +346,7 @@ export async function POST(request: Request) {
         .map((p) => p.text)
         .join("");
       if (!answer) return;
-      await persistAssistant(answer, citations, modelUsed);
+      await persistTurn(answer, citations, modelUsed);
       // Cache fire-and-forget: a failed write must not break the reply.
       // Small talk is never cached — it has no embedding and no reuse value.
       if (vectorLiteral && db && cacheable) {

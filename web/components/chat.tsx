@@ -5,6 +5,7 @@ import { DefaultChatTransport } from "ai";
 import Link from "next/link";
 import { useRef, useState } from "react";
 
+import { Answer } from "@/components/answer";
 import { Citations } from "@/components/citations";
 import { FeedbackButtons } from "@/components/feedback-buttons";
 import { MagicLinkForm } from "@/components/magic-link-form";
@@ -126,14 +127,23 @@ export function Chat({
               className={
                 message.role === "user"
                   ? "ml-auto max-w-[85%] break-words rounded-2xl rounded-br-sm bg-stone-900 px-4 py-2.5 text-sm text-white"
-                  : "max-w-[85%] break-words rounded-2xl rounded-bl-sm border border-stone-200 bg-white px-4 py-3 text-sm shadow-sm"
+                  // Wider than a question bubble: an answer carries word
+                  // lists and conjugation tables, and two columns of
+                  // vocabulary inside 85% of the column wrap to shreds.
+                  : "max-w-[95%] break-words rounded-2xl rounded-bl-sm border border-stone-200 bg-white px-4 py-3 text-sm shadow-sm"
               }
             >
               {message.parts.map((part, index) =>
                 part.type === "text" ? (
-                  <p key={index} className="whitespace-pre-wrap leading-relaxed">
-                    {part.text}
-                  </p>
+                  message.role === "assistant" ? (
+                    // Laid out like a page of the textbook. A question is
+                    // the student's own words and stays exactly as typed.
+                    <Answer key={index} text={part.text} />
+                  ) : (
+                    <p key={index} className="whitespace-pre-wrap leading-relaxed">
+                      {part.text}
+                    </p>
+                  )
                 ) : null,
               )}
               {message.role === "assistant" && (
