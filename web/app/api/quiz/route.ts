@@ -4,9 +4,11 @@ import { createGroq } from "@ai-sdk/groq";
 import { generateObject } from "ai";
 import { z } from "zod";
 
+import { cachedPool, rememberPool } from "@/lib/corpus-cache";
 import { isProviderDead, noteProviderFailure } from "@/lib/providers";
 import {
   chunksForLesson,
+  dedupeQuiz,
   focusTokens,
   lessonByPage,
   QuizSchema,
@@ -44,6 +46,12 @@ provided course material, in the format of the course's own test papers. Rules:
   already been taught, so kanji taught at or before the tested scope carry NO
   furigana; only kanji from beyond the scope get furigana. Never put furigana
   on a word whose reading or writing is itself being tested.
+- A reading is attached to the WHOLE word, once — 持ち物（もちもの）, 急ぐ（いそぐ）
+  — never one reading per character (持《も》ち物《もの》 is wrong), and never on
+  a word already written in kana.
+- Write plain text everywhere: no Markdown, no asterisks for emphasis, no
+  headings, no bullet characters. The app sets the paper; question,
+  explanation, review and scope_description are prose and nothing else.
 - true_false: the question is ONE statement about the section's passage, and
   the answer is exactly ○ (the statement matches the passage) or × (it does
   not). Mix ○ and × answers; × statements must be plausibly wrong, contradicted
@@ -262,39 +270,54 @@ export async function POST(request: Request) {
   // so scoping happens by ranking chunk contents, not by a column filter.
   // book_page comes along so review references can name a page the student
   // can actually open.
-  const { data: chunks, error } = await db
-    .from("chunks")
-    .select("content, metadata, book_page, pdf_page")
-    .eq("document_id", documentId)
-    .order("pdf_page")
-    .limit(500);
-  if (error) {
-    return Response.json({ error: "retrieval_failed" }, { status: 502 });
-  }
-  if (!chunks || chunks.length === 0) {
-    return Response.json(
-      {
-        error: "no_material",
-        message: "No course material is loaded for that selection yet.",
-      },
-      { status: 404 },
-    );
-  }
-
+  //
+  // Both the fetch and the lesson mapping below are pure functions of the
+  // book, so they are cached per isolate: pressing "New Test" is the common
+  // case, and it should not re-read half a megabyte of Japanese and re-scan
+  // it for 第N課 headers to write a different paper from the same chapter.
   type QuizChunk = {
     content: string;
     metadata: Record<string, unknown> | null;
     book_page: string | null;
     pdf_page: number;
   };
-  const allChunks = chunks as QuizChunk[];
+  interface Pool {
+    chunks: QuizChunk[];
+    lessons: Map<number, number>;
+  }
 
-  // Textbook chunks carry no lesson metadata, so the lesson each page belongs
-  // to is derived from the 第N課 headers in the text itself. A lesson-scoped
-  // test then draws from that lesson's actual pages — never a random sample
-  // of the book — with earlier lessons as filler only when the lesson is
-  // thin, and a fall back to text matching when the mapping finds nothing.
-  const lessons = lessonByPage(allChunks);
+  let pool = cachedPool<Pool>(documentId);
+  if (!pool) {
+    const { data: chunks, error } = await db
+      .from("chunks")
+      .select("content, metadata, book_page, pdf_page")
+      .eq("document_id", documentId)
+      .order("pdf_page")
+      .limit(500);
+    if (error) {
+      return Response.json({ error: "retrieval_failed" }, { status: 502 });
+    }
+    if (!chunks || chunks.length === 0) {
+      return Response.json(
+        {
+          error: "no_material",
+          message: "No course material is loaded for that selection yet.",
+        },
+        { status: 404 },
+      );
+    }
+    // Textbook chunks carry no lesson metadata, so the lesson each page
+    // belongs to is derived from the 第N課 headers in the text itself. A
+    // lesson-scoped test then draws from that lesson's actual pages — never a
+    // random sample of the book — with earlier lessons as filler only when
+    // the lesson is thin, and a fall back to text matching when the mapping
+    // finds nothing.
+    pool = { chunks: chunks as QuizChunk[], lessons: lessonByPage(chunks as QuizChunk[]) };
+    rememberPool(documentId, pool);
+  }
+
+  const allChunks = pool.chunks;
+  const lessons = pool.lessons;
   const scopeDivisionForContent = focusTokens(focus ?? "")
     .filter((token) => /^t\d{1,2}$/.test(token))
     .map((token) => Number(token.slice(1)));
@@ -430,19 +453,30 @@ vocabulary — while staying inside the same material:\n${avoid
         // the same questions from the same excerpts.
         temperature: 0.8,
       });
+      // No question may repeat inside one paper. Dropping the repeat is
+      // better than re-asking the model: it costs no second call, and a
+      // 19-question paper with nothing duplicated beats a 20-question paper
+      // that asks 食べる twice.
+      const { quiz: paper, removed } = dedupeQuiz(object, kind);
+      if (removed > 0) {
+        console.warn(`quiz on ${tier.provider}: dropped ${removed} repeated item(s)`);
+      }
+
       // A paper that is schema-valid but far too short is still unusable —
       // seen live: 1 item back from a 9-item request. Let the next tier try.
+      // Counted AFTER dedupe, so a paper that only reached its length by
+      // repeating itself is short, which is what it actually is.
       const expected = count + reading;
-      const produced = object.sections.reduce((n, s) => n + s.items.length, 0);
+      const produced = paper.sections.reduce((n, s) => n + s.items.length, 0);
       if (produced < Math.ceil(expected * 0.6)) {
         throw new Error(`paper too short: ${produced} items for count=${expected}`);
       }
       // A grammar paper without its reading passage is missing a section the
       // real papers always have.
-      if (reading > 0 && !object.sections.some((s) => s.passage && s.passage.length >= 50)) {
+      if (reading > 0 && !paper.sections.some((s) => s.passage && s.passage.length >= 50)) {
         throw new Error("paper is missing the reading passage");
       }
-      return Response.json(object, {
+      return Response.json(paper, {
         headers: setCookie ? { "Set-Cookie": setCookie } : undefined,
       });
     } catch (error) {

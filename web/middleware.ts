@@ -24,6 +24,16 @@ export async function middleware(request: NextRequest) {
     path.startsWith("/auth") ||
     path.startsWith("/admin");
 
+  // The public APIs establish who is asking themselves — each one calls
+  // getUser() and meters anonymous callers on its own cookie — so the
+  // round trip here would be a second, discarded copy of that answer in
+  // front of every message a student sends and every test they generate.
+  // Skipped for those routes only: session refresh still happens on page
+  // navigations, and on these routes inside the handler's own client.
+  if (isPublic && path.startsWith("/api/")) {
+    return response;
+  }
+
   // Missing Supabase config must fail CLOSED but render something: everyone
   // is treated as signed out and lands on /login, not on a 500 stack trace.
   if (
