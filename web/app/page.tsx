@@ -3,6 +3,7 @@ import { Chat } from "@/components/chat";
 import { NameGate } from "@/components/name-gate";
 import { firstNameFrom } from "@/lib/name";
 import { createClient } from "@/lib/supabase/server";
+import type { CourseLevel } from "@/lib/uploads";
 import type { User } from "@supabase/supabase-js";
 
 export default async function Home() {
@@ -10,11 +11,22 @@ export default async function Home() {
   // /api/chat meters them with the 3-question trial before requiring the
   // invited sign-in.
   let user: User | null = null;
+  let level: CourseLevel | null = null;
   try {
     const supabase = await createClient();
     ({
       data: { user },
     } = await supabase.auth.getUser());
+    if (user) {
+      // Defaults the upload picker to the course this student is actually
+      // taking, so filing a handout is two taps rather than a quiz.
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("level")
+        .eq("id", user.id)
+        .single();
+      level = ((profile?.level as CourseLevel | null) ?? null) satisfies CourseLevel | null;
+    }
   } catch {
     // Unreachable auth reads as signed out; the trial still works.
   }
@@ -31,5 +43,12 @@ export default async function Home() {
     return <NameGate />;
   }
 
-  return <Chat firstName={firstName} isAdmin={isAdmin} authenticated={Boolean(user)} />;
+  return (
+    <Chat
+      firstName={firstName}
+      isAdmin={isAdmin}
+      authenticated={Boolean(user)}
+      level={level}
+    />
+  );
 }

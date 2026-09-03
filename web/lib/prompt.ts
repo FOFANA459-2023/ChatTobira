@@ -18,6 +18,8 @@ GROUNDING
 - Answer ONLY from the provided source material. If the sources do not cover the question, say so plainly and suggest what topic or textbook chapter likely does. Do not invent grammar rules.
 - Casual conversation (greetings, thanks, chit-chat) needs no sources: reply briefly and warmly, and never mention the textbook for it.
 - Sources marked [citable] are the official textbooks; sources marked [handout] are class materials. The student owns all of them — both may be quoted freely and referred to naturally.
+- A source marked [your upload] is a file this student just uploaded — a photo or scan of their own handout, worksheet, or notes. Use it as the primary subject when they ask about it, and refer to it by its filename, never as "the textbook". It is NOT course-authored material: anything marked 手書き in it is the student's own working and may well be wrong, so check it against the textbook sources rather than repeating it back as correct. If an upload contradicts a [citable] source, the textbook wins and you should say so kindly.
+- If an upload's text begins UNREADABLE, the photo was too blurred or cropped to transcribe. Say so and suggest retaking it in better light rather than guessing at the content.
 - NEVER withhold source content. The whole point of this app is to spare the student flipping pages: when they ask what a passage, table, or list says, reproduce it in full from the sources — complete conjugation tables, complete example lists, whole reading passages.
 - When your answer relies on a [citable] source, mention the textbook and printed page naturally, e.g. 「教科書のp.112を見てください」 or "see p. 112 of Tobira".
 
@@ -42,14 +44,39 @@ ${scopeLine}`;
 const CHUNK_CHAR_BUDGET = 1600;
 const TOTAL_CHAR_BUDGET = 8000;
 
+/** Uploads share the total budget rather than adding to it — the ceiling
+ * exists because of Groq's 12k tokens/minute, and an attachment does not
+ * raise that. Capped at this much so a long scan cannot crowd the textbook
+ * out of its own answer, but placed FIRST: the student attached the file
+ * because it is what they want to talk about. */
+const UPLOAD_CHAR_BUDGET = 5000;
+
+/** A student's own uploaded file, as context. */
+export interface AttachedUpload {
+  filename: string;
+  extracted: string;
+}
+
 /** Context block handed to the model alongside the student's question. */
-export function contextBlock(chunks: RetrievedChunk[]): string {
-  if (chunks.length === 0) {
+export function contextBlock(
+  chunks: RetrievedChunk[],
+  uploads: AttachedUpload[] = [],
+): string {
+  if (chunks.length === 0 && uploads.length === 0) {
     return "No source material matched this question.";
   }
 
   const parts: string[] = [];
   let used = 0;
+
+  for (const upload of uploads) {
+    if (used >= UPLOAD_CHAR_BUDGET) break;
+    const body = upload.extracted.slice(0, UPLOAD_CHAR_BUDGET - used);
+    const part = `--- Source: [your upload] ${upload.filename} ---\n${body}`;
+    parts.push(part);
+    used += part.length;
+  }
+
   for (const [index, chunk] of chunks.entries()) {
     const tag = chunk.is_citable
       ? `[citable] ${chunk.doc_title}${chunk.book_page ? `, p. ${chunk.book_page}` : ""}`

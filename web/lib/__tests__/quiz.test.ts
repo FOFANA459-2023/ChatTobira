@@ -251,6 +251,79 @@ describe("lessonByPage", () => {
     expect(lessons.get(30)).toBe(2);
   });
 
+  it("reads the katakana トピック headers the Foundation 3 book prints", () => {
+    // Measured on the ingested book: 20-29 katakana headers per topic
+    // against 2-3 Latin "Topic" ones, which appear only on the English
+    // contents pages. Matching Latin alone mapped three quarters of the
+    // book to front matter.
+    const lessons = lessonByPage([
+      page(13, "トピック 11 サークルに入りませんか"),
+      page(20, "れんしゅう"),
+      page(30, "トピック 12 けんこう"),
+      page(47, "トピック13 ようこそ"), // glued, no space
+      page(65, "トピック １４ アルバイト"), // full-width digits
+    ]);
+    expect(lessons.get(13)).toBe(11);
+    expect(lessons.get(20)).toBe(11);
+    expect(lessons.get(30)).toBe(12);
+    expect(lessons.get(47)).toBe(13);
+    expect(lessons.get(65)).toBe(14);
+  });
+
+  it("accepts a restart at the book's own opening topic, not only at 1", () => {
+    // The Foundation 3 book runs Topics 11-20 twice: main text, then a
+    // Kanji and Vocabulary section that starts over at トピック11. A restart
+    // rule written around Topic 1 missed this and filed 115 pages of kanji
+    // material under Topic 20, the last topic of the main text.
+    const lessons = lessonByPage([
+      page(13, "トピック 11"),
+      page(30, "トピック 12"),
+      page(47, "トピック 13"),
+      page(157, "トピック 20"),
+      page(171, "Kanji and Vocabulary"),
+      page(175, "トピック 11 サークルに入りませんか"), // second pass
+      page(176, "トピック 11 漢字練習"),
+      page(182, "トピック 12"),
+      page(190, "トピック 13"),
+    ]);
+    expect(lessons.get(47)).toBe(13); // first pass
+    expect(lessons.get(175)).toBe(11); // restart recognised
+    expect(lessons.get(190)).toBe(13); // second pass of the same topic
+  });
+
+  it("anchors on the opening division of a mid-course volume", () => {
+    // The Foundation 3 book opens at Topic 11, not Topic 1. Stepping forward
+    // two at a time from zero can never reach 11, which mapped the entire
+    // book to front matter and sent every scoped test to the text-matching
+    // fallback.
+    const lessons = lessonByPage([
+      page(5, "もくじ"),
+      page(12, "Topic 11 ボランティア"),
+      page(20, "れんしゅう"),
+      page(34, "Topic 12 けんこう"),
+      page(56, "Topic 13 しゅみ"),
+    ]);
+    expect(lessons.get(5)).toBe(0); // front matter still front matter
+    expect(lessons.get(12)).toBe(11);
+    expect(lessons.get(20)).toBe(11); // carried forward between headers
+    expect(lessons.get(34)).toBe(12);
+    expect(lessons.get(56)).toBe(13);
+  });
+
+  it("does not anchor on a lone high cross-reference in the front matter", () => {
+    // A front-matter page citing 第7課 has no follow-through; the book's real
+    // numbering starts afterwards and must win.
+    const lessons = lessonByPage([
+      page(4, "この本は第7課までの復習です"),
+      page(19, "第1課 スタート"),
+      page(30, "第2課"),
+      page(44, "第3課"),
+    ]);
+    expect(lessons.get(4)).toBe(0);
+    expect(lessons.get(19)).toBe(1);
+    expect(lessons.get(44)).toBe(3);
+  });
+
   it("accepts a numbering restart when the following pages confirm it", () => {
     // The Foundation 1 & 2 book runs Topics 1–10 twice: main text, then the
     // kanji/vocabulary section starts over at Topic 1. Both passes of a topic

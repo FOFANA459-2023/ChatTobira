@@ -1,0 +1,14 @@
+# Every change is reviewed by the person who runs the course.
+#
+# On its own this only requests a review automatically. It becomes an actual
+# requirement when "Require review from Code Owners" is enabled in the main
+# branch's protection rule — see the deploy gate in workflows/ci.yml for the
+# enforcement that does not depend on repo settings.
+* @FOFANA459-2023
+
+# The corpus and the access rules deserve a second look even when the diff
+# looks small: a wrong migration is applied to a live database that students
+# depend on, and a wrong ingest change quietly teaches the wrong material.
+/supabase/migrations/ @FOFANA459-2023
+/ingest/             @FOFANA459-2023
+/.github/            @FOFANA459-2023

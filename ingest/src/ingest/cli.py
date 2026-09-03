@@ -207,7 +207,10 @@ def cmd_verify() -> None:
     for d in docs:
         d["_has_book_pages"] = book_pages.get(d["id"], 0) > 0
 
-    ok = verify.report(verify.check_chunks(chunks) + verify.check_documents(docs, counts))
+    ok = verify.report(
+        verify.check_chunks(chunks)
+        + verify.check_documents(docs, counts, len(CONFIG.citable_sources))
+    )
     console.print(f"\n{stats}")
     raise typer.Exit(0 if ok else 1)
 
@@ -348,6 +351,70 @@ def cmd_bounces(
         if revoked
         else "bounces were stale or students already signed in — nothing revoked"
     )
+
+
+@app.command("uploads")
+def cmd_uploads(
+    dry_run: bool = typer.Option(False, help="Show what would be ingested, change nothing"),
+) -> None:
+    """Ingest student uploads the admin approved on /admin.
+
+    The web app already extracted each file's text when the student uploaded
+    it, so this re-uses that transcript rather than paying for a second
+    vision pass. Files land in the materials tree under their level and
+    topic, and from there they are ordinary handouts: retrievable, never
+    citable, and re-runnable without duplication."""
+    from . import uploads as uploads_module
+
+    approved = uploads_module.fetch_approved()
+    if not approved:
+        console.print("no approved uploads waiting — nothing to ingest")
+        return
+
+    for item in approved:
+        destination = uploads_module.corpus_path(item.level, item.topic, item.filename)
+        console.print(f"[cyan]pending[/cyan] {item.filename} [dim]->[/dim] {destination}")
+    if dry_run:
+        console.print(f"[dim]dry run — {len(approved)} upload(s) left untouched[/dim]")
+        return
+
+    manifest = Manifest()
+    ingested = 0
+
+    with uploads_module.client() as http:
+        for item in approved:
+            target, sha = uploads_module.materialise(http, item)
+            relative = target.relative_to(CONFIG.materials_root).as_posix()
+            uploads_module.write_transcript(sha, item.extracted)
+            manifest.mark("transcribe", relative, sha, pages=1)
+
+            # Re-discovering is what gives the file its level, topic and
+            # doc_type — read off the path it was just written to, exactly as
+            # for a handout the admin filed by hand.
+            doc = next((d for d in discover() if d.path == relative), None)
+            if doc is None:
+                console.print(f"[yellow]skip[/yellow]    {relative} (not discovered after write)")
+                continue
+
+            pages = _load_pages(doc)
+            chunks = chunk_document(doc, pages or [])
+            if not chunks:
+                console.print(f"[yellow]skip[/yellow]    {relative} (no chunks)")
+                continue
+
+            console.print(f"[cyan]embed[/cyan]   {relative} ({len(chunks)} chunks)")
+            vectors = embed_documents([c.metadata["embed_text"] for c in chunks])
+
+            with store.connect() as conn:
+                document_id = store.upsert_document(conn, doc, page_count=1)
+                written = store.replace_chunks(conn, document_id, chunks, vectors)
+                conn.commit()
+
+            uploads_module.mark_ingested(item.id, document_id, sha)
+            ingested += 1
+            console.print(f"[green]stored[/green]  {relative}: {written} chunks")
+
+    console.print(f"\n[bold]{ingested} upload(s) ingested[/bold]")
 
 
 @app.command("all")

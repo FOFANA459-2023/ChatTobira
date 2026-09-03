@@ -79,9 +79,19 @@ def render_pages(doc: SourceDoc, pdf_path: Path) -> list[Path]:
     with pymupdf.open(pdf_path) as pdf:
         for index in range(pdf.page_count):
             target = out_dir / f"{index + 1:04d}.png"
-            if not target.exists():
+            # A zero-length file is a render that was interrupted mid-write,
+            # not a cached page. Re-rendering is cheap and local; trusting it
+            # is not, because the damage surfaces hundreds of pages later as
+            # an unreadable image that kills the run at transcription time.
+            if not target.exists() or target.stat().st_size == 0:
                 pixmap = pdf.load_page(index).get_pixmap(matrix=matrix)
-                pixmap.save(target)
+                # Write to a temporary name and rename into place, so an
+                # interrupted run (Ctrl+C, power loss, a full disk) can never
+                # leave a truncated PNG behind for the cache check to trust.
+                # Same atomic-write idiom as Manifest.save().
+                tmp = target.with_name(target.name + ".tmp")
+                pixmap.save(tmp, output="png")
+                tmp.replace(target)
             pages.append(target)
 
     return pages

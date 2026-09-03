@@ -51,7 +51,7 @@ class TestChunkChecks:
 
 
 class TestDocumentChecks:
-    def test_exactly_three_citable_required(self):
+    def test_citable_count_must_match_configuration(self):
         docs = [
             {"id": 1, "path": "a", "is_citable": True, "_has_book_pages": True},
             {"id": 2, "path": "b", "is_citable": True, "_has_book_pages": True},
@@ -59,10 +59,18 @@ class TestDocumentChecks:
             {"id": 4, "path": "d", "is_citable": False, "_has_book_pages": False},
         ]
         counts = {1: 5, 2: 5, 3: 5, 4: 5}
-        citable = next(c for c in check_documents(docs, counts) if c.name == "citable_present")
-        assert citable.passed
+
+        def citable(expected):
+            return next(
+                c for c in check_documents(docs, counts, expected) if c.name == "citable_present"
+            )
+
+        assert citable(3).passed
+        # A book listed in CITABLE_SOURCES but missing from the corpus is
+        # exactly the silent failure this check exists to catch.
+        assert not citable(4).passed
 
     def test_barren_document_flagged(self):
         docs = [{"id": 1, "path": "a", "is_citable": True, "_has_book_pages": True}]
-        barren = next(c for c in check_documents(docs, {}) if c.name == "all_documents_chunked")
+        barren = next(c for c in check_documents(docs, {}, 1) if c.name == "all_documents_chunked")
         assert not barren.passed

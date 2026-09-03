@@ -55,16 +55,23 @@ def check_chunks(records: list[dict]) -> list[Check]:
     return checks
 
 
-def check_documents(documents: list[dict], chunk_counts: dict[int, int]) -> list[Check]:
+def check_documents(
+    documents: list[dict], chunk_counts: dict[int, int], expected_citable: int
+) -> list[Check]:
     checks: list[Check] = []
 
+    # Counted against CITABLE_SOURCES rather than a literal: adding a textbook
+    # is a .env change, and a check that had to be edited alongside it would
+    # simply be edited to match whatever shipped, which is not a check.
     citable = [d for d in documents if d.get("is_citable")]
     checks.append(
         Check(
             "citable_present",
-            len(citable) == 3,
-            f"{len(citable)} citable textbooks registered (expected 3). "
-            f"With none, every answer would come back uncited.",
+            len(citable) == expected_citable,
+            f"{len(citable)} citable textbooks registered "
+            f"(expected {expected_citable}, from CITABLE_SOURCES). "
+            f"With none, every answer would come back uncited; with fewer than "
+            f"configured, one book is missing from the corpus.",
         )
     )
 

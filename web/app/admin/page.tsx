@@ -20,6 +20,19 @@ interface Invite {
   accepted: boolean;
 }
 
+interface Submission {
+  id: number;
+  filename: string;
+  level: string | null;
+  topic: string | null;
+  status: string;
+  size_bytes: number;
+  created_at: string;
+  uploader: string;
+  preview: string;
+  destination: string | null;
+}
+
 type Session = "checking" | "signed_out" | "not_admin" | "admin";
 
 export default function AdminPage() {
@@ -35,6 +48,33 @@ export default function AdminPage() {
   const [newPassword, setNewPassword] = useState("");
   const [passwordNote, setPasswordNote] = useState<{ ok: boolean; text: string } | null>(
     null,
+  );
+
+  const [queue, setQueue] = useState<Submission[]>([]);
+  const [expanded, setExpanded] = useState<number | null>(null);
+
+  const loadQueue = useCallback(() => {
+    void fetch("/api/upload/review")
+      .then((r) => (r.ok ? r.json() : { queue: [] }))
+      .then((body: { queue?: Submission[] }) => setQueue(body.queue ?? []))
+      .catch(() => setQueue([]));
+  }, []);
+
+  const review = useCallback(
+    async (id: number, action: "approve" | "reject") => {
+      setBusy(true);
+      try {
+        await fetch("/api/upload/review", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, action }),
+        });
+        loadQueue();
+      } finally {
+        setBusy(false);
+      }
+    },
+    [loadQueue],
   );
 
   const loadInvites = useCallback(() => {
@@ -63,8 +103,10 @@ export default function AdminPage() {
   }, []);
 
   useEffect(() => {
-    if (session === "admin") loadInvites();
-  }, [session, loadInvites]);
+    if (session !== "admin") return;
+    loadInvites();
+    loadQueue();
+  }, [session, loadInvites, loadQueue]);
 
   async function signIn(event: React.FormEvent) {
     event.preventDefault();
@@ -468,6 +510,94 @@ export default function AdminPage() {
                   </p>
                 </div>
               )}
+
+              <div className="mt-8 border-t border-stone-200 pt-6">
+                <h2 className="text-sm font-semibold text-stone-800">
+                  Shared library review
+                </h2>
+                <p className="mt-1 text-xs leading-relaxed text-stone-500">
+                  Files students offered to the shared library. Approving one
+                  lets ChatTobira teach from it and quote it to{" "}
+                  <strong>every student</strong>, so read it first — a
+                  worksheet with the student&apos;s own wrong answers would be
+                  taught as fact. Until then it stays private to whoever
+                  uploaded it.
+                </p>
+
+                {queue.length === 0 ? (
+                  <p className="mt-3 text-sm text-stone-500">
+                    Nothing waiting for review.
+                  </p>
+                ) : (
+                  <ul className="mt-3 space-y-2">
+                    {queue.map((item) => (
+                      <li
+                        key={item.id}
+                        className="rounded-lg border border-stone-200 bg-white p-3"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium text-stone-800">
+                              {item.filename}
+                            </p>
+                            <p className="mt-0.5 text-xs text-stone-500">
+                              {item.uploader} · {Math.round(item.size_bytes / 1024)} KB
+                              {item.level ? ` · ${item.level}` : ""}
+                              {item.topic ? ` · ${item.topic}` : ""}
+                            </p>
+                            {item.destination && (
+                              <p className="mt-0.5 truncate font-mono text-[11px] text-stone-400">
+                                {item.destination}
+                              </p>
+                            )}
+                          </div>
+                          <span className="flex shrink-0 gap-1.5">
+                            <button
+                              onClick={() =>
+                                setExpanded(expanded === item.id ? null : item.id)
+                              }
+                              className="rounded border border-stone-300 px-2 py-0.5 text-xs text-stone-600 hover:bg-stone-100"
+                            >
+                              {expanded === item.id ? "Hide" : "Read"}
+                            </button>
+                            {item.status === "submitted" ? (
+                              <>
+                                <button
+                                  onClick={() => void review(item.id, "approve")}
+                                  disabled={busy}
+                                  className="rounded border border-stone-300 px-2 py-0.5 text-xs text-stone-700 hover:border-green-500 hover:bg-green-50 hover:text-green-800 disabled:opacity-40"
+                                >
+                                  Approve
+                                </button>
+                                <button
+                                  onClick={() => void review(item.id, "reject")}
+                                  disabled={busy}
+                                  className="rounded border border-stone-300 px-2 py-0.5 text-xs text-stone-600 hover:border-red-400 hover:bg-red-50 hover:text-red-700 disabled:opacity-40"
+                                >
+                                  Reject
+                                </button>
+                              </>
+                            ) : (
+                              <span className="rounded bg-stone-100 px-2 py-0.5 text-xs text-stone-500">
+                                approved — awaiting ingest
+                              </span>
+                            )}
+                          </span>
+                        </div>
+                        {expanded === item.id && (
+                          <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-stone-50 p-2 text-[11px] leading-relaxed text-stone-700">
+                            {item.preview || "(nothing was extracted from this file)"}
+                          </pre>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <p className="mt-2 text-xs text-stone-400">
+                  Approved files enter the shared corpus on the next{" "}
+                  <code className="font-mono">ingest uploads</code> run.
+                </p>
+              </div>
             </>
           )}
         </div>

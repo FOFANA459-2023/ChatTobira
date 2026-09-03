@@ -12,7 +12,7 @@ import {
   QuizSchema,
   rankChunksByFocus,
 } from "@/lib/quiz";
-import { createClient } from "@/lib/supabase/server";
+import { createClient, isSupabaseConfigured } from "@/lib/supabase/server";
 import { serviceClient } from "@/lib/supabase/service";
 import { trialCookie, trialUsed, TRIALS } from "@/lib/trial";
 
@@ -186,6 +186,13 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  // Fail closed and name the problem, the way middleware does for every
+  // non-public route. createClient() throws on construction without
+  // credentials, and that throw is outside any try here.
+  if (!isSupabaseConfigured()) {
+    return Response.json({ error: "supabase_not_configured" }, { status: 503 });
+  }
+
   const { supabase, user } = await requireUser();
 
   // One free practice test before signing in, metered separately from the

@@ -162,6 +162,140 @@ jobs:
           retention-days: 7
 
   # -------------------------------------------------------------------------
+  # Containers. These exist for two different reasons.
+  #
+  # The ingest image is a genuine capability: render.py needs LibreOffice, so
+  # every .ppt/.doc handout is skipped on the Windows dev machine. The image
+  # has LibreOffice and the CJK fonts it needs to convert Japanese slides
+  # without turning every glyph into a tofu box.
+  #
+  # The web image is a production-parity check. Production is Cloudflare
+  # Workers — workerd, not Node — so the runtime stage boots the real OpenNext
+  # bundle under wrangler and the smoke test hits it over HTTP. That catches
+  # what tsc and vitest structurally cannot: a worker that compiles but does
+  # not start, or routes that 500 on their first request.
+  # -------------------------------------------------------------------------
+  docker-ingest:
+    name: Docker / ingest image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # The test stage runs ruff and pytest inside the image, so a green build
+      # means they passed in the pinned environment, not just on the runner.
+      - name: Build and test
+        uses: docker/build-push-action@v6
+        with:
+          context: ingest
+          target: test
+          push: false
+          cache-from: type=gha,scope=ingest
+          cache-to: type=gha,mode=max,scope=ingest
+
+      - name: Build runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: ingest
+          target: runtime
+          push: false
+          load: true
+          tags: chattobira-ingest:ci
+          cache-from: type=gha,scope=ingest
+          cache-to: type=gha,mode=max,scope=ingest
+
+      # An image that builds but cannot convert a slide is useless here, and
+      # the failure would only surface mid-way through a real ingestion run.
+      - name: Verify the image can actually do its job
+        run: |
+          set -euo pipefail
+          docker run --rm chattobira-ingest:ci --help > /dev/null
+          echo "CLI starts."
+
+          docker run --rm --entrypoint sh chattobira-ingest:ci -c 'command -v soffice' > /dev/null
+          echo "LibreOffice present."
+
+          # Without CJK fonts LibreOffice renders Japanese as empty boxes and
+          # the vision model faithfully transcribes a page of rectangles.
+          docker run --rm --entrypoint sh chattobira-ingest:ci \
+            -c 'fc-list :lang=ja 2>/dev/null | head -1 | grep -q . || ls /usr/share/fonts/opentype/noto/*CJK* >/dev/null'
+          echo "Japanese fonts present."
+
+          # fugashi/UniDic is the whole lexical half of hybrid search; if the
+          # dictionary is missing it fails at query time, not at import time.
+          docker run --rm --entrypoint python chattobira-ingest:ci \
+            -c "from ingest.japanese import tokenize; assert '食べる' in tokenize('毎日ご飯を食べる'), 'UniDic did not segment'; print('fugashi/UniDic OK')"
+
+          # Never run as root: this process holds a database password.
+          test "$(docker run --rm --entrypoint id chattobira-ingest:ci -u)" != "0"
+          echo "Runs unprivileged."
+
+      - name: Scan for known vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: chattobira-ingest:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+  docker-web:
+    name: Docker / web image + smoke
+    needs: web-detect
+    if: needs.web-detect.outputs.exists == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and test
+        uses: docker/build-push-action@v6
+        with:
+          context: web
+          target: test
+          push: false
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+      - name: Build runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: web
+          target: runtime
+          push: false
+          load: true
+          tags: chattobira-web:ci
+          # Public anon keys, inlined into the client bundle at build time.
+          # Runtime secrets (service role, model keys) are NOT passed here —
+          # a build arg is readable in the image layers forever.
+          build-args: |
+            NEXT_PUBLIC_SUPABASE_URL=${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+            NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+      # The real gate: boot the production bundle under workerd and talk to it.
+      - name: Smoke test the worker
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke -p 8787:8787 chattobira-web:ci
+          # Stream logs on failure — a worker that dies on boot says why here
+          # and nowhere else.
+          trap 'echo "--- worker logs ---"; docker logs smoke || true; docker rm -f smoke >/dev/null 2>&1 || true' EXIT
+          node web/scripts/smoke.mjs http://127.0.0.1:8787
+
+      # Accepted findings live in web/.trivyignore.yaml, each with a reason
+      # and an expiry date so it comes back for review rather than being
+      # silenced forever.
+      - name: Scan for known vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: chattobira-web:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: web/.trivyignore.yaml
+          exit-code: "1"
+
+  # -------------------------------------------------------------------------
   # Gate: the single required status for branch protection. Point the rule at
   # this job only, so adding/removing jobs never requires touching settings.
   # -------------------------------------------------------------------------
@@ -177,6 +311,8 @@ jobs:
         web-lint-typecheck,
         web-unit,
         web-e2e,
+        docker-ingest,
+        docker-web,
       ]
     if: always()
     runs-on: ubuntu-latest
@@ -192,15 +328,56 @@ jobs:
 
   # -------------------------------------------------------------------------
   # Deploy to Cloudflare Workers — main only, after everything is green.
+  #
+  # The gate runs through ci-ok, which now requires docker-ingest and
+  # docker-web. docker-web boots the production bundle under workerd and
+  # smoke-tests it over HTTP, so nothing reaches students unless the exact
+  # artefact being deployed has been observed to start and serve.
+  #
   # Requires repo secrets CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.
   # -------------------------------------------------------------------------
+  reviewed-via-pr:
+    name: Gate / reviewed via pull request
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      reviewed: ${{ steps.check.outputs.reviewed }}
+    steps:
+      # Branch protection is the primary control, but it lives in repo
+      # settings: it does not exist until someone turns it on, an admin can
+      # bypass it, and neither leaves a trace in this repository. This asks
+      # GitHub whether the commit about to be deployed actually belongs to a
+      # MERGED pull request. A direct push to main therefore builds nothing
+      # and ships nothing, whatever the settings say.
+      - id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          merged=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
+            --jq '[.[] | select(.merged_at != null)] | length')
+          if [ "$merged" -gt 0 ]; then
+            echo "reviewed=true" >> "$GITHUB_OUTPUT"
+            echo "Commit ${{ github.sha }} came from a merged pull request."
+          else
+            echo "reviewed=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Refusing to deploy ${{ github.sha }}: no merged pull request is"
+            echo "::error::associated with it. Every change reaching students is reviewed"
+            echo "::error::first — open a pull request instead of pushing to main."
+            exit 1
+          fi
+
   deploy:
     name: Deploy / Cloudflare Workers
-    needs: [ci-ok, web-detect]
+    needs: [ci-ok, web-detect, reviewed-via-pr]
     # Skips cleanly until the CLOUDFLARE_* repo secrets are configured.
     if: >
       github.ref == 'refs/heads/main' &&
       github.event_name == 'push' &&
+      needs.reviewed-via-pr.outputs.reviewed == 'true' &&
       needs.web-detect.outputs.exists == 'true' &&
       needs.web-detect.outputs.can_deploy == 'true'
     runs-on: ubuntu-latest

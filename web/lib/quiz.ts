@@ -304,10 +304,16 @@ function shuffled<T>(items: T[]): T[] {
 // the Foundation 1 & 2 book puts an English "Topic N" running header on nearly
 // every page (Foundation 1 is Topics 1–5, Foundation 2 is Topics 6–10 — one
 // continuous numbering through the one book).
-const LESSON_MARK = /(?:第\s*([0-9０-９]{1,2})\s*課|Lesson\s+(\d{1,2})\b|Topic\s*(\d{1,2})\b)/g;
+// トピック is not optional decoration: the Foundation 3 book prints its
+// running headers in katakana and uses the Latin word only on its English
+// contents pages. Measured on the ingested book: 20–29 katakana headers per
+// topic against 2–3 Latin ones, so matching Latin alone found almost nothing
+// and mapped three quarters of the book to front matter.
+const LESSON_MARK =
+  /(?:第\s*([0-9０-９]{1,2})\s*課|トピック\s*([0-9０-９]{1,2})|Lesson\s+(\d{1,2})\b|Topic\s*(\d{1,2})\b)/g;
 
 function markedLesson(match: RegExpMatchArray): number {
-  const digits = match[1] ?? match[2] ?? match[3];
+  const digits = match[1] ?? match[2] ?? match[3] ?? match[4];
   return Number(digits.replace(/[０-９]/g, (d) => String("０１２３４５６７８９".indexOf(d))));
 }
 
@@ -321,6 +327,12 @@ function markedLesson(match: RegExpMatchArray): number {
  * and appendix/answer pages cross-reference earlier lessons (ignored — the
  * lesson number may only step forward, at most two at a time). Pages before
  * the first header map to 0, front matter.
+ *
+ * The walk is ANCHORED on the first division the book actually opens with,
+ * not on Topic 1. A mid-course volume starts high — the Foundation 3 book
+ * opens at Topic 11 — and stepping two at a time from zero can never reach
+ * it, which mapped that whole book to front matter. The opening number is
+ * accepted on the same follow-through evidence a restart needs.
  *
  * One exception to forward-only: a RESTART. The Foundation 1 & 2 book runs
  * Topics 1–10 twice — main text, then the kanji/vocabulary section, which
@@ -353,24 +365,50 @@ export function lessonByPage(
     if (marks.size === 1) marked.push({ page, n: [...marks][0] });
   }
 
+  // Two further marked pages that step forward from `start` by at most two
+  // each. This is the evidence that a number opens a real run of divisions
+  // rather than being a one-off cross-reference, which has no follow-through.
+  const continuesFrom = (index: number, start: number): boolean => {
+    const a = marked[index + 1];
+    const b = marked[index + 2];
+    return (
+      a !== undefined &&
+      b !== undefined &&
+      a.n >= start &&
+      a.n <= start + 2 &&
+      b.n >= a.n &&
+      b.n <= a.n + 2
+    );
+  };
+
   const currentAt = new Map<number, number>();
   let current = 0;
+  // The division the book opens with. A restart is a drop back to HERE, not
+  // to Topic 1: the Foundation 3 book opens at 11 and its kanji section
+  // restarts at 11, so a rule written around 1 missed it entirely and filed
+  // 115 pages of kanji material under the last topic of the main text.
+  let anchor = 0;
   for (const [i, { page, n }] of marked.entries()) {
     if (n > current && n <= current + 2) {
       current = n;
-    } else if (n < current && n <= 2) {
+      if (anchor === 0) anchor = n;
+    } else if (current === 0) {
+      // Nothing anchored yet, and this page opens well above Topic 1 — which
+      // is simply how a mid-course volume is numbered: the Foundation 3 book
+      // starts at Topic 11, and stepping forward two at a time from zero can
+      // never reach it, so every page mapped to front matter and every
+      // scoped test fell back to text matching over the whole book.
+      // Anchoring needs the same follow-through evidence a restart does, so
+      // a stray cross-reference in the front matter cannot claim the book.
+      if (continuesFrom(i, n)) {
+        current = n;
+        anchor = n;
+      }
+    } else if (n < current && n <= anchor + 1) {
       const a = marked[i + 1];
-      const b = marked[i + 2];
-      const continuesNew =
-        a !== undefined &&
-        b !== undefined &&
-        a.n >= n &&
-        a.n <= n + 2 &&
-        b.n >= a.n &&
-        b.n <= a.n + 2;
       const fitsOld =
         a !== undefined && (a.n === current || (a.n > current && a.n <= current + 2));
-      if (continuesNew && !fitsOld) current = n;
+      if (continuesFrom(i, n) && !fitsOld) current = n;
     }
     currentAt.set(page, current);
   }
