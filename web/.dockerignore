@@ -1,0 +1,30 @@
+# Build context hygiene. web/ is 1.2 GB on disk, almost all of it artefacts
+# that must be rebuilt inside the image anyway — shipping them to the daemon
+# makes every build slow and risks a stale artefact winning over a fresh one.
+
+node_modules
+.next
+.open-next
+.wrangler
+.wrangler-preview.log
+
+# Never let real credentials into a build context. The image takes its
+# configuration from the environment at run time; anything copied in here
+# would be baked into a layer and readable by anyone who pulls it.
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+
+test-results
+playwright-report
+blob-report
+tsconfig.tsbuildinfo
+coverage
+
+.git
+.gitignore
+Dockerfile
+.dockerignore
+README.md
+npm-debug.log*
