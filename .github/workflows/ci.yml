@@ -283,12 +283,16 @@ jobs:
           trap 'echo "--- worker logs ---"; docker logs smoke || true; docker rm -f smoke >/dev/null 2>&1 || true' EXIT
           node web/scripts/smoke.mjs http://127.0.0.1:8787
 
+      # Accepted findings live in web/.trivyignore.yaml, each with a reason
+      # and an expiry date so it comes back for review rather than being
+      # silenced forever.
       - name: Scan for known vulnerabilities
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: chattobira-web:ci
           severity: HIGH,CRITICAL
           ignore-unfixed: true
+          trivyignores: web/.trivyignore.yaml
           exit-code: "1"
 
   # -------------------------------------------------------------------------
