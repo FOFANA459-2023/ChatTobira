@@ -4,7 +4,7 @@ import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { convertToModelMessages, streamText, type UIMessage } from "ai";
 import { z } from "zod";
 
-import { contextBlock, systemPrompt } from "@/lib/prompt";
+import { contextBlock, systemPrompt, type AttachedUpload } from "@/lib/prompt";
 import { isProviderDead, noteProviderFailure } from "@/lib/providers";
 import { serviceClient } from "@/lib/supabase/service";
 import { trialCookie, trialUsed, TRIALS } from "@/lib/trial";
@@ -31,6 +31,9 @@ const BodySchema = z.object({
     })
     .default({}),
   conversationId: z.number().int().positive().optional(),
+  // Files the student attached to this turn. Their extracted text becomes
+  // context; the files themselves never leave Storage.
+  uploadIds: z.array(z.number().int().positive()).max(4).optional(),
 });
 
 function lastUserText(messages: UIMessage[]): string {
@@ -68,7 +71,7 @@ export async function POST(request: Request) {
   if (!parsed.success) {
     return Response.json({ error: "bad_request" }, { status: 400 });
   }
-  const { messages, scope } = parsed.data;
+  const { messages, scope, uploadIds } = parsed.data;
   let { conversationId } = parsed.data;
 
   const question = lastUserText(messages);
@@ -169,6 +172,28 @@ export async function POST(request: Request) {
   conversationId = persistedId ?? conversationId;
   if (quotaVerdict) return quotaVerdict;
 
+  // Files the student attached to this turn. Read under their own RLS, so
+  // one student can never attach another's upload by guessing an id.
+  let attached: AttachedUpload[] = [];
+  if (user && uploadIds && uploadIds.length > 0) {
+    const { data: rows } = await supabase
+      .from("uploads")
+      .select("filename, extracted")
+      .in("id", uploadIds)
+      .not("extracted", "is", null);
+    attached = ((rows ?? []) as { filename: string; extracted: string }[]).map((r) => ({
+      filename: r.filename,
+      extracted: r.extracted,
+    }));
+  }
+
+  // An answer built from a private file must never enter the shared answer
+  // cache: qa_cache is keyed by question embedding and study scope only, so
+  // a classmate asking something similar in the same scope would be served
+  // the contents of a document they have no right to see. Attachments turn
+  // the cache off in both directions for this turn.
+  const cacheable = attached.length === 0;
+
   let vectorLiteral: string | null = null;
   let chunks: RetrievedChunk[] = [];
 
@@ -183,10 +208,12 @@ export async function POST(request: Request) {
     // the corpus grows — has its chunks already in hand instead of paying a
     // second round-trip.
     const [{ data: cached }, retrieval] = await Promise.all([
-      db.rpc("cache_get", {
-        query_embedding: vectorLiteral,
-        query_scope: scope,
-      }),
+      cacheable
+        ? db.rpc("cache_get", {
+            query_embedding: vectorLiteral,
+            query_scope: scope,
+          })
+        : Promise.resolve({ data: null }),
       retrieve(db, embedding, tokensForQuery(question), scope, 8).then(
         (rows) => ({ ok: true as const, rows }),
         () => ({ ok: false as const, rows: [] as RetrievedChunk[] }),
@@ -209,7 +236,7 @@ export async function POST(request: Request) {
 
   const citations = buildCitations(chunks);
 
-  const system = `${systemPrompt(scope as StudyScope)}\n\n=== SOURCE MATERIAL ===\n${contextBlock(chunks)}`;
+  const system = `${systemPrompt(scope as StudyScope)}\n\n=== SOURCE MATERIAL ===\n${contextBlock(chunks, attached)}`;
   const modelMessages = await convertToModelMessages(messages);
 
   const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
@@ -298,7 +325,7 @@ export async function POST(request: Request) {
       await persistAssistant(answer, citations, modelUsed);
       // Cache fire-and-forget: a failed write must not break the reply.
       // Small talk is never cached — it has no embedding and no reuse value.
-      if (vectorLiteral && db) {
+      if (vectorLiteral && db && cacheable) {
         try {
           await db.rpc("cache_put", {
             q_question: question,

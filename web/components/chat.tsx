@@ -10,7 +10,9 @@ import { FeedbackButtons } from "@/components/feedback-buttons";
 import { MagicLinkForm } from "@/components/magic-link-form";
 import { MicButton } from "@/components/mic-button";
 import { NavBar } from "@/components/nav";
+import { UploadButton, type AttachedFile } from "@/components/upload-button";
 import type { Citation } from "@/lib/retrieval";
+import type { CourseLevel } from "@/lib/uploads";
 
 interface MessageMeta {
   citations?: Citation[];
@@ -22,12 +24,19 @@ export function Chat({
   firstName,
   isAdmin = false,
   authenticated = true,
+  level = null,
 }: {
   firstName?: string | null;
   isAdmin?: boolean;
   authenticated?: boolean;
+  level?: CourseLevel | null;
 }) {
   const [input, setInput] = useState("");
+  // Files stay attached across turns: a student asks several questions about
+  // one worksheet, and re-picking it for each would be absurd.
+  const [attached, setAttached] = useState<AttachedFile[]>([]);
+  const attachedRef = useRef<AttachedFile[]>([]);
+  attachedRef.current = attached;
   // Set by the first answer's metadata; later turns append to the same
   // conversation row so history and feedback attach correctly.
   const conversationRef = useRef<number | undefined>(undefined);
@@ -38,6 +47,11 @@ export function Chat({
       // Read from a ref so the id set mid-conversation applies immediately.
       body: () => ({
         conversationId: conversationRef.current,
+        // Only files that actually extracted carry context; one still
+        // uploading would just be an id the server finds nothing for.
+        uploadIds: attachedRef.current
+          .filter((f) => f.status === "ready")
+          .map((f) => f.id),
       }),
     }),
     onFinish: ({ message }) => {
@@ -158,14 +172,91 @@ export function Chat({
       ) : (
         <form
           onSubmit={submit}
-          className="flex gap-2 border-t border-stone-200 bg-white px-4 py-3"
+          className="border-t border-stone-200 bg-white px-4 py-3"
         >
+          {attached.length > 0 && (
+            <ul className="mb-2 flex flex-wrap gap-2">
+              {attached.map((file) => (
+                <li
+                  key={file.id}
+                  className={`flex max-w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs ${
+                    file.status === "failed"
+                      ? "border-red-200 bg-red-50 text-red-700"
+                      : "border-stone-200 bg-stone-50 text-stone-700"
+                  }`}
+                >
+                  <span className="truncate font-medium">{file.filename}</span>
+                  <span className="shrink-0 text-stone-500">
+                    {file.status === "uploading"
+                      ? "uploading…"
+                      : file.status === "reading"
+                        ? "reading…"
+                        : file.status === "failed"
+                          ? (file.detail ?? "failed")
+                          : (file.detail ?? "ready")}
+                  </span>
+                  {file.status === "ready" && (
+                    <button
+                      type="button"
+                      title="Offer this to your teacher for the shared library. It stays private until they approve it."
+                      onClick={() => {
+                        setAttached((all) =>
+                          all.map((f) =>
+                            f.id === file.id
+                              ? { ...f, detail: "sent to your teacher" }
+                              : f,
+                          ),
+                        );
+                        void fetch("/api/upload", {
+                          method: "PATCH",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ id: file.id, action: "share" }),
+                        });
+                      }}
+                      className="shrink-0 text-stone-400 underline decoration-dotted hover:text-stone-700"
+                    >
+                      share
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    aria-label={`Remove ${file.filename}`}
+                    onClick={() => {
+                      setAttached((all) => all.filter((f) => f.id !== file.id));
+                      void fetch("/api/upload", {
+                        method: "DELETE",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ id: file.id }),
+                      });
+                    }}
+                    className="shrink-0 text-stone-400 hover:text-stone-700"
+                  >
+                    ×
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="flex gap-2">
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="質問をどうぞ — ask in Japanese or English"
             className="flex-1 rounded-xl border border-stone-300 px-4 py-2.5 text-sm outline-none focus:border-stone-500"
           />
+          {authenticated && (
+            <UploadButton
+              defaultLevel={level}
+              disabled={busy}
+              onAttached={(file) => setAttached((all) => [...all, file])}
+              onUpdate={(id, patch) =>
+                setAttached((all) =>
+                  all.map((f) => (f.id === id ? { ...f, ...patch } : f)),
+                )
+              }
+            />
+          )}
           {authenticated && (
             <MicButton
               disabled={busy}
@@ -181,6 +272,7 @@ export function Chat({
           >
             {busy ? "…" : "Send"}
           </button>
+          </div>
         </form>
       )}
     </div>
