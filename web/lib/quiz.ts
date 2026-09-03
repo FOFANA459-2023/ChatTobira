@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+/** Re-exported: callers found furigana splitting here before the chat
+ * renderer needed it too, and the practice paper is still its loudest user. */
+export { splitRuby } from "./ruby";
+
 /** One generated test item. answer is authoritative; the client grades.
  * true_false is the reading section's ○×: question is a statement about the
  * section's passage and answer is exactly ○ or ×. */
@@ -50,6 +54,90 @@ export type QuizKind = "grammar" | "kanji";
 /** Items in paper order; answer indices are positions in this list. */
 export function flattenItems(quiz: Quiz): QuizItem[] {
   return quiz.sections.flatMap((section) => section.items);
+}
+
+/** What an item drills, in the forms two items could collide on.
+ *
+ * The prompt asks for a different point in every question, and a generator
+ * asked for 20 items from 10 excerpts sometimes obliges by drilling 食べる
+ * twice with the sentence reworded. Text alone cannot be the whole test for
+ * that: the same word arrives as 短い in the section that asks its reading
+ * and みじかい in the section that asks it written, so the answer is part of
+ * the identity too.
+ *
+ * Which parts count depends on the paper. On a kanji paper a word may appear
+ * once, full stop — its reading and its spelling are the same word being
+ * tested twice. On a grammar paper the ANSWER is often a particle, and に is
+ * the correct answer to plenty of genuinely different questions, so answers
+ * are excluded there or half the paper would collide with itself.
+ */
+export function itemSignatures(item: QuizItem, kind: QuizKind): string[] {
+  const key = (value: string) => normalizeAnswer(stripReadings(value));
+  const signatures: string[] = [];
+
+  const question = item.question ?? "";
+  const sentence = item.sentence ?? "";
+
+  // The word an item points at, wherever it was marked. On a kanji paper it
+  // shares a namespace with the answers below, because a word MARKED in the
+  // section that asks its reading and the same word GIVEN as the answer in
+  // the section that asks its spelling are one word tested twice — which is
+  // the repeat that paper forbids.
+  const marked = kind === "kanji" ? "word" : "target";
+  for (const source of [question, sentence]) {
+    for (const match of source.matchAll(/【([^】]+)】/g)) {
+      const target = key(match[1]);
+      if (target) signatures.push(`${marked}:${target}`);
+    }
+  }
+
+  // The wording itself, with the markers stripped so a question is not
+  // "different" merely because the underline moved.
+  const asked = key(question.replace(/[【】]/g, ""));
+  if (asked) signatures.push(`asked:${asked}`);
+  const drilled = key(sentence.replace(/[【】]/g, ""));
+  if (drilled) signatures.push(`sentence:${drilled}`);
+
+  if (kind === "kanji") {
+    for (const form of [item.answer, item.answer_kana]) {
+      const word = form ? key(form) : "";
+      if (word) signatures.push(`word:${word}`);
+    }
+  }
+
+  return signatures;
+}
+
+/** Drop items that repeat something already drilled earlier in the paper,
+ * and any section left empty by that.
+ *
+ * Enforced here rather than trusted to the prompt: "never ask the same thing
+ * twice" is exactly the kind of instruction a model follows nineteen times
+ * out of twenty, and the twentieth is a student sitting the same question in
+ * sections I and III and losing faith in the paper. Reading-section items are
+ * kept as-is beyond exact repeats — five ○× statements about one passage are
+ * SUPPOSED to share their subject.
+ */
+export function dedupeQuiz(quiz: Quiz, kind: QuizKind): { quiz: Quiz; removed: number } {
+  const seen = new Set<string>();
+  let removed = 0;
+
+  const sections = quiz.sections
+    .map((section) => {
+      const items = section.items.filter((item) => {
+        const signatures = itemSignatures(item, kind);
+        if (signatures.some((signature) => seen.has(signature))) {
+          removed += 1;
+          return false;
+        }
+        for (const signature of signatures) seen.add(signature);
+        return true;
+      });
+      return { ...section, items };
+    })
+    .filter((section) => section.items.length > 0);
+
+  return { quiz: { ...quiz, sections }, removed };
 }
 
 export function scoreQuiz(
@@ -224,25 +312,6 @@ export function splitUnderline(text: string): { text: string; underline: boolean
   return segments.length > 0 ? segments : [{ text, underline: false }];
 }
 
-/** Split text into ruby segments: kanji followed immediately by a kana
- * reading in 漢字（かんじ） or 漢字《かんじ》 style becomes a base+reading
- * pair for <ruby> rendering, which puts the hiragana on top of the kanji the
- * way the textbook prints it. Both bracket styles occur in the wild — the
- * prompt asks for （ ）, but the transcribed corpus writes 《 》 and models
- * imitate what they read. Brackets holding anything but kana (the （　）
- * answer blank, bracketed kanji) pass through untouched. */
-export function splitRuby(text: string): { base: string; reading?: string }[] {
-  const segments: { base: string; reading?: string }[] = [];
-  const annotated = /([一-鿿々〆ヶ]+)(?:（([ぁ-ゖァ-ヶー]+)）|《([ぁ-ゖァ-ヶー]+)》)/g;
-  let last = 0;
-  for (const match of text.matchAll(annotated)) {
-    if (match.index > last) segments.push({ base: text.slice(last, match.index) });
-    segments.push({ base: match[1], reading: match[2] ?? match[3] });
-    last = match.index + match[0].length;
-  }
-  if (last < text.length) segments.push({ base: text.slice(last) });
-  return segments.length > 0 ? segments : [{ base: text }];
-}
 
 /** Aggregate missed questions into a study plan: which review references were
  * missed, with 1-based question numbers, most-missed first. Deterministic —
