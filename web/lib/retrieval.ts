@@ -1,6 +1,8 @@
 import TinySegmenter from "tiny-segmenter";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { printedForms, topicRefs, type Aspect, type TopicRef } from "./topics";
+
 /** One retrieved chunk from match_chunks. */
 export interface RetrievedChunk {
   chunk_id: number;
@@ -70,6 +72,11 @@ export interface ResolvedQuery {
   /** True when the message could not stand on its own and the conversation
    * was folded in to make it searchable. */
   isFollowUp: boolean;
+  /** Course divisions the conversation is about, newest first. Carried
+   * forward because a student who says "I mean Topic 14" and then "yes I
+   * know it is in Foundation 3" has named the division once and expects it
+   * to still be the subject two turns later. */
+  topics: TopicRef[];
 }
 
 /** Words and shapes that mean "about the thing we were just discussing". */
@@ -78,7 +85,7 @@ const ANAPHORA_RE =
 
 /** Openers that continue a previous question rather than starting a new one. */
 const CONTINUATION_RE =
-  /^(and|but|so|also|then|what about|how about|why|why not|how come|what if|ok(ay)?[,\s]|another|more|again|one more|can you|could you|show me|give me|例文|もっと|他|なぜ|どうして|じゃあ|では)\b/i;
+  /^(and|but|so|also|then|what about|how about|why|why not|how come|what if|ok(ay)?[,\s]|another|more|again|one more|can you|could you|show me|give me|yes|yeah|yep|no|nope|actually|i mean|i meant|例文|もっと|他|なぜ|どうして|じゃあ|では|そうです)\b/i;
 
 /** Extract the terms worth carrying forward from an assistant answer.
  *
@@ -108,23 +115,42 @@ export function salientTerms(answer: string, limit = 4): string[] {
  * every message, and a round trip to a model to find out what "it" means
  * would cost more latency than the retrieval it feeds.
  */
+
+/** Can this message be searched on its own? */
+function standsAlone(text: string): boolean {
+  return !(ANAPHORA_RE.test(text) || CONTINUATION_RE.test(text) || text.length <= 24);
+}
+
 export function resolveQuery(turns: Turn[]): ResolvedQuery {
   const lastUserAt = turns.map((t) => t.role).lastIndexOf("user");
   const asked = lastUserAt < 0 ? "" : turns[lastUserAt].text.trim();
   const earlier = lastUserAt < 0 ? [] : turns.slice(0, lastUserAt);
+  const askedBefore = earlier.filter((t) => t.role === "user").map((t) => t.text.trim());
 
+  // The question the conversation is ACTUALLY about, which is not always the
+  // previous line. "list the vocabulary for Topic 14" → "i mean topic 14" →
+  // "yes i know it is in foundation 3" is one question and two nudges, and
+  // resolving the third against the second loses the question entirely.
   const previousQuestion =
-    [...earlier].reverse().find((t) => t.role === "user")?.text.trim() ?? "";
+    [...askedBefore].reverse().find(standsAlone) ?? askedBefore.at(-1) ?? "";
   const previousAnswer =
     [...earlier].reverse().find((t) => t.role === "assistant")?.text.trim() ?? "";
 
-  // Nothing to resolve against, or the question already stands on its own.
-  const dependent =
-    Boolean(previousQuestion || previousAnswer) &&
-    (ANAPHORA_RE.test(asked) || CONTINUATION_RE.test(asked) || asked.length <= 24);
+  // A division named anywhere in the recent conversation is still the
+  // subject; the student should not have to repeat "Topic 14" every turn.
+  // Their own words first, then the last answer, which may be where the
+  // division was named ("that is Topic 14 in Foundation 3").
+  const topics =
+    firstNonEmpty(
+      topicRefs(asked),
+      ...[...askedBefore].reverse().map((text) => topicRefs(text)),
+      topicRefs(previousAnswer),
+    ) ?? [];
+
+  const dependent = Boolean(previousQuestion || previousAnswer) && !standsAlone(asked);
 
   if (!asked || !dependent) {
-    return { text: asked, asked, isFollowUp: false };
+    return { text: asked, asked, isFollowUp: false, topics };
   }
 
   const carried = [previousQuestion.slice(0, 160), ...salientTerms(previousAnswer)].filter(
@@ -134,7 +160,12 @@ export function resolveQuery(turns: Turn[]): ResolvedQuery {
     text: [...carried, asked].join(" "),
     asked,
     isFollowUp: true,
+    topics,
   };
+}
+
+function firstNonEmpty<T>(...lists: T[][]): T[] | null {
+  return lists.find((list) => list.length > 0) ?? null;
 }
 
 /** Query-side tokens for the lexical arm of hybrid search.
@@ -341,6 +372,39 @@ export function grammarPatterns(text: string, limit = 2): string[] {
   return [...new Set([...marked, ...quoted])].filter((p) => p.length >= 2).slice(0, limit);
 }
 
+/** A row from a literal lookup, in the shape the ranked arms return.
+ *
+ * These carry no cosine similarity and are not given a fake one: they were
+ * found because the page literally contains what the student named, which
+ * selectContext treats as its own kind of evidence. */
+interface ChunkRow {
+  id: number;
+  document_id: number;
+  pdf_page: number;
+  book_page: string | null;
+  content: string;
+  metadata: Record<string, unknown> | null;
+  documents?: { title: string; doc_type: string; is_citable: boolean } | null;
+}
+
+function toRetrieved(row: unknown): RetrievedChunk {
+  const chunk = row as ChunkRow;
+  return {
+    chunk_id: chunk.id,
+    document_id: chunk.document_id,
+    doc_title: chunk.documents?.title ?? "",
+    doc_type: chunk.documents?.doc_type ?? "",
+    is_citable: Boolean(chunk.documents?.is_citable),
+    pdf_page: chunk.pdf_page,
+    book_page: chunk.book_page,
+    content: chunk.content,
+    metadata: chunk.metadata ?? {},
+    score: 0,
+    similarity: 0,
+    exact: true,
+  };
+}
+
 /** Which of the pages printing a pattern actually teach it.
  *
  * The ingest pipeline already recorded what each page teaches — the vision
@@ -398,30 +462,131 @@ export async function retrieveExact(
     ),
   );
 
-  type Row = {
-    id: number;
-    document_id: number;
-    pdf_page: number;
-    book_page: string | null;
-    content: string;
-    metadata: Record<string, unknown> | null;
-    documents: { title: string; doc_type: string; is_citable: boolean } | null;
-  };
+  return results.flat().map(toRetrieved);
+}
 
-  return (results.flat() as unknown as Row[]).map((row) => ({
-    chunk_id: row.id,
-    document_id: row.document_id,
-    doc_title: row.documents?.title ?? "",
-    doc_type: row.documents?.doc_type ?? "",
-    is_citable: Boolean(row.documents?.is_citable),
-    pdf_page: row.pdf_page,
-    book_page: row.book_page,
-    content: row.content,
-    metadata: row.metadata ?? {},
-    score: 0,
-    similarity: 0,
-    exact: true,
-  }));
+/** Did the first search actually find anything about the question?
+ *
+ * A ranked search always returns its best candidates, and the best of a bad
+ * set looks exactly like the best of a good one. Without this distinction the
+ * app could not tell "the corpus does not cover this" from "this search
+ * missed", and it reported the first as if it were certain of the second —
+ * telling a student their Topic 14 vocabulary does not exist, from a corpus
+ * that has it on page 55.
+ */
+export function isThinResult(
+  chunks: RetrievedChunk[],
+  strongEnough = CONTEXT_MIN_SIMILARITY + 0.07,
+): boolean {
+  if (chunks.length === 0) return true;
+  if (chunks.some((c) => c.exact)) return false;
+  return !chunks.some((c) => (c.similarity ?? 0) >= strongEnough);
+}
+
+/** A second, blunter query for when the first pass came back thin.
+ *
+ * Strips the question down to what it is looking for — the division, the
+ * aspect, the content words — and drops the sentence around it. A student
+ * writes "list all the vocabularies for topic 14"; the corpus prints
+ * 「トピック 14 新しい語彙」. The rephrasing is what closes that gap, and it
+ * costs one embedding on the small fraction of turns that need it.
+ */
+export function broadenQuery(text: string, refs: TopicRef[], aspect: Aspect | null): string {
+  const parts = [
+    ...refs.flatMap((ref) => printedForms(ref).slice(0, 2)),
+    ...(aspect ? aspect.terms.slice(0, 2) : []),
+    ...tokensForQuery(text).filter((token) => /[぀-ヿ一-鿿]/.test(token) || token.length >= 4),
+  ];
+  return [...new Set(parts)].slice(0, 12).join(" ");
+}
+
+/** Pages belonging to a course division the student named, from anywhere in
+ * the corpus.
+ *
+ * This is the arm that makes "list the vocabulary for Topic 14" work. It does
+ * not care which book the conversation has been about, which document was
+ * retrieved a moment ago, or what the student had attached — a division is a
+ * global fact about the corpus, and the pages that print its header are the
+ * pages that belong to it. Handouts are found by the topic their folder name
+ * gave them at ingest; textbook pages are found by the header printed on the
+ * page, because textbooks carry no per-topic metadata (they span all of it).
+ */
+export async function retrieveByTopic(
+  supabase: SupabaseClient,
+  refs: TopicRef[],
+  aspect: Aspect | null,
+  limit = 4,
+): Promise<RetrievedChunk[]> {
+  if (refs.length === 0) return [];
+
+  const select =
+    "id, document_id, pdf_page, book_page, content, metadata, documents!inner(title, doc_type, is_citable, topic, topics)";
+
+  const perRef = await Promise.all(
+    refs.map(async (ref) => {
+      const printed = printedForms(ref);
+      const [pages, handouts] = await Promise.all([
+        supabase
+          .from("chunks")
+          .select(select)
+          .or(printed.map((form) => `content.ilike.%${form}%`).join(","))
+          .limit(24)
+          .then(({ data }) => data ?? []),
+        supabase
+          .from("chunks")
+          .select(select)
+          .contains("documents.topics", [ref.marker])
+          .limit(8)
+          .then(({ data }) => data ?? []),
+      ]);
+      // The client types an embedded resource as an array; these rows are
+      // shaped by the select above and only read for ranking.
+      return rankTopicPages(
+        [...pages, ...handouts] as unknown as TopicPageRow[],
+        ref,
+        aspect,
+      ).slice(0, limit);
+    }),
+  );
+
+  return perRef.flat().map(toRetrieved);
+}
+
+/** Of the pages carrying a division's header, the ones worth reading.
+ *
+ * A topic runs to a dozen pages and the prompt holds a handful, so the choice
+ * matters more than the search did. A header at the very start of a chunk is
+ * a running header, which means the page BELONGS to the topic rather than
+ * merely cross-referencing it; and when the student asked for the vocabulary,
+ * the vocabulary page is the answer even if six other pages match.
+ */
+export interface TopicPageRow {
+  content: string;
+  documents?: { is_citable?: boolean } | null;
+}
+
+export function rankTopicPages<T extends TopicPageRow>(
+  rows: T[],
+  ref: TopicRef,
+  aspect: Aspect | null,
+): T[] {
+  const forms = printedForms(ref);
+  const score = (row: T) => {
+    const head = row.content.slice(0, 120);
+    const isRunningHeader = forms.some((form) => head.includes(form));
+    const aspectHits = aspect
+      ? aspect.terms.filter((term) => row.content.includes(term)).length
+      : 0;
+    return (
+      (isRunningHeader ? 4 : 0) +
+      (row.documents?.is_citable ? 2 : 0) +
+      Math.min(aspectHits * 3, 6)
+    );
+  };
+  const seen = new Set<T>();
+  return [...rows]
+    .filter((row) => (seen.has(row) ? false : (seen.add(row), true)))
+    .sort((a, b) => score(b) - score(a));
 }
 
 const QUOTE_LIMIT = Number(process.env.CITATION_QUOTE_CHARS ?? 200);
@@ -458,7 +623,12 @@ export function buildCitations(chunks: RetrievedChunk[]): Citation[] {
 
   for (const chunk of chunks) {
     if (!chunk.is_citable) continue;
-    if ((chunk.similarity ?? 0) < CITE_MIN_SIMILARITY) continue;
+    // A literal hit has no similarity score and needs none — it was found
+    // because the page prints what the student named. Gating it on a cosine
+    // threshold it can never reach left the pages that actually answered the
+    // question out of the answer's provenance, and put the ranked also-rans
+    // in their place.
+    if (!chunk.exact && (chunk.similarity ?? 0) < CITE_MIN_SIMILARITY) continue;
     const key = `${chunk.document_id}:${chunk.book_page ?? chunk.pdf_page}`;
     if (seen.has(key)) continue;
     seen.add(key);

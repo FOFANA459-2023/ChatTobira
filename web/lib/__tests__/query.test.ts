@@ -21,6 +21,7 @@ describe("resolveQuery", () => {
       text: "What is the difference between に and で?",
       asked: "What is the difference between に and で?",
       isFollowUp: false,
+      topics: [],
     });
   });
 
@@ -74,7 +75,7 @@ describe("resolveQuery", () => {
   });
 
   it("has nothing to resolve for an empty conversation", () => {
-    expect(resolveQuery([])).toEqual({ text: "", asked: "", isFollowUp: false });
+    expect(resolveQuery([])).toEqual({ text: "", asked: "", isFollowUp: false, topics: [] });
   });
 });
 

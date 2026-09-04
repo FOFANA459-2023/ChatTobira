@@ -1,5 +1,5 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Chat } from "../chat";
 
@@ -12,14 +12,32 @@ vi.mock("@/lib/supabase/client", () => ({
   }),
 }));
 
+/** Drives useChat for the tests below; reset per test by assignment. */
+let chatState: {
+  messages: unknown[];
+  status: string;
+  error?: Error;
+} = { messages: [], status: "ready" };
+
+function userMessage(text: string) {
+  return { id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text }] };
+}
+function assistantMessage(text: string) {
+  return { id: crypto.randomUUID(), role: "assistant", parts: [{ type: "text", text }] };
+}
+
 vi.mock("@ai-sdk/react", () => ({
   useChat: () => ({
-    messages: [],
+    messages: chatState.messages,
     sendMessage: vi.fn(),
-    status: "ready",
-    error: undefined,
+    status: chatState.status,
+    error: chatState.error,
   }),
 }));
+
+beforeEach(() => {
+  chatState = { messages: [], status: "ready" };
+});
 
 /** The composer's controls, which is what a student actually looks for.
  *
@@ -66,5 +84,61 @@ describe("chat composer", () => {
       "Record a spoken question",
       "Send",
     ]);
+  });
+});
+
+/** The gap between pressing Send and the first word of the answer. Retrieval
+ * searches every book before a model writes anything, so that gap is real —
+ * and it used to render as nothing at all. */
+describe("chat pending state", () => {
+  it("shows a thinking indicator as soon as the question is sent", async () => {
+    chatState = { messages: [userMessage("what is the て form?")], status: "submitted" };
+    render(<Chat authenticated firstName="Rin" />);
+    expect(await screen.findByRole("status")).toHaveTextContent(/looking through your course/i);
+  });
+
+  it("keeps it up while the request is in flight with nothing back yet", () => {
+    chatState = {
+      messages: [userMessage("q"), assistantMessage("")],
+      status: "streaming",
+    };
+    render(<Chat authenticated />);
+    expect(screen.getByRole("status")).toBeInTheDocument();
+  });
+
+  it("drops it the moment the answer starts arriving", () => {
+    chatState = {
+      messages: [userMessage("q"), assistantMessage("The て form")],
+      status: "streaming",
+    };
+    render(<Chat authenticated />);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByText(/The て form/)).toBeInTheDocument();
+  });
+
+  it("shows exactly one, however many messages are on screen", () => {
+    chatState = {
+      messages: [userMessage("one"), assistantMessage("done"), userMessage("two")],
+      status: "submitted",
+    };
+    render(<Chat authenticated />);
+    expect(screen.getAllByRole("status")).toHaveLength(1);
+  });
+
+  it("gives way to the error state when the request fails", () => {
+    chatState = {
+      messages: [userMessage("q")],
+      status: "error",
+      error: new Error("boom"),
+    };
+    render(<Chat authenticated />);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByText(/Something went wrong/)).toBeInTheDocument();
+  });
+
+  it("does not show one before the student has asked anything", () => {
+    chatState = { messages: [], status: "ready" };
+    render(<Chat authenticated />);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 });

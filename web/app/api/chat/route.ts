@@ -5,17 +5,21 @@ import { convertToModelMessages, streamText, type UIMessage } from "ai";
 import { z } from "zod";
 
 import { detectLanguageMode, withoutLanguageRequest } from "@/lib/language";
+import { aspectOf } from "@/lib/topics";
 import { contextBlock, recentTurns, systemPrompt, type AttachedUpload } from "@/lib/prompt";
 import { isProviderDead, noteProviderFailure } from "@/lib/providers";
 import { serviceClient } from "@/lib/supabase/service";
 import { trialCookie, trialUsed, TRIALS } from "@/lib/trial";
 import {
+  broadenQuery,
   buildCitations,
   embedQuery,
   grammarPatterns,
   isSmallTalk,
+  isThinResult,
   resolveQuery,
   retrieve,
+  retrieveByTopic,
   retrieveExact,
   selectContext,
   tokensForQuery,
@@ -258,11 +262,16 @@ export async function POST(request: Request) {
     // run together: a hit discards the retrieval, a miss — the common case as
     // the corpus grows — has its chunks already in hand instead of paying a
     // second round-trip.
-    // A pattern the student named by name is looked up literally, alongside
-    // the ranked search. Two arms rank; this one refuses to lose a page.
+    // What the student named by name is looked up literally, alongside the
+    // ranked search: a grammar pattern, and a course division. Two arms rank;
+    // these two refuse to lose a page. Both search the WHOLE corpus — a
+    // division is a fact about the course, not about whichever document the
+    // conversation happened to touch first.
     const patterns = grammarPatterns(query.text);
+    const divisions = query.topics;
+    const aspect = aspectOf(query.text);
 
-    const [{ data: cached }, retrieval, exact] = await Promise.all([
+    const [{ data: cached }, retrieval, exact, byTopic] = await Promise.all([
       cacheable
         ? db.rpc("cache_get", {
             query_embedding: vectorLiteral,
@@ -277,8 +286,9 @@ export async function POST(request: Request) {
         () => ({ ok: false as const, rows: [] as RetrievedChunk[] }),
       ),
       // Best-effort: the ranked arms are the answer's backbone, and a failure
-      // here should cost a pattern page, not the reply.
+      // in a supplementary arm should cost a page, not the reply.
       retrieveExact(db, patterns).catch(() => [] as RetrievedChunk[]),
+      retrieveByTopic(db, divisions, aspect).catch(() => [] as RetrievedChunk[]),
     ]);
 
     // Semantic cache: 100 students ask the same ~30 grammar questions, and a
@@ -294,11 +304,29 @@ export async function POST(request: Request) {
     }
     // One entry per chunk: a page can be both the closest match and a literal
     // hit, and the literal flag is the one that matters for selection.
-    const byId = new Map<number, RetrievedChunk>();
-    for (const chunk of [...exact, ...retrieval.rows]) {
-      if (!byId.has(chunk.chunk_id)) byId.set(chunk.chunk_id, chunk);
+    const merge = (...arms: RetrievedChunk[][]) => {
+      const byId = new Map<number, RetrievedChunk>();
+      for (const chunk of arms.flat()) {
+        if (!byId.has(chunk.chunk_id)) byId.set(chunk.chunk_id, chunk);
+      }
+      return [...byId.values()];
+    };
+    chunks = merge(byTopic, exact, retrieval.rows);
+
+    // Nothing convincing came back. A ranked search always returns SOMETHING,
+    // so this is the moment the app used to mistake a missed search for a gap
+    // in the corpus and tell the student to go and open the book themselves.
+    // Instead, ask again in the corpus's own words before drawing any
+    // conclusion — one embedding, on the minority of turns that need it.
+    if (isThinResult(chunks)) {
+      const broadened = broadenQuery(query.text, divisions, aspect);
+      if (broadened && broadened !== query.text) {
+        const retry = await embedQuery(broadened)
+          .then((vector) => retrieve(db, vector, tokensForQuery(broadened), scope, 14))
+          .catch(() => [] as RetrievedChunk[]);
+        chunks = merge(byTopic, exact, retry, retrieval.rows);
+      }
     }
-    chunks = [...byId.values()];
   }
 
   // What the model actually reads: on topic, one page per passage, closest
