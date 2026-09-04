@@ -111,7 +111,7 @@ ${lines.join("\n")}`;
 
   // Plain text, so the chat model works here — no structured-output caveat.
   const tiers = [
-    { provider: "groq", model: groq(process.env.CHAT_MODEL ?? "llama-3.3-70b-versatile") },
+    { provider: "groq", model: groq(process.env.CHAT_MODEL ?? "openai/gpt-oss-120b") },
   ];
   if (process.env.DEEPSEEK_API_KEY && !isProviderDead("deepseek")) {
     const deepseek = createDeepSeek({ apiKey: process.env.DEEPSEEK_API_KEY });

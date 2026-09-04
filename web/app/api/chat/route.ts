@@ -4,19 +4,25 @@ import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { convertToModelMessages, streamText, type UIMessage } from "ai";
 import { z } from "zod";
 
-import { contextBlock, systemPrompt, type AttachedUpload } from "@/lib/prompt";
+import { detectLanguageMode, withoutLanguageRequest } from "@/lib/language";
+import { contextBlock, recentTurns, systemPrompt, type AttachedUpload } from "@/lib/prompt";
 import { isProviderDead, noteProviderFailure } from "@/lib/providers";
 import { serviceClient } from "@/lib/supabase/service";
 import { trialCookie, trialUsed, TRIALS } from "@/lib/trial";
 import {
   buildCitations,
   embedQuery,
+  grammarPatterns,
   isSmallTalk,
+  resolveQuery,
   retrieve,
+  retrieveExact,
+  selectContext,
   tokensForQuery,
   type Citation,
   type RetrievedChunk,
   type StudyScope,
+  type Turn,
 } from "@/lib/retrieval";
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/server";
 
@@ -36,14 +42,17 @@ const BodySchema = z.object({
   uploadIds: z.array(z.number().int().positive()).max(4).optional(),
 });
 
-function lastUserText(messages: UIMessage[]): string {
-  const last = [...messages].reverse().find((m) => m.role === "user");
-  if (!last) return "";
-  return last.parts
+function textOf(message: UIMessage): string {
+  return message.parts
     .filter((p): p is { type: "text"; text: string } => p.type === "text")
     .map((p) => p.text)
     .join("\n")
     .trim();
+}
+
+/** The conversation, flattened to what retrieval and the language rule read. */
+function turnsOf(messages: UIMessage[]): Turn[] {
+  return messages.map((m) => ({ role: m.role, text: textOf(m) }));
 }
 
 export async function POST(request: Request) {
@@ -65,7 +74,18 @@ export async function POST(request: Request) {
   const { messages, scope, uploadIds } = parsed.data;
   let { conversationId } = parsed.data;
 
-  const question = lastUserText(messages);
+  // Retrieval used to search on the last message alone, so "what about the
+  // past tense?" searched the textbooks for those five words. The model was
+  // given the whole conversation and the corpus was searched for a fragment
+  // of it, which is how a student ends up asking the same thing three times.
+  const turns = turnsOf(messages);
+  const language = detectLanguageMode(turns);
+  const query = resolveQuery(
+    turns.map((t) =>
+      t.role === "user" ? { ...t, text: withoutLanguageRequest(t.text) } : t,
+    ),
+  );
+  const question = query.asked;
   if (!question) {
     return Response.json({ error: "empty_question" }, { status: 400 });
   }
@@ -87,7 +107,9 @@ export async function POST(request: Request) {
   // embedding depends on who is asking; the only cost of starting early is
   // one wasted embed when a trial visitor turns out to be past their limit,
   // paid on the highest-quota model in the stack.
-  const embedding = trivial ? Promise.resolve(null) : embedQuery(question).catch(() => null);
+  // Embedded on the RESOLVED query, so a follow-up searches the corpus for
+  // what it is actually about rather than for the pronoun it was typed with.
+  const embedding = trivial ? Promise.resolve(null) : embedQuery(query.text).catch(() => null);
 
   const supabase = await createClient();
   let user = null;
@@ -216,7 +238,12 @@ export async function POST(request: Request) {
   // a classmate asking something similar in the same scope would be served
   // the contents of a document they have no right to see. Attachments turn
   // the cache off in both directions for this turn.
-  const cacheable = attached.length === 0;
+  //
+  // A resolved follow-up is uncacheable for a second reason: "why?" embeds to
+  // roughly the same vector every time anyone types it, so a cache keyed on
+  // the question alone would answer this student's "why?" with the answer to
+  // a classmate's, from a conversation they never had.
+  const cacheable = attached.length === 0 && !query.isFollowUp;
 
   let vectorLiteral: string | null = null;
   let chunks: RetrievedChunk[] = [];
@@ -231,17 +258,27 @@ export async function POST(request: Request) {
     // run together: a hit discards the retrieval, a miss — the common case as
     // the corpus grows — has its chunks already in hand instead of paying a
     // second round-trip.
-    const [{ data: cached }, retrieval] = await Promise.all([
+    // A pattern the student named by name is looked up literally, alongside
+    // the ranked search. Two arms rank; this one refuses to lose a page.
+    const patterns = grammarPatterns(query.text);
+
+    const [{ data: cached }, retrieval, exact] = await Promise.all([
       cacheable
         ? db.rpc("cache_get", {
             query_embedding: vectorLiteral,
             query_scope: scope,
           })
         : Promise.resolve({ data: null }),
-      retrieve(db, queryVector, tokensForQuery(question), scope, 8).then(
+      // More candidates than the prompt can hold, because selectContext
+      // below drops what is not about the question and keeps one page per
+      // passage. Same round trip either way.
+      retrieve(db, queryVector, tokensForQuery(query.text), scope, 14).then(
         (rows) => ({ ok: true as const, rows }),
         () => ({ ok: false as const, rows: [] as RetrievedChunk[] }),
       ),
+      // Best-effort: the ranked arms are the answer's backbone, and a failure
+      // here should cost a pattern page, not the reply.
+      retrieveExact(db, patterns).catch(() => [] as RetrievedChunk[]),
     ]);
 
     // Semantic cache: 100 students ask the same ~30 grammar questions, and a
@@ -255,13 +292,29 @@ export async function POST(request: Request) {
     if (!retrieval.ok) {
       return Response.json({ error: "retrieval_failed" }, { status: 502 });
     }
-    chunks = retrieval.rows;
+    // One entry per chunk: a page can be both the closest match and a literal
+    // hit, and the literal flag is the one that matters for selection.
+    const byId = new Map<number, RetrievedChunk>();
+    for (const chunk of [...exact, ...retrieval.rows]) {
+      if (!byId.has(chunk.chunk_id)) byId.set(chunk.chunk_id, chunk);
+    }
+    chunks = [...byId.values()];
   }
 
-  const citations = buildCitations(chunks);
+  // What the model actually reads: on topic, one page per passage, closest
+  // first. Citations come from that same set rather than from every
+  // candidate — a page the answer was never built from is not a page the
+  // answer can honestly offer to send the student to.
+  const context = selectContext(chunks);
+  const citations = buildCitations(context);
 
-  const system = `${systemPrompt(scope as StudyScope)}\n\n=== SOURCE MATERIAL ===\n${contextBlock(chunks, attached)}`;
-  const modelMessages = await convertToModelMessages(messages);
+  const system = `${systemPrompt(scope as StudyScope, {
+    language,
+    isFollowUp: query.isFollowUp,
+    canPointToBook: citations.length > 0,
+    hasUploads: attached.length > 0,
+  })}\n\n=== SOURCE MATERIAL ===\n${contextBlock(context, attached)}`;
+  const modelMessages = await convertToModelMessages(recentTurns(messages));
 
   const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
   const google = createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY });
@@ -279,7 +332,11 @@ export async function POST(request: Request) {
   }[] = [];
   const chatOptions = { system, messages: modelMessages, temperature: 0.3 };
 
-  const groqModel = process.env.CHAT_MODEL ?? "llama-3.3-70b-versatile";
+  // Verified against the Groq catalogue: llama-3.3-70b-versatile was retired
+  // and every request to it came back 404, which silently demoted the whole
+  // cascade to its last-resort tier. gpt-oss-120b is the largest model the
+  // free tier serves, and it is the one the quiz route already runs on.
+  const groqModel = process.env.CHAT_MODEL ?? "openai/gpt-oss-120b";
   tiers.push({
     provider: "groq",
     label: groqModel,
