@@ -1,4 +1,4 @@
-import { createClient as createSupabase } from "@supabase/supabase-js";
+import { createClient as createSupabase, type SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 
 import { ADMIN_EMAIL, isAdminEmail } from "@/lib/admin";
@@ -39,38 +39,74 @@ type Service = NonNullable<ReturnType<typeof serviceClient>>;
 
 interface AuthAccount {
   id: string;
-  suspended: boolean;
-  /** Clicked their link at least once. An account row alone proves nothing:
-   * the OTP send itself creates one before any email arrives. */
-  confirmed: boolean;
 }
 
-/** Every auth account by lowercased email. There is no getUserByEmail in the
- * admin API, so the paged listing is the only lookup available; building the
- * whole map once costs the same as one search and serves the list view too. */
-async function authAccounts(service: Service): Promise<Map<string, AuthAccount>> {
-  const accounts = new Map<string, AuthAccount>();
-  for (let page = 1; page <= 10; page++) {
-    const { data, error } = await service.auth.admin.listUsers({ page, perPage: 200 });
-    if (error) break;
-    for (const user of data.users) {
-      const email = (user.email ?? "").toLowerCase();
-      if (!email) continue;
-      // banned_until is a timestamp, and a past one is an expired ban.
-      const until = (user as { banned_until?: string | null }).banned_until;
-      accounts.set(email, {
-        id: user.id,
-        suspended: Boolean(until && new Date(until).getTime() > Date.now()),
-        confirmed: Boolean(user.email_confirmed_at),
-      });
-    }
-    if (data.users.length < 200) break;
-  }
-  return accounts;
-}
-
+/** The auth id for one address, straight from profiles.
+ *
+ * profiles is written by the signup trigger in the same transaction that
+ * creates the auth user, so a row here means an account exists and its id IS
+ * the auth id. An indexed lookup on one email, rather than a crawl over
+ * every user, for the two operations that need an id. */
 async function findAuthUser(service: Service, email: string): Promise<AuthAccount | null> {
-  return (await authAccounts(service)).get(email) ?? null;
+  const { data } = await service
+    .from("profiles")
+    .select("id")
+    .ilike("email", email)
+    .maybeSingle();
+  const id = (data as { id: string } | null)?.id;
+  return id ? { id } : null;
+}
+
+interface SendFailure {
+  message: string;
+  /** The provider is asking us to wait, not reporting a fault. */
+  cooldown: boolean;
+  retryAfter?: number;
+}
+
+/** Ask Supabase to email a sign-in link, and say precisely what went wrong.
+ *
+ * Two failures wear the same coat here and must not be treated alike. A
+ * cooldown ("you can only request this after 47 seconds") means the address
+ * already has a live link in flight — retrying sends nothing and, if we
+ * treated it as a fault, would undo a perfectly good invite. A transport
+ * fault — SMTP refused the connection, the gateway 502'd — is worth exactly
+ * one more attempt, because these are single-request blips and a second
+ * attempt after a rate limit would only deepen it.
+ */
+async function sendSignInEmail(
+  anon: SupabaseClient,
+  email: string,
+  emailRedirectTo: string,
+): Promise<SendFailure | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const { error } = await anon.auth.signInWithOtp({ email, options: { emailRedirectTo } });
+    if (!error) return null;
+
+    const seconds = /after (\d+) seconds?/i.exec(error.message)?.[1];
+    const cooldown =
+      error.status === 429 ||
+      seconds !== undefined ||
+      /rate limit|too many requests/i.test(error.message);
+    if (cooldown) {
+      return {
+        message: error.message,
+        cooldown: true,
+        retryAfter: seconds ? Number(seconds) : 60,
+      };
+    }
+
+    // Anything 5xx or unattributed is worth one retry; a 4xx is a verdict
+    // about the request itself and will say the same thing twice.
+    const transient = !error.status || error.status >= 500;
+    if (!transient || attempt === 1) {
+      console.error(`invite email to ${email} failed (${error.status ?? "no status"}):`, error.message);
+      return { message: error.message, cooldown: false };
+    }
+    console.warn(`invite email to ${email} hit a transient fault, retrying once:`, error.message);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  return null;
 }
 
 /** Invite a student: allowlist their email, then send them the sign-in link.
@@ -126,10 +162,28 @@ export async function POST(request: Request) {
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     { auth: { persistSession: false } },
   );
-  const { error: otpError } = await anon.auth.signInWithOtp({
+  const otpError = await sendSignInEmail(
+    anon,
     email,
-    options: { emailRedirectTo: `${new URL(request.url).origin}/auth/confirm` },
-  });
+    `${new URL(request.url).origin}/auth/confirm`,
+  );
+
+  // A cooldown is not a failure. Supabase refuses a second link for the same
+  // address inside its send window, and the old code treated that refusal
+  // like broken SMTP: it deleted the allowlist row and the account, so an
+  // admin who clicked twice un-invited the student they had just invited.
+  // The invite stands; only the email needs to wait.
+  if (otpError?.cooldown) {
+    return Response.json(
+      {
+        error: "cooldown",
+        allowlisted: true,
+        retryAfter: otpError.retryAfter ?? 60,
+      },
+      { status: 429 },
+    );
+  }
+
   if (otpError) {
     // The email did not go out, so a brand-new invite is rolled back — the
     // student list must only show people who actually received a link. The
@@ -154,6 +208,7 @@ export async function POST(request: Request) {
       },
       { status: 502 },
     );
+
   }
 
   return Response.json({ ok: true, email });
@@ -169,34 +224,33 @@ export async function GET() {
     return Response.json({ error: "invite_not_configured" }, { status: 503 });
   }
 
-  const { data, error } = await service
-    .from("allowlist")
-    .select("email, created_at")
-    // The admin is not an invited student and never shows in this list.
-    .neq("email", ADMIN_EMAIL)
-    .order("created_at", { ascending: false })
-    .limit(100);
+  // The allowlist and the auth accounts are joined in the database now, so
+  // this is one round trip rather than a listing plus a paged crawl.
+  const { data, error } = await service.rpc("admin_students");
   if (error) {
     return Response.json({ error: "lookup_failed" }, { status: 500 });
   }
 
-  // Suspension lives on the auth account, not the allowlist, so the two have
-  // to be joined here for the list to show which button to offer.
-  const accounts = await authAccounts(service);
-  const invites = (data ?? []).map((row) => {
-    const account = accounts.get((row.email as string).toLowerCase());
-    return {
-      email: row.email as string,
-      created_at: row.created_at as string,
-      suspended: account?.suspended ?? false,
+  const invites = ((data ?? []) as {
+    email: string;
+    invited_at: string;
+    registered: boolean;
+    accepted: boolean;
+    suspended: boolean;
+  }[])
+    // The admin is not an invited student and never shows in this list.
+    .filter((row) => row.email.toLowerCase() !== ADMIN_EMAIL.toLowerCase())
+    .map((row) => ({
+      email: row.email,
+      created_at: row.invited_at,
+      suspended: row.suspended,
       // Never signed in: there is no account to suspend yet.
-      registered: Boolean(account),
-      // The email went out, but the link has never been used — either it is
-      // sitting unread, or the university mail gateway swallowed it. This is
-      // the flag that tells the admin who to chase.
-      accepted: account?.confirmed ?? false,
-    };
-  });
+      registered: row.registered,
+      // The email went out but the link has never been used — either it is
+      // sitting unread, or the university gateway swallowed it. This is the
+      // flag that tells the admin who to chase.
+      accepted: row.accepted,
+    }));
   return Response.json({ invites });
 }
 
