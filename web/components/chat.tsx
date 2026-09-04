@@ -6,7 +6,6 @@ import Link from "next/link";
 import { useRef, useState } from "react";
 
 import { Answer } from "@/components/answer";
-import { Citations } from "@/components/citations";
 import { FeedbackButtons } from "@/components/feedback-buttons";
 import { MagicLinkForm } from "@/components/magic-link-form";
 import { MicButton } from "@/components/mic-button";
@@ -146,14 +145,9 @@ export function Chat({
                   )
                 ) : null,
               )}
-              {message.role === "assistant" && (
-                <>
-                  <Citations citations={meta.citations ?? []} />
-                  {message.id === messages.at(-1)?.id && !busy && (
-                    <FeedbackButtons conversationId={meta.conversationId} />
-                  )}
-                </>
-              )}
+              {message.role === "assistant" &&
+                message.id === messages.at(-1)?.id &&
+                !busy && <FeedbackButtons conversationId={meta.conversationId} />}
             </div>
           );
         })}
