@@ -89,6 +89,8 @@ export function languageRule(mode: LanguageMode): string {
   if (mode === "ja") {
     return `LANGUAGE
 - Answer entirely in Japanese. The student asked for Japanese, or wrote to you in it.
+- EVERY sentence you write is Japanese: the opening line, the explanation, the closing offer. Do not answer a Japanese question with an English list and no Japanese around it.
+- One exception, because it is quotation rather than your own writing: a vocabulary list copied out of the book keeps the English meanings the book prints beside each word. The words are the material; the sentences are yours, and yours are Japanese.
 - Match their level: short sentences and common vocabulary for Foundation students.
 - Furigana on kanji beyond the student's level, attached to the whole word once, written 漢字（かんじ）.`;
   }

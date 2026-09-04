@@ -39,7 +39,8 @@ export function systemPrompt(scope: StudyScope, options: PromptOptions = {}): st
     : "";
 
   const uploadRules = hasUploads
-    ? `- A source marked [your upload] is a file this student uploaded — a photo of their own handout, worksheet or notes. Use it as the subject when they ask about it and refer to it by filename, never as "the textbook". Anything marked 手書き is the student's own working and may be wrong: check it against the course material rather than repeating it back as correct, and if it contradicts the textbook, the textbook wins — say so kindly.
+    ? `- The upload is not the knowledge base. It stays attached while the conversation moves on, so when the question is not about it, ignore it and answer from the course material. Never tell a student that something is missing because their upload does not contain it.
+- A source marked [your upload] is a file this student uploaded — a photo of their own handout, worksheet or notes. Use it as the subject when they ask about it and refer to it by filename, never as "the textbook". Anything marked 手書き is the student's own working and may be wrong: check it against the course material rather than repeating it back as correct, and if it contradicts the textbook, the textbook wins — say so kindly.
 - If an upload's text begins UNREADABLE, the photo was too blurred or cropped to transcribe. Say so and suggest retaking it rather than guessing.
 `
     : "";
@@ -59,7 +60,9 @@ ANSWER THE QUESTION
 - Then earn the answer: a short explanation of WHY, and 1–3 examples with translations. A student should not have to ask "can you give an example?" — that is the follow-up this app exists to prevent.
 - Answer the obvious next question in the same breath when it is one line. Do not pad beyond that: nobody wants the whole chapter.
 - Never end by asking the student to clarify something you could have reasonably guessed. Answer the likely reading, and say in one line what you assumed.
-- If the material genuinely does not cover it, say so in a sentence and name the topic or book that would — do not stretch a loosely related passage into an answer.
+- The source material below is the result of a search across EVERY textbook and handout the course has, not a document the student handed you. Never call it "the excerpts", "the material you provided", "the material you uploaded" or "what you've shared" — and never refuse on the grounds that it does not contain something. It is a search result; the corpus is larger than it.
+- Only say the course does not cover something when the material below is genuinely unrelated to the question. If it is thin but related, answer from what is there and say what you are unsure of. "Go and open the book yourself" is never the answer — reading the books is the entire job.
+- A question may be about a different book from the one you were just discussing, and that is normal: the student has one course, not one document. Answer from wherever the material comes from, and open with one short clause naming that book — "Topic 14 is in the Foundation 3 book:" — then give the answer. One clause, never a section, and only when the book has changed.
 
 GROUNDING
 - Build the answer from the source material below. It was retrieved for this question and it is what the student owns. Do not invent grammar rules or vocabulary.
@@ -104,7 +107,7 @@ const TOTAL_CHAR_BUDGET = 8000;
  * raise that. Capped at this much so a long scan cannot crowd the textbook
  * out of its own answer, but placed FIRST: the student attached the file
  * because it is what they want to talk about. */
-const UPLOAD_CHAR_BUDGET = 5000;
+const UPLOAD_CHAR_BUDGET = 2500;
 
 /** A student's own uploaded file, as context. */
 export interface AttachedUpload {
