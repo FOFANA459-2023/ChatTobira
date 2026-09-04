@@ -3,166 +3,78 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
-import { ADMIN_EMAIL, isAdminEmail } from "@/lib/admin";
+import { AdminShell, Card } from "@/components/admin/shell";
 import { EMAIL_SHAPE, normalizeEmail } from "@/lib/email";
-import { NavBar } from "@/components/nav";
 import { createClient } from "@/lib/supabase/client";
 
-interface Invite {
-  email: string;
-  created_at: string;
-  /** Access paused: the account and all its history are intact. */
-  suspended: boolean;
-  /** Invited but never signed in, so there is no account to suspend yet. */
-  registered: boolean;
-  /** They used their sign-in link at least once. False means the email is
-   * unread — or was eaten by a university mail filter. */
-  accepted: boolean;
+interface Summary {
+  invited: number;
+  accepted: number;
+  waiting: number;
+  suspended: number;
 }
 
-interface Submission {
-  id: number;
-  filename: string;
-  level: string | null;
-  topic: string | null;
-  status: string;
-  size_bytes: number;
-  created_at: string;
-  uploader: string;
-  preview: string;
-  destination: string | null;
+interface Corpus {
+  documents: number;
+  searchable: number;
+  chunks: number;
+  citable: number;
 }
 
-type Session = "checking" | "signed_out" | "not_admin" | "admin";
+type Note = { ok: boolean; text: string } | null;
 
-export default function AdminPage() {
-  const [session, setSession] = useState<Session>("checking");
-  const [password, setPassword] = useState("");
-  const [signInError, setSignInError] = useState("");
-  const [busy, setBusy] = useState(false);
+export default function AdminDashboard() {
+  const [students, setStudents] = useState<Summary | null>(null);
+  const [corpus, setCorpus] = useState<Corpus | null>(null);
+  const [pending, setPending] = useState<number | null>(null);
 
   const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteNote, setInviteNote] = useState<{ ok: boolean; text: string } | null>(null);
-  const [invites, setInvites] = useState<Invite[]>([]);
+  const [inviteNote, setInviteNote] = useState<Note>(null);
+  const [inviting, setInviting] = useState(false);
+  /** Seconds left before this address can be emailed again. Counted down in
+   * the UI so a cooldown is something the admin can see, not a mystery. */
+  const [cooldown, setCooldown] = useState(0);
 
   const [newPassword, setNewPassword] = useState("");
-  const [passwordNote, setPasswordNote] = useState<{ ok: boolean; text: string } | null>(
-    null,
-  );
+  const [passwordNote, setPasswordNote] = useState<Note>(null);
+  const [savingPassword, setSavingPassword] = useState(false);
 
-  const [queue, setQueue] = useState<Submission[]>([]);
-  const [expanded, setExpanded] = useState<number | null>(null);
-
-  const loadQueue = useCallback(() => {
+  const load = useCallback(() => {
+    void fetch("/api/admin/students")
+      .then((r) => (r.ok ? r.json() : { summary: null }))
+      .then((body: { summary: Summary | null }) => setStudents(body.summary))
+      .catch(() => setStudents(null));
+    void fetch("/api/admin/documents")
+      .then((r) => (r.ok ? r.json() : { summary: null }))
+      .then((body: { summary: Corpus | null }) => setCorpus(body.summary))
+      .catch(() => setCorpus(null));
     void fetch("/api/upload/review")
       .then((r) => (r.ok ? r.json() : { queue: [] }))
-      .then((body: { queue?: Submission[] }) => setQueue(body.queue ?? []))
-      .catch(() => setQueue([]));
+      .then((body: { queue?: unknown[] }) =>
+        setPending((body.queue ?? []).filter(Boolean).length),
+      )
+      .catch(() => setPending(null));
   }, []);
 
-  const review = useCallback(
-    async (id: number, action: "approve" | "reject") => {
-      setBusy(true);
-      try {
-        await fetch("/api/upload/review", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id, action }),
-        });
-        loadQueue();
-      } finally {
-        setBusy(false);
-      }
-    },
-    [loadQueue],
-  );
-
-  const loadInvites = useCallback(() => {
-    fetch("/api/invite")
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((data: { invites: Invite[] }) => setInvites(data.invites))
-      .catch(() => setInvites([]));
-  }, []);
+  useEffect(load, [load]);
 
   useEffect(() => {
-    try {
-      const supabase = createClient();
-      supabase.auth
-        .getUser()
-        .then(({ data: { user } }) => {
-          if (!user) setSession("signed_out");
-          else if (isAdminEmail(user.email)) setSession("admin");
-          else setSession("not_admin");
-        })
-        .catch(() => setSession("signed_out"));
-    } catch {
-      // Unconfigured deployment: render the sign-in form; submitting surfaces
-      // the error rather than a blank page.
-      setSession("signed_out");
-    }
-  }, []);
-
-  useEffect(() => {
-    if (session !== "admin") return;
-    loadInvites();
-    loadQueue();
-  }, [session, loadInvites, loadQueue]);
-
-  async function signIn(event: React.FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    setSignInError("");
-    try {
-      const supabase = createClient();
-      const { error } = await supabase.auth.signInWithPassword({
-        email: ADMIN_EMAIL,
-        password,
-      });
-      if (error) {
-        // Reporting every failure as "wrong password" hid a real lockout once:
-        // a rate limit, an unconfirmed email, and a misconfigured deployment
-        // all look identical from here, and none of them are fixed by typing
-        // the password again. Name what actually happened.
-        if (error.status === 429) {
-          setSignInError(
-            "Too many sign-in attempts. Supabase is rate-limiting this account — wait a few minutes and try again.",
-          );
-        } else if (/email not confirmed/i.test(error.message)) {
-          setSignInError(
-            "This account's email is not confirmed, so password sign-in is refused.",
-          );
-        } else if (/invalid login credentials/i.test(error.message)) {
-          setSignInError("That password is not right. Please try again.");
-        } else {
-          setSignInError(`Sign-in failed: ${error.message}`);
-        }
-      } else {
-        setPassword("");
-        setSession("admin");
-      }
-    } catch (error) {
-      setSignInError(
-        `Could not reach the sign-in service: ${
-          error instanceof Error ? error.message : "unknown error"
-        }`,
-      );
-    } finally {
-      setBusy(false);
-    }
-  }
+    if (cooldown <= 0) return;
+    const timer = setTimeout(() => setCooldown((seconds) => seconds - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [cooldown]);
 
   async function invite(event: React.FormEvent) {
     event.preventDefault();
     // Fold full-width IME characters and pasted "Name <email>" forms before
-    // shape-checking: school addresses routinely arrive that way, and raw
-    // validation read as ".ac.jp is blocked".
+    // checking the shape: school addresses routinely arrive that way.
     const email = normalizeEmail(inviteEmail);
     if (!email) return;
     if (!EMAIL_SHAPE.test(email)) {
       setInviteNote({ ok: false, text: "That does not look like an email address." });
       return;
     }
-    setBusy(true);
+    setInviting(true);
     setInviteNote(null);
     try {
       const response = await fetch("/api/invite", {
@@ -174,22 +86,31 @@ export default function AdminPage() {
         error?: string;
         allowlisted?: boolean;
         reason?: string;
+        retryAfter?: number;
       };
+
       if (response.ok) {
-        setInviteNote({ ok: true, text: `Invite sent to ${email}.` });
+        setInviteNote({ ok: true, text: `Sign-in link sent to ${email}.` });
         setInviteEmail("");
-        loadInvites();
+        load();
+      } else if (body.error === "cooldown") {
+        // Their invite is intact; only the email has to wait.
+        const wait = body.retryAfter ?? 60;
+        setCooldown(wait);
+        setInviteNote({
+          ok: true,
+          text: `${email} is invited. A sign-in link was sent to them very recently, so the next one can go out in ${wait} seconds — they can also request one themselves on the login page.`,
+        });
+        load();
       } else if (body.error === "send_failed") {
-        // allowlisted distinguishes a failed RE-send (their standing invite
-        // survives) from a failed new invite (rolled back, list unchanged).
         const why = body.reason ? ` (${body.reason})` : "";
         setInviteNote({
           ok: false,
           text: body.allowlisted
-            ? `${email} is already invited, but the fresh sign-in email could not be sent right now${why}. They can request a link themselves on the login page.`
+            ? `${email} is already invited, but the fresh sign-in email could not be sent${why}. They can request a link themselves on the login page.`
             : `The invite email to ${email} could not be sent, so they were NOT added${why}.`,
         });
-        loadInvites();
+        load();
       } else if (body.error === "bad_email") {
         setInviteNote({ ok: false, text: "That does not look like an email address." });
       } else if (body.error === "invite_not_configured") {
@@ -197,89 +118,18 @@ export default function AdminPage() {
           ok: false,
           text: "Inviting is not configured on this deployment (missing SUPABASE_SERVICE_ROLE_KEY).",
         });
+      } else if (body.error === "is_admin") {
+        setInviteNote({
+          ok: false,
+          text: "That is the admin account, which signs in with a password rather than a link.",
+        });
       } else {
         setInviteNote({ ok: false, text: "Could not send the invite. Please try again." });
       }
     } catch {
       setInviteNote({ ok: false, text: "Could not send the invite. Please try again." });
     } finally {
-      setBusy(false);
-    }
-  }
-
-  /** Pause or restore access. Nothing is deleted either way. */
-  async function setSuspended(email: string, suspend: boolean) {
-    setBusy(true);
-    setInviteNote(null);
-    try {
-      const response = await fetch("/api/invite", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, action: suspend ? "suspend" : "restore" }),
-      });
-      const body = (await response.json().catch(() => ({}))) as { error?: string };
-      if (response.ok) {
-        setInviteNote({
-          ok: true,
-          text: suspend
-            ? `${email} is suspended. Their account and history are kept — restore returns access.`
-            : `${email} can sign in again.`,
-        });
-        loadInvites();
-      } else if (body.error === "never_signed_in") {
-        setInviteNote({
-          ok: false,
-          text: `${email} has not signed in yet, so there is no account to suspend. Remove the invite instead.`,
-        });
-      } else {
-        setInviteNote({
-          ok: false,
-          text: `Could not ${suspend ? "suspend" : "restore"} ${email}. Try again.`,
-        });
-      }
-    } catch {
-      setInviteNote({
-        ok: false,
-        text: `Could not ${suspend ? "suspend" : "restore"} ${email}. Try again.`,
-      });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  /** Delete the invite and the account outright. Irreversible, so it asks. */
-  async function remove(email: string) {
-    if (
-      !window.confirm(
-        `Remove ${email} completely?\n\nThis deletes their account and everything attached to it — chat history, saved feedback, and usage — and cannot be undone.\n\nTo pause access instead and keep their work, use Suspend.`,
-      )
-    ) {
-      return;
-    }
-    setBusy(true);
-    setInviteNote(null);
-    try {
-      const response = await fetch("/api/invite", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
-      });
-      const body = (await response.json().catch(() => ({}))) as { error?: string };
-      if (response.ok) {
-        setInviteNote({ ok: true, text: `${email} was removed completely.` });
-      } else if (body.error === "delete_failed") {
-        setInviteNote({
-          ok: false,
-          text: `${email} was un-invited and suspended, but their account could not be deleted. Try Remove again.`,
-        });
-      } else {
-        setInviteNote({ ok: false, text: `Could not remove ${email}. Try again.` });
-      }
-      loadInvites();
-    } catch {
-      setInviteNote({ ok: false, text: `Could not remove ${email}. Try again.` });
-    } finally {
-      setBusy(false);
+      setInviting(false);
     }
   }
 
@@ -289,7 +139,7 @@ export default function AdminPage() {
       setPasswordNote({ ok: false, text: "Use at least 8 characters." });
       return;
     }
-    setBusy(true);
+    setSavingPassword(true);
     setPasswordNote(null);
     try {
       const supabase = createClient();
@@ -299,310 +149,172 @@ export default function AdminPage() {
       });
       if (error) throw error;
       setNewPassword("");
+      setPasswordNote({ ok: true, text: "Password updated." });
+    } catch (error) {
       setPasswordNote({
-        ok: true,
-        text: "Password saved. From now on you can sign in here with it directly.",
+        ok: false,
+        text: `Could not update the password: ${
+          error instanceof Error ? error.message : "unknown error"
+        }`,
       });
-    } catch {
-      setPasswordNote({ ok: false, text: "Could not save the password. Try again." });
     } finally {
-      setBusy(false);
+      setSavingPassword(false);
     }
   }
 
   return (
-    <div className="flex min-h-screen flex-col">
-      {/* Sign out lives in the navbar once signed in; while signed out this
-          page IS the admin sign-in form, so the navbar offers no auth button
-          of its own — just the way back to the chat and quizzes. */}
-      <NavBar showAuth={session === "admin"} />
-      <main className="flex flex-1 items-start justify-center p-6">
-      <div className="mt-12 w-full max-w-md">
-        <div className="rounded-2xl border border-stone-200 bg-white p-8 shadow-sm">
-          <h1 className="text-2xl font-semibold tracking-tight">
-            <Link href="/" className="hover:text-stone-600">
-              ChatTobira
-            </Link>{" "}
-            <span className="text-base font-normal text-stone-500">Admin</span>
-          </h1>
+    <AdminShell
+      active="dashboard"
+      title="Dashboard"
+      intro="Invite students, and see the state of the course at a glance."
+    >
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <Stat label="Invited" value={students?.invited} href="/admin/students" />
+        <Stat label="Signed in" value={students?.accepted} href="/admin/students" />
+        <Stat
+          label="Never signed in"
+          value={students?.waiting}
+          href="/admin/students"
+          tone={students && students.waiting > 0 ? "warn" : "plain"}
+        />
+        <Stat label="Documents" value={corpus?.documents} href="/admin/documents" />
+      </div>
 
-          {session === "checking" && (
-            <p className="mt-6 text-sm text-stone-500">Checking session…</p>
-          )}
+      {pending !== null && pending > 0 && (
+        <Link
+          href="/admin/documents"
+          className="mt-3 block rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 hover:bg-amber-100"
+        >
+          {pending} student {pending === 1 ? "upload is" : "uploads are"} waiting for review →
+        </Link>
+      )}
 
-          {session === "not_admin" && (
-            <p className="mt-6 text-sm text-stone-600">
-              This page is for the admin only.{" "}
-              <Link href="/" className="underline">
-                Back to the chat
-              </Link>
-              .
-            </p>
-          )}
-
-          {session === "signed_out" && (
-            <>
-              <form onSubmit={signIn} className="mt-6 space-y-3">
-                <input
-                  type="password"
-                  required
-                  autoComplete="current-password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Password"
-                  className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm outline-none focus:border-stone-500"
-                />
-                <button
-                  type="submit"
-                  disabled={busy}
-                  className="w-full rounded-lg bg-stone-900 px-3 py-2 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
-                >
-                  {busy ? "Signing in…" : "Sign in"}
-                </button>
-              </form>
-              {signInError && (
-                <p className="mt-3 text-sm text-red-700">{signInError}</p>
-              )}
-            </>
-          )}
-
-          {session === "admin" && (
-            <>
-              <p className="mt-2 text-sm text-stone-600">
-                Invite a student by email — they receive a sign-in link and
-                just enter their name on first visit.
+      <div className="mt-6 grid gap-4 lg:grid-cols-2">
+        <Card
+          title="Invite a student"
+          description="Adds them to the allowlist and emails a sign-in link straight away."
+        >
+          <form onSubmit={invite} className="space-y-3 p-4">
+            <input
+              type="text"
+              inputMode="email"
+              autoComplete="off"
+              value={inviteEmail}
+              onChange={(event) => setInviteEmail(event.target.value)}
+              placeholder="student@ed.ritsumei.ac.jp"
+              disabled={inviting}
+              className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm outline-none focus:border-stone-500 disabled:bg-stone-100"
+            />
+            <button
+              type="submit"
+              disabled={inviting || cooldown > 0 || inviteEmail.trim() === ""}
+              className="w-full rounded-lg bg-stone-900 px-3 py-2 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
+            >
+              {inviting
+                ? "Sending invitation…"
+                : cooldown > 0
+                  ? `Wait ${cooldown}s before the next link`
+                  : "Send invitation"}
+            </button>
+            {inviteNote && (
+              <p className={`text-sm ${inviteNote.ok ? "text-green-700" : "text-red-700"}`}>
+                {inviteNote.text}
               </p>
-              <form onSubmit={invite} className="mt-5 flex gap-2">
-                {/* type="text", not "email": the native email check runs on
-                    the RAW input, and a full-width ＠ from a Japanese IME or
-                    a pasted 「山田 <yt01@…>」 failed it before our normaliser
-                    could run. Validation happens after normalizeEmail. */}
-                <input
-                  type="text"
-                  inputMode="email"
-                  autoComplete="off"
-                  required
-                  value={inviteEmail}
-                  onChange={(e) => setInviteEmail(e.target.value)}
-                  placeholder="student@ed.ritsumei.ac.jp"
-                  className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm outline-none focus:border-stone-500"
-                />
-                <button
-                  type="submit"
-                  disabled={busy || inviteEmail.trim() === ""}
-                  className="rounded-lg bg-stone-900 px-4 py-2 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
-                >
-                  {busy ? "…" : "Invite"}
-                </button>
-              </form>
-              {inviteNote && (
-                <p
-                  className={`mt-3 text-sm ${inviteNote.ok ? "text-green-700" : "text-amber-700"}`}
-                >
-                  {inviteNote.text}
+            )}
+            <p className="text-xs text-stone-400">
+              Already invited? Sending again emails them a fresh link — their account and
+              history are untouched.
+            </p>
+          </form>
+        </Card>
+
+        <div className="space-y-4">
+          <Card title="Knowledge base" description="What the assistant can answer from.">
+            <dl className="grid grid-cols-2 gap-px bg-stone-100 text-sm">
+              <Figure label="Documents" value={corpus?.documents} />
+              <Figure label="Fully indexed" value={corpus?.searchable} />
+              <Figure label="Searchable passages" value={corpus?.chunks} />
+              <Figure label="Citable textbooks" value={corpus?.citable} />
+            </dl>
+          </Card>
+
+          <Card title="Admin password" description="Used to sign in to this portal.">
+            <form onSubmit={savePassword} className="space-y-3 p-4">
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={newPassword}
+                onChange={(event) => setNewPassword(event.target.value)}
+                placeholder="New password (min 8 characters)"
+                className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm outline-none focus:border-stone-500"
+              />
+              <button
+                type="submit"
+                disabled={savingPassword || newPassword === ""}
+                className="w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm font-medium text-stone-700 hover:bg-stone-100 disabled:opacity-50"
+              >
+                {savingPassword ? "Saving…" : "Update password"}
+              </button>
+              {passwordNote && (
+                <p className={`text-sm ${passwordNote.ok ? "text-green-700" : "text-red-700"}`}>
+                  {passwordNote.text}
                 </p>
               )}
-
-              <div className="mt-6 border-t border-stone-200 pt-4">
-                <p className="text-xs font-medium uppercase tracking-wide text-stone-400">
-                  Admin password
-                </p>
-                <p className="mt-1 text-xs text-stone-500">
-                  Set (or change) the password you use to sign in on this page.
-                </p>
-                <form onSubmit={savePassword} className="mt-2 flex gap-2">
-                  <input
-                    type="password"
-                    autoComplete="new-password"
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    placeholder="New password"
-                    className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm outline-none focus:border-stone-500"
-                  />
-                  <button
-                    type="submit"
-                    disabled={busy || newPassword === ""}
-                    className="rounded-lg border border-stone-300 bg-white px-4 py-2 text-sm hover:bg-stone-100 disabled:opacity-50"
-                  >
-                    Save
-                  </button>
-                </form>
-                {passwordNote && (
-                  <p
-                    className={`mt-2 text-xs ${passwordNote.ok ? "text-green-700" : "text-amber-700"}`}
-                  >
-                    {passwordNote.text}
-                  </p>
-                )}
-              </div>
-
-              {invites.length > 0 && (
-                <div className="mt-6 border-t border-stone-200 pt-4">
-                  <p className="text-xs font-medium uppercase tracking-wide text-stone-400">
-                    Invited students
-                  </p>
-                  <ul className="mt-2 max-h-72 space-y-1.5 overflow-y-auto text-sm">
-                    {invites.map((invite) => (
-                      <li
-                        key={invite.email}
-                        className="flex items-center justify-between gap-2 text-stone-700"
-                      >
-                        <span className="min-w-0 truncate">
-                          <span
-                            className={invite.suspended ? "text-stone-400 line-through" : ""}
-                          >
-                            {invite.email}
-                          </span>
-                          {invite.suspended && (
-                            <span className="ml-1.5 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-800">
-                              Suspended
-                            </span>
-                          )}
-                          {!invite.suspended && !invite.accepted && (
-                            <span
-                              title="The sign-in email went out but the link has never been used — ask the student to check junk/quarantine, or re-invite to send a fresh link."
-                              className="ml-1.5 rounded bg-stone-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-stone-500"
-                            >
-                              Link not used yet
-                            </span>
-                          )}
-                        </span>
-                        <span className="flex shrink-0 items-center gap-1.5">
-                          {/* The date is context, not a control — phones give
-                              the room to the buttons instead. */}
-                          <span className="hidden text-xs text-stone-400 sm:inline">
-                            {new Date(invite.created_at).toLocaleDateString()}
-                          </span>
-                          <button
-                            onClick={() => setSuspended(invite.email, !invite.suspended)}
-                            disabled={busy || !invite.registered}
-                            title={
-                              !invite.registered
-                                ? "This student has not signed in yet, so there is no account to suspend"
-                                : invite.suspended
-                                  ? "Give this student access again"
-                                  : "Pause access — the account and all their work are kept"
-                            }
-                            className={[
-                              "rounded border px-2 py-0.5 text-xs disabled:opacity-40",
-                              invite.suspended
-                                ? "border-green-300 text-green-700 hover:bg-green-50"
-                                : "border-stone-300 text-stone-600 hover:border-amber-400 hover:bg-amber-50 hover:text-amber-800",
-                            ].join(" ")}
-                          >
-                            {invite.suspended ? "Restore" : "Suspend"}
-                          </button>
-                          <button
-                            onClick={() => remove(invite.email)}
-                            disabled={busy}
-                            title="Delete this student and all their data permanently"
-                            className="rounded border border-stone-300 px-2 py-0.5 text-xs text-stone-600 hover:border-red-400 hover:bg-red-50 hover:text-red-700 disabled:opacity-40"
-                          >
-                            Remove
-                          </button>
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                  <p className="mt-2 text-xs text-stone-400">
-                    Suspend pauses access and keeps everything. Remove deletes
-                    the student and their work permanently.
-                  </p>
-                </div>
-              )}
-
-              <div className="mt-8 border-t border-stone-200 pt-6">
-                <h2 className="text-sm font-semibold text-stone-800">
-                  Shared library review
-                </h2>
-                <p className="mt-1 text-xs leading-relaxed text-stone-500">
-                  Files students offered to the shared library. Approving one
-                  lets ChatTobira teach from it and quote it to{" "}
-                  <strong>every student</strong>, so read it first — a
-                  worksheet with the student&apos;s own wrong answers would be
-                  taught as fact. Until then it stays private to whoever
-                  uploaded it.
-                </p>
-
-                {queue.length === 0 ? (
-                  <p className="mt-3 text-sm text-stone-500">
-                    Nothing waiting for review.
-                  </p>
-                ) : (
-                  <ul className="mt-3 space-y-2">
-                    {queue.map((item) => (
-                      <li
-                        key={item.id}
-                        className="rounded-lg border border-stone-200 bg-white p-3"
-                      >
-                        <div className="flex flex-wrap items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-medium text-stone-800">
-                              {item.filename}
-                            </p>
-                            <p className="mt-0.5 text-xs text-stone-500">
-                              {item.uploader} · {Math.round(item.size_bytes / 1024)} KB
-                              {item.level ? ` · ${item.level}` : ""}
-                              {item.topic ? ` · ${item.topic}` : ""}
-                            </p>
-                            {item.destination && (
-                              <p className="mt-0.5 truncate font-mono text-[11px] text-stone-400">
-                                {item.destination}
-                              </p>
-                            )}
-                          </div>
-                          <span className="flex shrink-0 gap-1.5">
-                            <button
-                              onClick={() =>
-                                setExpanded(expanded === item.id ? null : item.id)
-                              }
-                              className="rounded border border-stone-300 px-2 py-0.5 text-xs text-stone-600 hover:bg-stone-100"
-                            >
-                              {expanded === item.id ? "Hide" : "Read"}
-                            </button>
-                            {item.status === "submitted" ? (
-                              <>
-                                <button
-                                  onClick={() => void review(item.id, "approve")}
-                                  disabled={busy}
-                                  className="rounded border border-stone-300 px-2 py-0.5 text-xs text-stone-700 hover:border-green-500 hover:bg-green-50 hover:text-green-800 disabled:opacity-40"
-                                >
-                                  Approve
-                                </button>
-                                <button
-                                  onClick={() => void review(item.id, "reject")}
-                                  disabled={busy}
-                                  className="rounded border border-stone-300 px-2 py-0.5 text-xs text-stone-600 hover:border-red-400 hover:bg-red-50 hover:text-red-700 disabled:opacity-40"
-                                >
-                                  Reject
-                                </button>
-                              </>
-                            ) : (
-                              <span className="rounded bg-stone-100 px-2 py-0.5 text-xs text-stone-500">
-                                approved — awaiting ingest
-                              </span>
-                            )}
-                          </span>
-                        </div>
-                        {expanded === item.id && (
-                          <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-stone-50 p-2 text-[11px] leading-relaxed text-stone-700">
-                            {item.preview || "(nothing was extracted from this file)"}
-                          </pre>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                <p className="mt-2 text-xs text-stone-400">
-                  Approved files enter the shared corpus on the next{" "}
-                  <code className="font-mono">ingest uploads</code> run.
-                </p>
-              </div>
-            </>
-          )}
+            </form>
+          </Card>
         </div>
       </div>
-      </main>
+    </AdminShell>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  href,
+  tone = "plain",
+}: {
+  label: string;
+  value: number | undefined;
+  href: string;
+  tone?: "plain" | "warn";
+}) {
+  return (
+    <Link
+      href={href}
+      className="rounded-2xl border border-stone-200 bg-white px-4 py-3 shadow-sm hover:border-stone-300"
+    >
+      <p className="text-xs uppercase tracking-wide text-stone-400">{label}</p>
+      {value === undefined ? (
+        <span
+          role="status"
+          aria-label={`Loading ${label}`}
+          className="mt-1.5 block h-7 w-10 animate-pulse rounded bg-stone-100 motion-reduce:animate-none"
+        />
+      ) : (
+        <p
+          className={`mt-0.5 text-2xl font-semibold ${
+            tone === "warn" ? "text-amber-700" : "text-stone-900"
+          }`}
+        >
+          {value}
+        </p>
+      )}
+    </Link>
+  );
+}
+
+function Figure({ label, value }: { label: string; value: number | undefined }) {
+  return (
+    <div className="bg-white px-4 py-3">
+      <dt className="text-xs text-stone-500">{label}</dt>
+      <dd className="mt-0.5 font-semibold text-stone-900">
+        {value === undefined ? (
+          <span className="block h-5 w-12 animate-pulse rounded bg-stone-100 motion-reduce:animate-none" />
+        ) : (
+          value.toLocaleString()
+        )}
+      </dd>
     </div>
   );
 }
