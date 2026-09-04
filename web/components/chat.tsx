@@ -3,7 +3,7 @@
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import Link from "next/link";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Answer } from "@/components/answer";
 import { FeedbackButtons } from "@/components/feedback-buttons";
@@ -18,6 +18,43 @@ interface MessageMeta {
   citations?: Citation[];
   model?: string;
   conversationId?: number;
+}
+
+/** What the student sees between pressing Send and the first word arriving.
+ *
+ * That gap is not instant — the question is embedded, the corpus is searched
+ * across every book, and only then does a model start writing — and the chat
+ * used to show nothing at all for it, which reads as a broken app rather than
+ * a working one. The label says what is actually happening, and moves on when
+ * the work does. */
+function Thinking() {
+  const [phase, setPhase] = useState(0);
+
+  useEffect(() => {
+    // Long enough that a fast answer never shows the second label; short
+    // enough that a slow one does not sit under a stale word.
+    const timer = setTimeout(() => setPhase(1), 1800);
+    return () => clearTimeout(timer);
+  }, []);
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="flex max-w-[95%] items-center gap-2.5 rounded-2xl rounded-bl-sm border border-stone-200 bg-white px-4 py-3 text-sm text-stone-500 shadow-sm"
+    >
+      <span className="inline-flex gap-1" aria-hidden="true">
+        {[0, 1, 2].map((dot) => (
+          <span
+            key={dot}
+            className="h-1.5 w-1.5 animate-bounce rounded-full bg-stone-400 motion-reduce:animate-none"
+            style={{ animationDelay: `${dot * 0.15}s` }}
+          />
+        ))}
+      </span>
+      {phase === 0 ? "Looking through your course material…" : "Writing your answer…"}
+    </div>
+  );
 }
 
 export function Chat({
@@ -61,6 +98,11 @@ export function Chat({
   });
 
   const busy = status === "submitted" || status === "streaming";
+  const last = messages.at(-1);
+  const answerStarted =
+    last?.role === "assistant" &&
+    last.parts.some((part) => part.type === "text" && part.text.length > 0);
+  const pending = busy && !answerStarted;
   const trialExhausted =
     !authenticated && /trial_exhausted/.test(error?.message ?? "");
 
@@ -151,6 +193,8 @@ export function Chat({
             </div>
           );
         })}
+
+        {pending && <Thinking />}
 
         {error && !trialExhausted && (
           <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
