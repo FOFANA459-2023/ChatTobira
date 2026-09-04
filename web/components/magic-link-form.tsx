@@ -1,13 +1,21 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { isAdminEmail } from "@/lib/admin";
 import { EMAIL_SHAPE, normalizeEmail } from "@/lib/email";
 import { createClient } from "@/lib/supabase/client";
 
-type Status = "idle" | "sending" | "sent" | "not_invited" | "admin" | "bad_email" | "error";
+type Status =
+  | "idle"
+  | "sending"
+  | "sent"
+  | "not_invited"
+  | "admin"
+  | "bad_email"
+  | "cooldown"
+  | "error";
 
 /** Email → magic-link form, shared by the login page and the chat's
  * out-of-trial panel. The admin email is refused here: the admin account
@@ -22,6 +30,16 @@ export function MagicLinkForm({
 }) {
   const [email, setEmail] = useState("");
   const [status, setStatus] = useState<Status>("idle");
+  /** Seconds until another link can be requested for this address. Supabase
+   * refuses a second send inside its window, and a student who is told
+   * nothing simply presses the button again and again. */
+  const [wait, setWait] = useState(0);
+
+  useEffect(() => {
+    if (wait <= 0) return;
+    const timer = setTimeout(() => setWait((seconds) => seconds - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [wait]);
 
   async function sendLink(event: React.FormEvent) {
     event.preventDefault();
@@ -50,6 +68,15 @@ export function MagicLinkForm({
       } else if (/database error|not_invited/i.test(error.message)) {
         // The allowlist trigger rejected the signup inside auth.users.
         setStatus("not_invited");
+      } else if (
+        error.status === 429 ||
+        /after (\d+) seconds?|rate limit|too many requests/i.test(error.message)
+      ) {
+        // A link is already in flight. Saying so — with the number of seconds
+        // — is the difference between waiting and hammering the button.
+        const seconds = /after (\d+) seconds?/i.exec(error.message)?.[1];
+        setWait(seconds ? Number(seconds) : 60);
+        setStatus("cooldown");
       } else {
         setStatus("error");
       }
@@ -78,10 +105,14 @@ export function MagicLinkForm({
         />
         <button
           type="submit"
-          disabled={disabled || status === "sending"}
+          disabled={disabled || status === "sending" || wait > 0}
           className="w-full rounded-lg bg-stone-900 px-3 py-2 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
         >
-          {status === "sending" ? "Sending…" : "Send sign-in link"}
+          {status === "sending"
+            ? "Sending your link…"
+            : wait > 0
+              ? `Try again in ${wait}s`
+              : "Send sign-in link"}
         </button>
       </form>
 
@@ -89,6 +120,12 @@ export function MagicLinkForm({
         <p className="mt-4 text-sm text-green-700">
           Your sign-in link is on its way — check your inbox. The link works
           once and expires in one hour.
+        </p>
+      )}
+      {status === "cooldown" && (
+        <p className="mt-4 text-sm text-stone-600">
+          A sign-in link was just sent to this address — check your inbox and spam folder.
+          You can ask for another in {wait > 0 ? `${wait} seconds` : "a moment"}.
         </p>
       )}
       {status === "not_invited" && (
