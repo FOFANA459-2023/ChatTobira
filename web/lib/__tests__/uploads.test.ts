@@ -133,9 +133,14 @@ describe("contextBlock with an attached upload", () => {
       [{ filename: "my-worksheet.pdf", extracted: "student worksheet content" }],
     );
     expect(block).toContain("[your upload] my-worksheet.pdf");
-    expect(block).toContain("[citable] Foundation 3 Textbook");
+    // The textbook is headed the way a student would name it — a header
+    // reading "Source 2 [citable]" is a label the model copies into its
+    // answer, which is exactly what students should never see.
+    expect(block).toContain("Foundation 3 Textbook, p. 104");
+    expect(block).not.toContain("[citable]");
+    expect(block).not.toContain("Source 1");
     // The upload leads: it is what the student asked about.
-    expect(block.indexOf("[your upload]")).toBeLessThan(block.indexOf("[citable]"));
+    expect(block.indexOf("[your upload]")).toBeLessThan(block.indexOf("Foundation 3"));
   });
 
   it("caps an upload so a long scan cannot crowd out the textbook", () => {
