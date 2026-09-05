@@ -21,10 +21,11 @@ pipeline, retrieval, model serving, auth, admin tooling, CI/CD.
   course's real test sheets, scoped to a topic ("test me on Topic 6"), graded
   instantly, with a study plan pointing at the pages to review. Furigana
   appears only on kanji the student hasn't been taught yet. The format is not
-  guesswork: the papers students actually sat are in the corpus, and each
-  generated paper is modelled on the real ones for that level — their section
-  order, their instruction lines, their distractors — while every question
-  itself is new and drawn from the textbook.
+  guesswork: 40 sat papers are in the corpus, and their section order,
+  instruction lines, option counts and mark allocations were tabulated into a
+  format spec the generator is planned from — while every question itself is
+  new and drawn from the textbook. A paper the student has already been asked
+  is not asked again.
 - **Invite-only access** — the admin invites students by email; they sign in
   with a magic link. No passwords for students, no public signup.
 
@@ -57,6 +58,21 @@ ask the same ~30 questions), per-student daily quotas, and a provider cascade
 (Groq free tier → DeepSeek prepaid → Gemini last) that degrades gracefully as
 each tier's limit is hit. The transcription pipeline is checkpointed per page
 so a rate-limited run resumes tomorrow without re-paying for a single page.
+
+**The paper I thought the course set was not the paper it sets.** The practice
+tests were modelled on the course's format from memory — four sections, four
+lettered options a question — and once the real papers were in the corpus I
+tabulated all 40 of them and found almost none of that was true. Across every
+paper the course never once prints A) B) C) D): it prints two or three options
+*inside* the sentence for the student to circle (「写真部は週 ( は / に / で )
+2かい かつどうします」), or three under a〜c. Papers run to three to seven
+sections, not four. The signature item at both levels is a shared word bank
+whose entries must be conjugated to fit and may each be used once. Marks are
+printed per section and differ by level — 1 mark an item in Foundation 2, 2 or
+3 in Foundation 3. Even the instruction language moves: Foundation 2 is in
+English up to Topic 6 and Japanese from Topic 7. That reading now lives in
+`web/lib/paper-format.ts` as data, and a paper is planned from it rather than
+from a template.
 
 **The past papers were somebody's homework.** The only copies of the course's
 past papers are phone scans of a marked script — a classmate's name across the

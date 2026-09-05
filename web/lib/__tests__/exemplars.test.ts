@@ -64,13 +64,18 @@ describe("selectExemplars", () => {
     expect(firstKanji.content).toBe(KANJI_PAGE);
   });
 
-  it("prefers the paper for the topic the test is scoped to", () => {
+  it("shows a paper from a topic OTHER than the one being tested", () => {
+    // Counter-intuitive, and measured. Showing the generator the Topic 11
+    // paper while asking it to write a Topic 11 test produced six copied
+    // questions out of sixteen — enough to fail the length gate. The format
+    // of these papers does not vary by topic, so a neighbouring topic's paper
+    // teaches the same form with nothing on-topic to lift.
     const chunks = [
-      paper(GRAMMAR_PAGE, { paper_title: "文法クイズ", topic: "T6", exam_term: "24秋" }),
       paper(GRAMMAR_PAGE, { paper_title: "文法クイズ", topic: "T9", exam_term: "24秋" }),
+      paper(GRAMMAR_PAGE, { paper_title: "文法クイズ", topic: "T6", exam_term: "24秋" }),
     ];
     const [first] = selectExemplars(chunks, "grammar", 9, 1);
-    expect(paperIdentity(first).topic).toBe("T9");
+    expect(paperIdentity(first).topic).toBe("T6");
   });
 
   it("skips a page with no instruction line", () => {

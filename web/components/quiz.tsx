@@ -15,6 +15,7 @@ import {
   type Quiz,
   type QuizItem,
   type QuizKind,
+  type QuizSection,
 } from "@/lib/quiz";
 
 /** Japanese text with 【 】-marked words rendered as real underlines — the
@@ -62,7 +63,18 @@ const KIND_INFO: Record<
 };
 
 // Section numerals as they appear on the paper.
-const ROMAN = ["I", "II", "III", "IV"];
+const ROMAN = ["I", "II", "III", "IV", "V"];
+
+/** Option labels as the papers print them: a. b. c., never A) B) C) D).
+ * Across the 40 sat papers in the corpus, every listed-option question is
+ * lettered lower-case with a full stop. */
+const LETTERS = ["a", "b", "c", "d", "e"];
+
+/** The mark line printed beside a section instruction: (1×5), (2点×5). */
+function markLine(marks: number | undefined, items: number): string {
+  const each = marks ?? 1;
+  return each === 1 ? `(1×${items})` : `(${each}点×${items})`;
+}
 
 export function QuizView({
   initialKind = "grammar",
@@ -352,11 +364,18 @@ export function QuizView({
                 .reduce((n, s) => n + s.items.length, 0);
               return (
                 <section key={sectionIndex}>
+                  {/* The papers head each section with its numeral, the
+                      instruction, and the marks it carries — 「I. 正しいほうを
+                      選んで、〇を書いてください。(1×5)」 — so the student can
+                      see what the section is worth before answering it. */}
                   <div className="border-b-2 border-stone-800 pb-2">
                     <p className="font-semibold leading-8">
-                      問題{ROMAN[sectionIndex] ?? sectionIndex + 1}{" "}
+                      {ROMAN[sectionIndex] ?? sectionIndex + 1}.{" "}
                       <span lang="ja" className="font-medium">
                         <JaText text={section.instruction_ja} />
+                      </span>{" "}
+                      <span className="font-normal text-stone-500">
+                        {markLine(section.marks, section.items.length)}
                       </span>
                     </p>
                     <p className="mt-0.5 text-xs text-stone-500">{section.instruction_en}</p>
@@ -367,21 +386,33 @@ export function QuizView({
                       </p>
                     )}
                   </div>
-                  {section.passage && (
-                    <div
-                      lang="ja"
-                      className="mt-4 rounded-2xl border border-stone-200 bg-white p-5 text-base leading-8 shadow-sm"
-                    >
-                      <JaText text={section.passage} />
-                    </div>
-                  )}
+                  {/* A passage shared with the section above is printed once
+                      and referred to, exactly as the papers do: the ○× section
+                      of the Topic 16 paper opens 「上の文について」 rather than
+                      reprinting the text its cloze was built on. */}
+                  {section.passage &&
+                    (section.passage === quiz.sections[sectionIndex - 1]?.passage ? (
+                      <p className="mt-3 text-sm text-stone-500">
+                        <span lang="ja">上の文</span> — the passage above.
+                      </p>
+                    ) : (
+                      <div
+                        lang="ja"
+                        className="mt-4 rounded-2xl border border-stone-200 bg-white p-5 text-base leading-8 shadow-sm"
+                      >
+                        <JaText text={section.passage} />
+                      </div>
+                    ))}
                   <div className="mt-4 space-y-4">
                     {section.items.map((item, itemIndex) => {
                       const index = offset + itemIndex;
                       return (
                         <QuizItemView
                           key={index}
-                          index={index}
+                          // Numbered within the section, as the papers do:
+                          // every section restarts at (1).
+                          label={itemIndex + 1}
+                          form={section.form}
                           item={item}
                           given={answers[index] ?? ""}
                           checked={checked}
@@ -392,6 +423,22 @@ export function QuizView({
                       );
                     })}
                   </div>
+                  {/* The word box, printed under the items exactly as the
+                      papers print it. It is part of the question: without it
+                      the section cannot be answered. */}
+                  {section.word_bank && section.word_bank.length > 0 && (
+                    <div
+                      lang="ja"
+                      className="mt-4 rounded-xl border-2 border-stone-800 bg-white px-4 py-3 text-center text-base leading-9"
+                    >
+                      {section.word_bank.map((word, wordIndex) => (
+                        <span key={word}>
+                          {wordIndex > 0 && <span className="text-stone-400"> ・ </span>}
+                          <JaText text={word} />
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </section>
               );
             })}
@@ -572,22 +619,80 @@ function ScoreCard({
 }
 
 // Choice markers as printed on the papers.
-const CIRCLED = ["①", "②", "③", "④"];
+/** ① ② ③ ④ numbers the ○× statements, which is what the papers use them
+ * for — never as option labels. */
+const CIRCLED = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧"];
+
+/** The options printed inside the sentence, as the papers set them.
+ *
+ * 「写真部は週 ( は / に / で ) 2かい かつどうします。」 — the commonest
+ * choice question in the whole corpus, and the one the app could not render
+ * at all. The student circles one of the options where it stands rather than
+ * picking from a list underneath, so the choice has to sit in the text. */
+function BracketChoice({
+  choices,
+  given,
+  answer,
+  checked,
+  onAnswer,
+}: {
+  choices: string[];
+  given: string;
+  answer: string;
+  checked: boolean;
+  onAnswer: (value: string) => void;
+}) {
+  return (
+    <span lang="ja" className="whitespace-nowrap">
+      <span className="text-stone-400">（</span>
+      {choices.map((choice, index) => (
+        <span key={choice}>
+          {index > 0 && <span className="px-0.5 text-stone-300">/</span>}
+          <button
+            onClick={() => !checked && onAnswer(choice)}
+            aria-pressed={given === choice}
+            className={[
+              "rounded-full px-2 py-0.5 leading-7",
+              given === choice ? "bg-stone-900 text-white" : "hover:bg-stone-100",
+              // The circle the student would draw on paper.
+              checked && choice === answer
+                ? "!bg-green-50 !text-green-900 ring-2 ring-green-600"
+                : "",
+              checked && given === choice && choice !== answer
+                ? "!bg-red-50 !text-red-900 line-through"
+                : "",
+            ].join(" ")}
+          >
+            <JaText text={choice} />
+          </button>
+        </span>
+      ))}
+      <span className="text-stone-400">）</span>
+    </span>
+  );
+}
 
 function QuizItemView({
-  index,
+  label,
+  form,
   item,
   given,
   checked,
   onAnswer,
 }: {
-  index: number;
+  /** The number printed beside the item, which restarts each section. */
+  label: number;
+  form?: QuizSection["form"];
   item: QuizItem;
   given: string;
   checked: boolean;
   onAnswer: (value: string) => void;
 }) {
   const correct = checked && isCorrect(item, given);
+  const choices = item.choices ?? [];
+  // ○× statements are numbered ① ② ③ on the papers; everything else (1) (2).
+  const isMaruBatsu = form === "maru_batsu" || item.type === "true_false";
+  const number = isMaruBatsu ? (CIRCLED[label - 1] ?? `(${label})`) : `(${label})`;
 
   return (
     <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm">
@@ -597,22 +702,50 @@ function QuizItemView({
             {correct ? "○" : "✕"}
           </span>
         )}
-        ({index + 1}) <JaText text={item.question} />
+        {number} <JaText text={item.question} />
+        {/* An in-place choice belongs in the sentence, not under it. */}
+        {form === "bracket" && choices.length > 0 && !item.sentence && (
+          <>
+            {" "}
+            <BracketChoice
+              choices={choices}
+              given={given}
+              answer={item.answer}
+              checked={checked}
+              onAnswer={onAnswer}
+            />
+          </>
+        )}
       </p>
       {item.sentence && (
         <p lang="ja" className="mt-2 text-base leading-8">
           <JaText text={item.sentence} />
+          {form === "bracket" && choices.length > 0 && (
+            <>
+              {" "}
+              <BracketChoice
+                choices={choices}
+                given={given}
+                answer={item.answer}
+                checked={checked}
+                onAnswer={onAnswer}
+              />
+            </>
+          )}
         </p>
       )}
 
-      {item.type === "multiple_choice" && item.choices ? (
-        <div className="mt-3 grid gap-2 sm:grid-cols-2">
-          {item.choices.map((choice, choiceIndex) => (
+      {form !== "bracket" && item.type === "multiple_choice" && choices.length > 0 ? (
+        // Listed options are lettered a. b. c. — the only labelling the sat
+        // papers use for them. Stacked rather than gridded, because the
+        // options are whole sentences on the a〜c comprehension sections.
+        <div className="mt-3 space-y-1.5">
+          {choices.map((choice, choiceIndex) => (
             <button
               key={choice}
               onClick={() => !checked && onAnswer(choice)}
               className={[
-                "rounded-lg border px-3 py-2 text-left text-sm leading-7",
+                "flex w-full items-baseline gap-2 rounded-lg border px-3 py-2 text-left text-sm leading-7",
                 given === choice
                   ? "border-stone-900 bg-stone-900 text-white"
                   : "border-stone-300 bg-white hover:bg-stone-100",
@@ -624,8 +757,10 @@ function QuizItemView({
                   : "",
               ].join(" ")}
             >
-              <span className="mr-1.5 text-stone-400">{CIRCLED[choiceIndex] ?? ""}</span>
-              <JaText text={choice} />
+              <span className="shrink-0 opacity-60">{LETTERS[choiceIndex] ?? ""}.</span>
+              <span>
+                <JaText text={choice} />
+              </span>
             </button>
           ))}
         </div>
