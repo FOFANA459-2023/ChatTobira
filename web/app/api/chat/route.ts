@@ -341,6 +341,7 @@ export async function POST(request: Request) {
     isFollowUp: query.isFollowUp,
     canPointToBook: citations.length > 0,
     hasUploads: attached.length > 0,
+    hasPastPapers: context.some((chunk) => chunk.doc_type === "past_paper"),
   })}\n\n=== SOURCE MATERIAL ===\n${contextBlock(context, attached)}`;
   const modelMessages = await convertToModelMessages(recentTurns(messages));
 

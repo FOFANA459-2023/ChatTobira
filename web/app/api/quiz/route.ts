@@ -9,10 +9,15 @@ import { isProviderDead, noteProviderFailure } from "@/lib/providers";
 import {
   chunksForLesson,
   dedupeQuiz,
+  dropCopiedItems,
+  exemplarProvenance,
   focusTokens,
   lessonByPage,
+  paperIdentity,
   QuizSchema,
   rankChunksByFocus,
+  selectExemplars,
+  type ExemplarChunk,
 } from "@/lib/quiz";
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/server";
 import { serviceClient } from "@/lib/supabase/service";
@@ -241,7 +246,7 @@ export async function POST(request: Request) {
   // server-side so a crafted request cannot test from a handout.
   const { data: doc } = await db
     .from("documents")
-    .select("id, title, is_citable")
+    .select("id, title, is_citable, level")
     .eq("id", documentId)
     .single();
   if (!doc || !doc.is_citable) {
@@ -353,6 +358,54 @@ export async function POST(request: Request) {
     })
     .join("\n\n");
 
+  // ---------------------------------------------------------------------
+  // Exam-style reference: the course's own sat papers, at this book's level.
+  //
+  // Scoped to the level and never wider. A Foundation 2 test modelled on a
+  // Foundation 3 paper would drill the right book in the wrong register —
+  // longer sentences, later grammar in the distractors — which is precisely
+  // the difficulty mismatch these papers exist to fix. A level with no
+  // papers ingested simply gets no block, and the prompt says nothing about
+  // exams at all.
+  // ---------------------------------------------------------------------
+  const level = (doc as { level: string | null }).level;
+  let exemplars: ExemplarChunk[] = [];
+  if (level) {
+    const paperKey = `papers:${level}`;
+    let papers = cachedPool<ExemplarChunk[]>(paperKey);
+    if (!papers) {
+      const { data: paperChunks } = await db
+        .from("chunks")
+        .select("content, metadata, documents!inner(doc_type, level)")
+        .eq("documents.doc_type", "past_paper")
+        .eq("documents.level", level)
+        .limit(300);
+      papers = (paperChunks ?? []) as unknown as ExemplarChunk[];
+      // Remembered even when empty: a level with no past papers should cost
+      // one query per TTL, not one per generated test.
+      rememberPool(paperKey, papers);
+    }
+    // Three pages, capped at roughly one page of text each. The ceiling here
+    // is Groq's free tier at 12k tokens/minute, and Japanese spends close to
+    // a token per character — the textbook sample already costs ~9,000
+    // characters, so this block has to buy its place. Three pages from three
+    // sittings is enough to show the section order, the instruction wording
+    // and the distractor style; a fourth mostly repeats them.
+    exemplars = selectExemplars(papers, kind, contentScope, 3);
+  }
+
+  const styleBlock = exemplars
+    .map((chunk) => {
+      const { topic, examTerm, paperTitle } = paperIdentity(chunk);
+      const header = [examTerm, paperTitle, topic ? `Topic ${topic.slice(1)}` : null]
+        .filter(Boolean)
+        .join(" ");
+      return `--- Past paper${header ? `: ${header}` : ""} ---\n${chunk.content.slice(0, 950)}`;
+    })
+    .join("\n\n");
+
+  const provenance = exemplarProvenance(exemplars);
+
   // The books name their divisions differently: the Foundation volumes are
   // split into "Topic 1, 2, …", the Intermediate Tobira volumes into
   // "Lesson 1, 2, …". Review references must use the word printed in the
@@ -386,15 +439,76 @@ tested (it would give the answer away). The excerpts show the textbook's own
 readings as 漢字《かんじ》 — rewrite them in the （ ） style, subject to the
 rule above.`;
 
+  // The two sources do different jobs and the prompt has to say so, or the
+  // model treats the papers as a question bank: it lifts a sentence off a
+  // past paper, and the student sits a test they have already seen with the
+  // answers already marked on it. Content comes from the book; only the SHAPE
+  // comes from the papers.
+  const styleRules = styleBlock
+    ? `
+=== EXAM-STYLE REFERENCE: REAL PAST PAPERS FROM THIS COURSE ===
+Below are pages from papers students at this level actually sat. They are
+here for FORM ONLY. Study them for:
+- how each section's instruction line is phrased in Japanese, and how the
+  English line under it is worded;
+- which question shapes the course uses, and in what order;
+- how many marks a section carries and how that is printed;
+- how choices are laid out, how word banks are given, how an 例 row shows
+  the expected answer;
+- the length and difficulty of the sentences, and the kind of distractor the
+  course writes — the wrong particle, the wrong form, the similar-looking
+  kanji, the plausible-but-contradicted reading.
+
+Then apply that shape to the TEXTBOOK EXCERPTS. Hard rules:
+- NEVER reuse a sentence, question, word bank or passage from a past paper.
+  Every item you write is new, built from the textbook excerpts. If a past
+  paper tests 〜ことができます with a sentence about ピアノ, you may test
+  〜ことができます — with a different sentence, about something else.
+- Where a past paper below prints the instruction line for a section you are
+  writing, use THAT wording rather than the default given above. It is what
+  the students read on the day.
+- The papers are the model for form and difficulty. They are NOT a source of
+  grammar, vocabulary or facts: where a paper and the textbook excerpts
+  disagree about anything, the textbook is right.
+- A past paper page may show its own marking scheme or blanks. Ignore those;
+  write complete questions with the answers filled into the answer field.
+
+${styleBlock}
+`
+    : "";
+
+  // Only what was actually retrieved may be described. Without this the model
+  // narrates an exam history it inferred — "as in previous final exams" — and
+  // a student has no way to tell that from something the course said.
+  const provenanceRule = styleBlock
+    ? `\nIn scope_description you MAY note in one short clause that the paper follows
+the style of the course's past papers${
+        provenance.terms.length > 0 ? ` (${provenance.terms.join(", ")})` : ""
+      }. Do not claim anything else about the exams: not that a point is
+"commonly tested" or "frequently appears", not a date, not an exam name, not a
+question number, not a mark scheme, unless it is printed in the reference
+pages above. Never mention past papers in a question, a choice, an explanation
+or a review reference.`
+    : `\nSay nothing about past papers, previous exams or how the course tests this
+material: none was retrieved, so anything you said about it would be invented.`;
+
   // Both papers end with the 5-question reading section, like the real ones.
   const reading = 5;
   const perSection = Math.round(count / 3);
   const prompt = `Create a practice test from the textbook excerpts below, all
-from "${doc.title}" — the book the student owns. The paper's format is modelled
-on the course's past test papers, but every question must be drawn from these
-excerpts. This textbook divides its content into ${division}s: write every
-review reference as "${division} N — concept (p. NN)", using the ${division}
-numbers and page numbers as printed in the excerpts.
+from "${doc.title}" — the book the student owns. Every question must be drawn
+from these excerpts. This textbook divides its content into ${division}s: write
+every review reference as "${division} N — concept (p. NN)", using the
+${division} numbers and page numbers as printed in the excerpts.
+${
+  level && level !== "INT"
+    ? `\nThis is a ${
+        level === "F2" ? "Foundation 2" : "Foundation 3"
+      } paper. Stay inside that level: test only grammar and vocabulary present
+in the excerpts below, and never reach for a pattern from a later course
+because it would fit the sentence better.`
+    : ""
+}
 ${furiganaRule}
 Exactly ${count + reading} questions in total — ${perSection} in each of the
 3 non-reading sections, plus exactly 5 in the reading section. Focus on ${
@@ -414,8 +528,21 @@ vocabulary — while staying inside the same material:\n${avoid
           .map((q) => `- ${q.slice(0, 200)}`)
           .join("\n")}`
       : ""
-  }\n\n${sample}`;
-  const system = `${SYSTEM}\n\n${KIND_SPEC[kind]}`;
+  }${provenanceRule}
+${styleRules}
+=== TEXTBOOK EXCERPTS — THE ONLY SOURCE OF CONTENT ===
+${sample}`;
+  // The instruction lines in KIND_SPEC were written by reading the course's
+  // papers by hand. Now that the papers themselves are in the corpus, a
+  // retrieved page is the better authority — it is the wording for this
+  // level and this term, not a transcription of one remembered example.
+  const system = `${SYSTEM}\n\n${KIND_SPEC[kind]}${
+    styleBlock
+      ? `\n\nThe instruction_ja lines given above are defaults. The request below
+includes real past-paper pages: where one prints the instruction line for a
+section you are writing, use that wording instead.`
+      : ""
+  }`;
   const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
   const google = createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY });
 
@@ -457,15 +584,26 @@ vocabulary — while staying inside the same material:\n${avoid
       // better than re-asking the model: it costs no second call, and a
       // 19-question paper with nothing duplicated beats a 20-question paper
       // that asks 食べる twice.
-      const { quiz: paper, removed } = dedupeQuiz(object, kind);
+      const { quiz: deduped, removed } = dedupeQuiz(object, kind);
       if (removed > 0) {
         console.warn(`quiz on ${tier.provider}: dropped ${removed} repeated item(s)`);
+      }
+      // Then: no question may be a past-paper question. The exemplars are
+      // shown as form, and a generator that lifts one has handed the student
+      // back the paper they already sat. Enforced here for the same reason
+      // the repeat check is — the prompt asks, and mostly gets, compliance.
+      const { quiz: paper, removed: copied } = dropCopiedItems(deduped, exemplars);
+      if (copied > 0) {
+        console.warn(`quiz on ${tier.provider}: dropped ${copied} item(s) copied from a past paper`);
       }
 
       // A paper that is schema-valid but far too short is still unusable —
       // seen live: 1 item back from a 9-item request. Let the next tier try.
-      // Counted AFTER dedupe, so a paper that only reached its length by
-      // repeating itself is short, which is what it actually is.
+      // Counted AFTER both filters, so a paper that only reached its length by
+      // repeating itself, or by copying the past paper it was modelled on, is
+      // short — which is what it actually is. This is also what makes the copy
+      // filter self-healing: a wholesale copy fails the gate and the next
+      // provider writes the paper instead.
       const expected = count + reading;
       const produced = paper.sections.reduce((n, s) => n + s.items.length, 0);
       if (produced < Math.ceil(expected * 0.6)) {

@@ -32,6 +32,20 @@ _GRAMMAR_RE = re.compile(r"(?<![A-Za-z])G\s?(\d+(?:[,_\-]\s?\d+)*)\s*(.*)$", re.
 _ANSWER_MARKERS = ("答え", "こたえ", "answer", "answers")
 _KANJI_MARKERS = ("kanji", "漢字", "筆順", "vocabulary")
 _READING_MARKERS = ("reading", "readings", "読み物", "読解")
+# Sat papers from previous terms. They are what the course actually ASKS, as
+# opposed to what it teaches, so they are worth their own type: the quiz
+# generator reads them for question format and difficulty, and a student
+# asking how a pattern is tested wants these pages rather than the textbook's
+# explanation of it. Checked before the answer/kanji/reading markers because a
+# paper is a paper whichever section it happens to be drilling.
+# The Latin markers are word-bounded, so a reading handout about newspapers
+# is not filed as a sat paper. The Japanese ones cannot be: CJK is written
+# without spaces, so there is no word boundary to anchor on.
+_PAST_PAPER_RE = re.compile(
+    r"\b(?:past\s+papers?|papers?|exam(?:ination)?s?|quiz(?:zes)?)\b"
+    r"|クイズ|試験|テスト|期末試験|中間試験",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -121,8 +135,15 @@ def _doc_type_of(rel: str, stem: str, suffix: str, is_citable: bool) -> str:
     low = f"{rel} {stem}".lower()
     if is_citable:
         return "textbook"
-    # Answer keys win over everything: 文法復習シート_T12(答え) is both a grammar
-    # sheet and an answer key, and the answer-key fact is the one that matters.
+    # A sat paper outranks the answer-key marker it usually also carries: a
+    # marked script is both, and "this is how the course tests T8" is the fact
+    # the quiz generator needs. The review sheets keep their own type — none of
+    # them is named for a paper, a quiz, or an exam.
+    if _PAST_PAPER_RE.search(low):
+        return "past_paper"
+    # Answer keys win over everything else: 文法復習シート_T12(答え) is both a
+    # grammar sheet and an answer key, and the answer-key fact is the one that
+    # matters.
     if any(m in low for m in _ANSWER_MARKERS):
         return "answer_key"
     if any(m in low for m in _KANJI_MARKERS):

@@ -20,37 +20,44 @@
 
 const TTL_MS = 10 * 60 * 1000;
 
-/** Two books is the working set: a student sits tests from one textbook, and
- * the second slot covers the one they just switched from. A third would cost
- * another half megabyte of isolate memory to serve a case that does not
- * happen. */
-const MAX_DOCUMENTS = 2;
+/** Two books is the student working set: they sit tests from one textbook,
+ * and the second slot covers the one they just switched from. Two more slots
+ * cover the past-paper exemplar pools, which are keyed by level rather than
+ * by document and are read on every generation for that level — evicting one
+ * to make room for a book would mean re-reading it on the next test. */
+const MAX_ENTRIES = 4;
 
 interface Entry<T> {
   value: T;
   storedAt: number;
 }
 
-const entries = new Map<number, Entry<unknown>>();
+/** Keys are a document id for a book's chunk pool, or a string like
+ * "papers:F3" for a level's past-paper exemplars. One map rather than two
+ * because they share an eviction budget and a staleness rule: both are
+ * course material that changes only when `ingest push` runs. */
+export type PoolKey = number | string;
 
-/** The cached pool for a document, or null when it is absent or stale. */
-export function cachedPool<T>(documentId: number, now = Date.now()): T | null {
-  const entry = entries.get(documentId);
+const entries = new Map<PoolKey, Entry<unknown>>();
+
+/** The cached pool for a key, or null when it is absent or stale. */
+export function cachedPool<T>(key: PoolKey, now = Date.now()): T | null {
+  const entry = entries.get(key);
   if (!entry) return null;
   if (now - entry.storedAt > TTL_MS) {
-    entries.delete(documentId);
+    entries.delete(key);
     return null;
   }
   // Refresh recency: the map's insertion order is what eviction reads.
-  entries.delete(documentId);
-  entries.set(documentId, entry);
+  entries.delete(key);
+  entries.set(key, entry);
   return entry.value as T;
 }
 
-export function rememberPool<T>(documentId: number, value: T, now = Date.now()): void {
-  entries.delete(documentId);
-  entries.set(documentId, { value, storedAt: now });
-  while (entries.size > MAX_DOCUMENTS) {
+export function rememberPool<T>(key: PoolKey, value: T, now = Date.now()): void {
+  entries.delete(key);
+  entries.set(key, { value, storedAt: now });
+  while (entries.size > MAX_ENTRIES) {
     // Least recently used, which insertion order makes the first key.
     const oldest = entries.keys().next();
     if (oldest.done) break;

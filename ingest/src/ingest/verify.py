@@ -11,8 +11,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .japanese import has_cjk
+from .redact import find_identity
 
 MIN_CJK_RATIO = 0.95
+
+# Past papers: the leak tripwire.
+#
+# The sat papers are scans of one student's marked script. Two passes already
+# try to keep their identity out of the corpus — the transcription prompt, and
+# the deterministic redaction the chunker runs over what the prompt returned.
+# This is the third, and the only one that runs against the text that actually
+# reached the database. It exists because the first two are the kind of thing
+# that fails silently: the corpus keeps working, and simply answers a
+# classmate's question with a named student's grade.
+#
+# Patterns are shared with the redactor rather than restated here. A detector
+# that has drifted from the redactor is worse than no detector, because it
+# certifies exactly what the redactor stopped catching.
 
 
 @dataclass
@@ -95,6 +110,67 @@ def check_documents(
             not missing_pages,
             f"{len(missing_pages)} textbooks have no printed page numbers; "
             f"citations would reference the PDF index instead of the book",
+        )
+    )
+
+    return checks
+
+
+def check_past_papers(
+    documents: list[dict], chunks: list[dict], chunk_counts: dict[int, int]
+) -> list[Check]:
+    """Checks that only apply to the sat papers.
+
+    Returns nothing at all when no past paper is indexed: a corpus without
+    them is a perfectly valid corpus, and a check that fails for everyone who
+    has not ingested one is a check people learn to ignore.
+    """
+    papers = [d for d in documents if d.get("doc_type") == "past_paper"]
+    if not papers:
+        return []
+
+    paper_ids = {d["id"] for d in papers}
+    paper_chunks = [c for c in chunks if c.get("document_id") in paper_ids]
+    checks: list[Check] = []
+
+    # The one that matters. Reported with the offending text so it can be
+    # judged rather than guessed at — a false positive on a date in a reading
+    # passage looks very different from a student's name.
+    leaks: list[str] = []
+    for chunk in paper_chunks:
+        leaks += [f"{name}: {found!r}" for name, found in find_identity(chunk.get("content", ""))]
+    checks.append(
+        Check(
+            "past_paper_no_pii",
+            not leaks,
+            f"{len(leaks)} chunk(s) look like they carry a student's identity or "
+            f"marks: {leaks[:3]}. These scans are one named student's script; "
+            f"their name, ID and score must not enter a corpus the whole cohort "
+            f"can query."
+            if leaks
+            else f"{len(paper_chunks)} past-paper chunks carry no name, ID or mark",
+        )
+    )
+
+    # A paper whose topic never made it off the page is retrievable only by
+    # wording, so "test me on Topic 8" cannot reach it.
+    with_topic = sum(1 for c in paper_chunks if (c.get("metadata") or {}).get("topic"))
+    checks.append(
+        Check(
+            "past_paper_topics",
+            with_topic > 0,
+            f"{with_topic}/{len(paper_chunks)} past-paper chunks know which topic "
+            f"they test; with none, a topic-scoped test cannot reach a paper",
+        )
+    )
+
+    barren = [d["path"] for d in papers if chunk_counts.get(d["id"], 0) == 0]
+    checks.append(
+        Check(
+            "past_papers_indexed",
+            not barren,
+            f"{len(papers) - len(barren)}/{len(papers)} past papers are indexed"
+            + (f"; empty: {barren}" if barren else ""),
         )
     )
 

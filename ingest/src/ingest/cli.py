@@ -17,12 +17,18 @@ from rich.console import Console
 from rich.table import Table
 
 from . import render, store, verify
-from .chunker import chunk_document
+from .chunker import carry_paper_headers, chunk_document
 from .config import CONFIG
 from .discover import SourceDoc, discover
 from .embed import embed_documents
 from .manifest import Manifest
-from .transcribe import DailyQuotaError, PageText, TransientVisionError, transcribe
+from .transcribe import (
+    DailyQuotaError,
+    PageText,
+    TransientVisionError,
+    profile_for,
+    transcribe,
+)
 
 app = typer.Typer(add_completion=False, help="ChatTobira ingestion pipeline")
 console = Console()
@@ -117,7 +123,14 @@ def cmd_transcribe(
             console.print(f"[dim]resume[/dim]  {doc.path}: {len(done_pages)} pages checkpointed")
 
         remaining = images[len(done_pages) :]
-        console.print(f"[cyan]vision[/cyan]  {doc.path} ({len(remaining)}/{len(images)} pages)")
+        # Past papers are read with their own prompt: they are marked student
+        # scripts, so the printed paper is transcribed and the handwriting and
+        # the student's identity are left on the page.
+        profile = profile_for(doc.doc_type)
+        console.print(
+            f"[cyan]vision[/cyan]  {doc.path} ({len(remaining)}/{len(images)} pages)"
+            + (" [dim]past-paper prompt[/dim]" if doc.doc_type == "past_paper" else "")
+        )
 
         unreadable: list[str] = []
 
@@ -130,6 +143,7 @@ def cmd_transcribe(
                     seen.append(message),
                     console.print(f"[yellow]warn[/yellow]    {message}"),
                 )[0],
+                profile=profile,
             )
         except DailyQuotaError:
             console.print(
@@ -158,18 +172,55 @@ def cmd_transcribe(
             )
 
 
+def _page_topics(pages: list[PageText]) -> list[str]:
+    """Every course topic printed across a document's pages, in order.
+
+    Only past papers populate this: it is read off the page headers by the
+    vision model, and it is what a compilation of a term's papers has instead
+    of a topic in its filename. Headers are carried forward first, exactly as
+    the chunker does, so the two agree about which topic a continuation page
+    belongs to.
+    """
+    seen = {f"T{p.topic}" for p in carry_paper_headers(pages) if p.topic}
+    return sorted(seen, key=lambda t: int(t[1:]))
+
+
 @app.command("push")
 def cmd_push(
     only: str = typer.Option("", help="Substring filter on the document path"),
+    force: bool = typer.Option(
+        False, help="Re-embed even when the stored document is already up to date"
+    ),
 ) -> None:
-    """Chunk, embed, and upsert transcribed documents into Supabase."""
+    """Chunk, embed, and upsert transcribed documents into Supabase.
+
+    Idempotent in two layers. The document row is keyed on its path and its
+    chunks are replaced wholesale, so running this twice can never leave two
+    copies of a page in the index. On top of that, a document whose stored
+    content_sha already matches the file on disk is skipped outright — the
+    replace would have produced identical rows, and the embeddings it would
+    have paid for are the scarce thing here (one key, 1,000 embeddings a day).
+    """
     docs = [d for d in discover() if not only or only.lower() in d.path.lower()]
     total = 0
+    skipped = 0
+
+    with store.connect() as conn:
+        stored = store.fetch_document_shas(conn)
 
     for doc in docs:
         pages = _load_pages(doc)
         if pages is None:
             console.print(f"[yellow]skip[/yellow]    {doc.path} (not transcribed yet)")
+            continue
+
+        # Same bytes, already chunked and embedded under this path: nothing to
+        # do. --force is the escape hatch for the case the hash cannot see —
+        # a change to the chunker or the embedding model rather than to the
+        # source file.
+        if not force and stored.get(doc.path) == (doc.content_sha, len(pages)):
+            console.print(f"[dim]current[/dim] {doc.path} (unchanged since last push)")
+            skipped += 1
             continue
 
         chunks = chunk_document(doc, pages)
@@ -180,14 +231,21 @@ def cmd_push(
         console.print(f"[cyan]embed[/cyan]   {doc.path} ({len(chunks)} chunks)")
         vectors = embed_documents([c.metadata["embed_text"] for c in chunks])
 
+        topics = _page_topics(pages) or None
         with store.connect() as conn:
-            document_id = store.upsert_document(conn, doc, page_count=len(pages))
+            document_id = store.upsert_document(conn, doc, page_count=len(pages), topics=topics)
             written = store.replace_chunks(conn, document_id, chunks, vectors)
             conn.commit()
         total += written
-        console.print(f"[green]stored[/green]  {doc.path}: {written} chunks")
+        console.print(
+            f"[green]stored[/green]  {doc.path}: {written} chunks"
+            + (f" [dim]topics {','.join(topics)}[/dim]" if topics else "")
+        )
 
-    console.print(f"\n[bold]{total} chunks written[/bold]")
+    console.print(
+        f"\n[bold]{total} chunks written[/bold]"
+        + (f", {skipped} document(s) already current" if skipped else "")
+    )
 
 
 @app.command("verify")
@@ -210,6 +268,7 @@ def cmd_verify() -> None:
     ok = verify.report(
         verify.check_chunks(chunks)
         + verify.check_documents(docs, counts, len(CONFIG.citable_sources))
+        + verify.check_past_papers(docs, chunks, counts)
     )
     console.print(f"\n{stats}")
     raise typer.Exit(0 if ok else 1)

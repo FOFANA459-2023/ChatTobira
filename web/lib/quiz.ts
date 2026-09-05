@@ -368,6 +368,232 @@ function shuffled<T>(items: T[]): T[] {
   return [...items].sort(() => Math.random() - 0.5);
 }
 
+// ---------------------------------------------------------------------------
+// Past papers as exam-style reference
+//
+// The textbooks say what the course TEACHES. The sat papers say what it ASKS,
+// and the two do not look alike: the book explains 〜ことができます in a box
+// with three example sentences, and the paper tests it by printing a word bank
+// of seven verbs and seven sentences with a gap, one mark each, under an
+// instruction line that is itself a piece of Japanese the student has to read.
+// A paper generated from the textbook alone reproduces the box, not the paper.
+//
+// So exemplars are retrieved alongside the textbook excerpts and handed to the
+// generator as FORM, never as content: the questions still have to come from
+// the book. Everything below decides which pages are worth that slot.
+// ---------------------------------------------------------------------------
+
+/** A past-paper chunk as the quiz route fetches it. */
+export interface ExemplarChunk {
+  content: string;
+  metadata: Record<string, unknown> | null;
+}
+
+/** Words that say which kind of paper a page belongs to. The Foundation
+ * papers title themselves 文法クイズ and 漢字・語彙クイズ, and the section
+ * instructions repeat the distinction, so both are worth matching. */
+const KIND_MARKERS: Record<QuizKind, RegExp> = {
+  grammar: /文法|ぶんぽう|grammar|動詞|どうし|正しい形|形にかえて/i,
+  kanji: /漢字|かんじ|語彙|ごい|読み方|よみかた|kanji|vocabular/i,
+};
+
+/** A page that is mostly a question paper rather than a cover sheet or the
+ * blank back of one: it carries a printed instruction line. These are what
+ * the generator is being shown the papers FOR. */
+const INSTRUCTION_RE = /てください|ましょう|選んで|えらんで|書いて|かいて/;
+
+const MARK_ALLOCATION_RE = /[（(]\s*\d+(?:\.\d+)?\s*[×xX]\s*\d+/;
+
+/** The metadata a past-paper page carries about which paper it came from. */
+export interface PaperIdentity {
+  topic: string | null;
+  examTerm: string | null;
+  paperTitle: string | null;
+}
+
+export function paperIdentity(chunk: ExemplarChunk): PaperIdentity {
+  const meta = chunk.metadata ?? {};
+  const str = (key: string) => (typeof meta[key] === "string" ? (meta[key] as string) : null);
+  return { topic: str("topic"), examTerm: str("exam_term"), paperTitle: str("paper_title") };
+}
+
+/** Choose the past-paper pages a quiz should be modelled on.
+ *
+ * Ranked by how much they tell the generator about the paper it is imitating,
+ * then spread across papers rather than taken from whichever one ranked best:
+ * four pages of a single 文法クイズ teach one paper's habits, while four pages
+ * from four sittings teach the course's. The cap is per (term, title, topic),
+ * which is what identifies one sat paper.
+ */
+export function selectExemplars<T extends ExemplarChunk>(
+  chunks: T[],
+  kind: QuizKind,
+  topicScope: number | null,
+  take = 4,
+  perPaper = 2,
+): T[] {
+  const marker = KIND_MARKERS[kind];
+  const other = KIND_MARKERS[kind === "grammar" ? "kanji" : "grammar"];
+
+  const score = (chunk: T) => {
+    const { topic, paperTitle } = paperIdentity(chunk);
+    const text = `${paperTitle ?? ""}\n${chunk.content}`;
+    let value = 0;
+    // The title is the reliable signal for which paper this is; the body only
+    // says the page mentions grammar somewhere.
+    if (paperTitle && marker.test(paperTitle)) value += 6;
+    else if (paperTitle && other.test(paperTitle)) value -= 4;
+    if (marker.test(text)) value += 2;
+    // Same division as the test being written: the closest thing to seeing
+    // the real paper for it.
+    if (topicScope !== null && topic === `T${topicScope}`) value += 5;
+    // A page with no instruction line is a cover sheet or an overflow page,
+    // and it shows the generator nothing about question form.
+    if (INSTRUCTION_RE.test(chunk.content)) value += 3;
+    if (MARK_ALLOCATION_RE.test(chunk.content)) value += 1;
+    return value;
+  };
+
+  const ranked = [...chunks]
+    .map((chunk, index) => ({ chunk, index, value: score(chunk) }))
+    .filter((entry) => entry.value > 0)
+    .sort((a, b) => b.value - a.value || a.index - b.index);
+
+  const perPaperCount = new Map<string, number>();
+  const picked: T[] = [];
+  for (const { chunk } of ranked) {
+    const { topic, examTerm, paperTitle } = paperIdentity(chunk);
+    const paper = `${examTerm ?? "?"}|${paperTitle ?? "?"}|${topic ?? "?"}`;
+    const used = perPaperCount.get(paper) ?? 0;
+    if (used >= perPaper) continue;
+    perPaperCount.set(paper, used + 1);
+    picked.push(chunk);
+    if (picked.length >= take) break;
+  }
+  return picked;
+}
+
+/** Reduce Japanese text to the characters that decide whether two sentences
+ * are the same one: no furigana, no answer rules, no markers, no punctuation,
+ * no spacing. 「デパートで（　）まえに ATM でお金をおろします。」 and
+ * 「デパートで【買い物し】まえにATMでお金をおろします」 collapse to the same
+ * run, which is the point — a copied question is usually copied with its
+ * blank moved. */
+function comparable(text: string): string {
+  return text
+    .replace(/《[^》]*》/g, "")
+    .replace(/[（(][ぁ-ゖァ-ヶー\s　]*[）)]/g, "")
+    .replace(/[【】＿_]/g, "")
+    .replace(/[\s　]/g, "")
+    .replace(/[。、．，,.!?！？「」『』・:：;；|]/g, "")
+    .toLowerCase();
+}
+
+/** How much of an item has to be shared with a past paper before it is a copy.
+ *
+ * A fixed character run cannot do this job at both ends. Japanese packs a
+ * clause into very few characters: 「私はピアノを（　）ことができます。」 is a
+ * whole copied question and reduces to 13 characters, while
+ * 「ことができます」 is 7 and legitimately appears in every Topic 8 sentence
+ * ever written. A run long enough to ignore the pattern is longer than the
+ * question.
+ *
+ * So the test is proportional — a copy is an item that is MOSTLY someone
+ * else's sentence — with a floor so a very short fragment cannot clear the
+ * bar on ratio alone. */
+const COPIED_RATIO = 0.6;
+const COPIED_MIN_RUN = 10;
+
+function runsInside(needle: string, haystack: string, ratio: number): boolean {
+  const run = Math.max(COPIED_MIN_RUN, Math.ceil(needle.length * ratio));
+  if (needle.length < run) return false;
+  for (let i = 0; i + run <= needle.length; i++) {
+    if (haystack.includes(needle.slice(i, i + run))) return true;
+  }
+  return false;
+}
+
+function sharesRun(needleSource: string, haystack: string, ratio: number): boolean {
+  // Twice: once as written, and once with the marked answer taken out.
+  //
+  // The second is what catches the commonest copy. 「私はピアノを（　）こと
+  // ができます。」 comes back as 「私はピアノを【ひく】ことができます。」 —
+  // the paper's own sentence with its blank filled in — and the inserted word
+  // splits the shared run in half, so as-written it looks like two short
+  // fragments and slips through. Removing what the student is meant to supply
+  // leaves the skeleton, and the skeleton is identical.
+  return (
+    runsInside(comparable(needleSource), haystack, ratio) ||
+    runsInside(comparable(needleSource.replace(/【[^】]*】/g, "")), haystack, ratio)
+  );
+}
+
+/** Drop items lifted from the past papers they were supposed to be modelled on.
+ *
+ * The prompt says, at length, never to reuse a past-paper sentence. It mostly
+ * works, and "mostly" is the whole problem: on one Topic 8 run the generator
+ * came back with 「デパートで（　）まえに ATM でお金をおろします。」, which is
+ * question 1 of the 24秋 paper word for word. A student sitting that has been
+ * handed back the paper they already sat, with the answers on it — the single
+ * worst thing this feature could do, and the reason the past papers are shown
+ * as FORM rather than as a question bank.
+ *
+ * So it is enforced here rather than trusted to the prompt, exactly as
+ * dedupeQuiz enforces "never ask the same thing twice". Dropping is the right
+ * remedy and not regeneration: it costs no second model call, and the route
+ * already treats a paper left too short as a failed generation and hands the
+ * request to the next provider — so a wholesale copy repairs itself.
+ */
+export function dropCopiedItems(
+  quiz: Quiz,
+  exemplars: ExemplarChunk[],
+  ratio = COPIED_RATIO,
+): { quiz: Quiz; removed: number } {
+  if (exemplars.length === 0) return { quiz, removed: 0 };
+
+  const haystack = exemplars.map((chunk) => comparable(chunk.content)).join("\n");
+  let removed = 0;
+
+  const sections = quiz.sections
+    .map((section) => ({
+      ...section,
+      items: section.items.filter((item) => {
+        const copied =
+          sharesRun(item.question ?? "", haystack, ratio) ||
+          sharesRun(item.sentence ?? "", haystack, ratio);
+        if (copied) removed += 1;
+        return !copied;
+      }),
+    }))
+    .filter((section) => section.items.length > 0);
+
+  return { quiz: { ...quiz, sections }, removed };
+}
+
+/** What can honestly be said about the papers a test was modelled on.
+ *
+ * Read off the exemplars actually retrieved, and nowhere else. The generator
+ * is told to describe the paper's provenance only from this list, because the
+ * alternative is a model writing "as commonly tested in the 25春 final" about
+ * a term nobody ingested — a claim a student would reasonably act on.
+ */
+export function exemplarProvenance(chunks: ExemplarChunk[]): {
+  terms: string[];
+  titles: string[];
+  topics: string[];
+} {
+  const terms = new Set<string>();
+  const titles = new Set<string>();
+  const topics = new Set<string>();
+  for (const chunk of chunks) {
+    const { topic, examTerm, paperTitle } = paperIdentity(chunk);
+    if (examTerm) terms.add(examTerm);
+    if (paperTitle) titles.add(paperTitle);
+    if (topic) topics.add(topic);
+  }
+  return { terms: [...terms], titles: [...titles], topics: [...topics] };
+}
+
 // 第３課 / 第3課 / Lesson 3 / Topic 3 — the division headers the textbooks
 // actually print: the Intermediate Tobira volumes mark lessons as 第N課, and
 // the Foundation 1 & 2 book puts an English "Topic N" running header on nearly

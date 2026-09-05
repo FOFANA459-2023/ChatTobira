@@ -9,6 +9,7 @@ produces English fragments and silently drops every Japanese example sentence.
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -79,6 +80,187 @@ RESPONSE_SCHEMA = {
     "required": ["pages"],
 }
 
+# --------------------------------------------------------------------------
+# Past papers
+#
+# The sat papers are scans of MARKED STUDENT SCRIPTS, not blank question
+# papers: they carry a named student's handwriting, the teacher's red marking,
+# and a score in the corner. Two things follow, and both are corrections to
+# what a naive transcription would do.
+#
+# The printed paper is the only part worth indexing. The handwriting is one
+# student's attempt and a good deal of it is marked WRONG — transcribed into
+# the corpus it becomes course material, and the tutor would ground an
+# explanation in an answer the teacher crossed out. So the model is told to
+# read the page as if the ink were not there.
+#
+# The identity is worse than useless: name, student ID, class and score belong
+# to a real classmate, and the corpus is queryable by the whole cohort. They
+# are dropped at the only point where dropping them is reliable — before the
+# text is ever written to disk.
+# --------------------------------------------------------------------------
+
+PAST_PAPER_PROMPT = """\
+You are transcribing scanned pages of Japanese past examination papers from a \
+university course. These scans are MARKED STUDENT SCRIPTS: each page shows the \
+printed paper, a student's handwritten answers, and a teacher's handwritten \
+marking.
+
+Transcribe ONLY THE PRINTED PAPER. Produce faithful Markdown of the question \
+paper as it was printed, before anybody wrote on it.
+
+WHAT TO EXCLUDE — this is the most important rule:
+- Ignore every handwritten mark completely: the student's answers, the \
+teacher's red ticks, crosses, circles, corrections, and per-question point \
+deductions. Much of the handwriting is wrong, and none of it is part of the \
+paper.
+- A blank the student filled in is still a BLANK. Reproduce it as printed — \
+（　）, ＿＿, an empty table cell, an empty 【 】 — and never insert what was \
+written into it.
+- NEVER transcribe the student's name, student ID, class, seat number, or any \
+score, mark, grade or total (e.g. "29/30", "文法 5/19"). Where the printed \
+paper has a field for one, keep the printed LABEL and leave the value empty: \
+"なまえ:", "ID:", "クラス:". Write nothing that could identify whose script \
+this was.
+- Ignore scanner furniture: app watermarks ("Scanned with CamScanner"), page \
+shadows, and bleed-through of text from the reverse side of the sheet.
+
+WHAT TO PRESERVE — the structure is the point of this transcription:
+- Transcribe all printed Japanese exactly as printed. Never translate, \
+paraphrase or "correct" it. Okurigana, particles and punctuation must match \
+the page character for character. Do not fix an error that is genuinely on the \
+printed paper.
+- Section headings exactly as numbered on the paper (I. II. III. IV. V., or \
+１．２．, or 問題1) followed by the printed instruction line in Japanese, and \
+the English instruction line underneath when the paper prints one. These \
+instruction lines are the single most valuable thing on the page — reproduce \
+them verbatim, including the trailing 「〜てください。」.
+- The mark allocation printed beside an instruction, exactly as written: \
+(1×10=10), (1×7), (0.5×8), （1点×5）.
+- Every question, keeping its printed number — (1) (2) (3), ① ② ③, a. b. c. \
+d. e. — with the question sentence and, underneath it, every answer choice \
+with its printed letter or number.
+- Word banks and choice boxes: reproduce the list of options exactly, as a \
+Markdown table if the paper boxes them, otherwise as one line of ・-separated \
+words the way the paper prints it.
+- An 例 (example) row is part of the question and shows the expected answer \
+format — always keep it, including the answer printed in it.
+- Reading-comprehension passages in full, verbatim.
+- Tables — reading/writing grids, conjugation tables — as Markdown tables, \
+keeping every cell including the empty answer cells.
+- Furigana as 漢字《ふりがな》 attached to the word it annotates.
+- Describe a picture the question depends on in square brackets, e.g. \
+[写真: プレゼントの絵], because the question cannot be understood without it. \
+Ignore purely decorative art.
+- Never repeat any character more than three times in a row. Dot leaders \
+(…… or .....) are decoration: write the entry and its number separated by one \
+space, never the run of dots.
+
+FIELDS to return per page:
+- markdown: the transcription described above.
+- book_page: the page number printed on the page, as a string, or null. Never \
+guess it and never derive it from position in the file.
+- topic: the course topic or lesson this paper covers, as an integer, read \
+from the printed header (「トピック 8」, 「第3課」, "Topic 8", "Lesson 3"). \
+null if the page prints none — never infer it from the questions.
+- exam_term: the term the paper was sat, exactly as printed in the header \
+(e.g. "24秋", "25春", "25SP"). null if none is printed.
+- paper_title: the paper's printed title (e.g. "文法クイズ", "Hiragana Quiz", \
+"漢字・語彙クイズ", "期末試験"). null if none is printed.
+- grammar_points: grammar patterns the page's questions actually test, as \
+written (e.g. "～ておく", "～ことができます"). Empty list if none.
+- has_japanese: true if any kana or kanji appears on the page.
+- has_handwriting: true if the page carries handwriting you excluded. This is \
+recorded so the transcription can be spot-checked; it does not change what you \
+write.
+
+Return an object with a "pages" array holding exactly %d entries, in the same \
+order as the images provided.
+"""
+
+PAST_PAPER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "pages": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "markdown": {"type": "string"},
+                    "book_page": {"type": "string", "nullable": True},
+                    "topic": {"type": "integer", "nullable": True},
+                    "exam_term": {"type": "string", "nullable": True},
+                    "paper_title": {"type": "string", "nullable": True},
+                    "grammar_points": {"type": "array", "items": {"type": "string"}},
+                    "has_japanese": {"type": "boolean"},
+                    "has_handwriting": {"type": "boolean"},
+                },
+                "required": ["markdown", "has_japanese"],
+            },
+        }
+    },
+    "required": ["pages"],
+}
+
+
+@dataclass(frozen=True)
+class Profile:
+    """How one kind of source is read: the prompt, its schema, and how many
+    pages may share a request.
+
+    Past papers go one page per request. They are photographed sheets dense
+    with numbered items, choice lists and a reading passage, and a batch of
+    four reliably overflowed the output budget — which costs a retry per page
+    anyway, on top of the context bleed between two different papers' question
+    numbering.
+    """
+
+    prompt: str
+    schema: dict
+    max_pages_per_request: int
+
+
+TEXTBOOK_PROFILE = Profile(PROMPT, RESPONSE_SCHEMA, max_pages_per_request=99)
+PAST_PAPER_PROFILE = Profile(PAST_PAPER_PROMPT, PAST_PAPER_SCHEMA, max_pages_per_request=1)
+
+
+def profile_for(doc_type: str) -> Profile:
+    return PAST_PAPER_PROFILE if doc_type == "past_paper" else TEXTBOOK_PROFILE
+
+
+def _clean(value: object) -> str | None:
+    """A model string field, or None when it is absent or blank.
+
+    The models answer a nullable string field with "null", "none" and "" about
+    as often as with JSON null, and every one of those would go on to become a
+    document titled "null" in a chunk header a student can read.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text if text and text.lower() not in {"null", "none", "n/a", "-"} else None
+
+
+def _page_topic(value: object) -> int | None:
+    """The course division printed on the page, as a number in a sane range.
+
+    Schema-typed as an integer, but the models still return "8", "トピック8"
+    and 「8」 — and a page that prints no topic sometimes comes back as 0.
+    Anything outside 1..30 is not a division this course has.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        digits = "".join(
+            str("０１２３４５６７８９".index(c)) if c in "０１２３４５６７８９" else c
+            for c in value
+        )
+        match = re.search(r"\d{1,2}", digits)
+        value = int(match.group()) if match else None
+    if isinstance(value, int) and 1 <= value <= 30:
+        return value
+    return None
+
 
 @dataclass
 class PageText:
@@ -87,6 +269,13 @@ class PageText:
     book_page: str | None
     grammar_points: list[str]
     has_japanese: bool
+    # Past-paper fields. Defaulted so transcripts cached before past papers
+    # existed still load — the cache is the expensive artefact here and must
+    # survive a schema addition.
+    topic: int | None = None
+    exam_term: str | None = None
+    paper_title: str | None = None
+    has_handwriting: bool = False
 
 
 from functools import lru_cache
@@ -204,12 +393,12 @@ def _is_transient_transport(exc: BaseException) -> bool:
     stop=stop_after_attempt(4),
     reraise=True,
 )
-def _generation_config(model: str, temperature: float):
+def _generation_config(model: str, temperature: float, schema: dict = RESPONSE_SCHEMA):
     from google.genai import types
 
     kwargs: dict = {
         "response_mime_type": "application/json",
-        "response_schema": RESPONSE_SCHEMA,
+        "response_schema": schema,
         # Transcription, not composition. Any creativity here is an error —
         # but see REPETITION_BREAK_TEMPERATURE for the one case where greedy
         # decoding is itself the failure.
@@ -236,10 +425,11 @@ def _call_model(
     images: list[Path],
     count: int,
     temperature: float = 0.0,
+    profile: Profile = TEXTBOOK_PROFILE,
 ) -> list[dict]:
     from google.genai import types
 
-    parts: list = [PROMPT % count]
+    parts: list = [profile.prompt % count]
     for image in images:
         parts.append(types.Part.from_bytes(data=image.read_bytes(), mime_type="image/png"))
 
@@ -247,7 +437,7 @@ def _call_model(
         response = _client(api_key).models.generate_content(
             model=model,
             contents=parts,
-            config=_generation_config(model, temperature),
+            config=_generation_config(model, temperature, profile.schema),
         )
     except Exception as exc:
         message = str(exc)
@@ -277,7 +467,12 @@ def _call_model(
     return pages
 
 
-def _call(images: list[Path], count: int, temperature: float = 0.0) -> list[dict]:
+def _call(
+    images: list[Path],
+    count: int,
+    temperature: float = 0.0,
+    profile: Profile = TEXTBOOK_PROFILE,
+) -> list[dict]:
     """Try each key/model pair until one has daily budget left."""
     last: Exception | None = None
     truncated: OutputTruncatedError | None = None
@@ -286,7 +481,7 @@ def _call(images: list[Path], count: int, temperature: float = 0.0) -> list[dict
         raise RuntimeError("GOOGLE_API_KEY is not set. Copy .env.example to .env and fill it in.")
     for key_index, model in _cascade():
         try:
-            return _call_model(keys[key_index], model, images, count, temperature)
+            return _call_model(keys[key_index], model, images, count, temperature, profile)
         except DailyQuotaError as exc:
             _exhausted.add((key_index, model))
             last = exc
@@ -321,7 +516,11 @@ def _call(images: list[Path], count: int, temperature: float = 0.0) -> list[dict
     ) from last
 
 
-def _transcribe_one(image: Path, on_warning: Callable[[str], None] | None) -> dict:
+def _transcribe_one(
+    image: Path,
+    on_warning: Callable[[str], None] | None,
+    profile: Profile = TEXTBOOK_PROFILE,
+) -> dict:
     """Transcribe a single page, surviving a page that no model can finish.
 
     Observed live on the Foundation 1 & 2 table of contents: the page is a list
@@ -332,7 +531,7 @@ def _transcribe_one(image: Path, on_warning: Callable[[str], None] | None) -> di
     Returning an empty page loses one page; raising loses every page after it.
     """
     try:
-        return _call([image], 1)[0]
+        return _call([image], 1, profile=profile)[0]
     except OutputTruncatedError:
         pass
 
@@ -340,7 +539,7 @@ def _transcribe_one(image: Path, on_warning: Callable[[str], None] | None) -> di
     # a run of dots is always another dot. A little randomness breaks the loop
     # without licensing the model to invent text.
     try:
-        page = _call([image], 1, temperature=REPETITION_BREAK_TEMPERATURE)[0]
+        page = _call([image], 1, temperature=REPETITION_BREAK_TEMPERATURE, profile=profile)[0]
         if on_warning is not None:
             on_warning(f"{image.name}: recovered after a repetition loop")
         return page
@@ -358,6 +557,7 @@ def transcribe(
     start_page: int = 1,
     on_batch: Callable[[list[PageText]], None] | None = None,
     on_warning: Callable[[str], None] | None = None,
+    profile: Profile = TEXTBOOK_PROFILE,
 ) -> list[PageText]:
     """Transcribe page images in batches, throttled for the free tier.
 
@@ -372,7 +572,10 @@ def transcribe(
     cost the 280 that follow it.
     """
     results: list[PageText] = []
-    batch_size = max(1, CONFIG.pages_per_request)
+    # The profile's ceiling wins over the configured batch size: a past paper
+    # is transcribed one page per request however VISION_PAGES_PER_REQUEST is
+    # tuned for the textbooks.
+    batch_size = max(1, min(CONFIG.pages_per_request, profile.max_pages_per_request))
 
     for offset in range(0, len(images), batch_size):
         batch = images[offset : offset + batch_size]
@@ -386,13 +589,13 @@ def transcribe(
         if live:
             live_images = [img for _, img in live]
             try:
-                pages = _call(live_images, len(live_images))
+                pages = _call(live_images, len(live_images), profile=profile)
             except OutputTruncatedError:
                 # A dense batch overflowed the output budget even at 64k tokens.
                 # Retry page by page, so one bad page costs only itself.
                 pages = []
                 for image in live_images:
-                    pages.append(_transcribe_one(image, on_warning))
+                    pages.append(_transcribe_one(image, on_warning, profile))
                     if CONFIG.vision_throttle > 0:
                         time.sleep(CONFIG.vision_throttle)
             transcribed = {index: page for (index, _), page in zip(live, pages)}
@@ -407,6 +610,10 @@ def transcribe(
                     book_page=str(book_page).strip() if book_page else None,
                     grammar_points=[g.strip() for g in page.get("grammar_points", []) if g.strip()],
                     has_japanese=bool(page.get("has_japanese")),
+                    topic=_page_topic(page.get("topic")),
+                    exam_term=_clean(page.get("exam_term")),
+                    paper_title=_clean(page.get("paper_title")),
+                    has_handwriting=bool(page.get("has_handwriting")),
                 )
             )
 

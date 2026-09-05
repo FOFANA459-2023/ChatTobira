@@ -20,7 +20,11 @@ pipeline, retrieval, model serving, auth, admin tooling, CI/CD.
 - **Practice tests** — grammar and kanji papers generated in the format of the
   course's real test sheets, scoped to a topic ("test me on Topic 6"), graded
   instantly, with a study plan pointing at the pages to review. Furigana
-  appears only on kanji the student hasn't been taught yet.
+  appears only on kanji the student hasn't been taught yet. The format is not
+  guesswork: the papers students actually sat are in the corpus, and each
+  generated paper is modelled on the real ones for that level — their section
+  order, their instruction lines, their distractors — while every question
+  itself is new and drawn from the textbook.
 - **Invite-only access** — the admin invites students by email; they sign in
   with a magic link. No passwords for students, no public signup.
 
@@ -53,6 +57,19 @@ ask the same ~30 questions), per-student daily quotas, and a provider cascade
 (Groq free tier → DeepSeek prepaid → Gemini last) that degrades gracefully as
 each tier's limit is hit. The transcription pipeline is checkpointed per page
 so a rate-limited run resumes tomorrow without re-paying for a single page.
+
+**The past papers were somebody's homework.** The only copies of the course's
+past papers are phone scans of a marked script — a classmate's name across the
+top, their answers in pencil, the teacher's corrections in red, the score in
+the corner. Transcribing the page faithfully would have put a named student's
+grade into a corpus a hundred classmates can query, and filed their *wrong*
+answers as course material: on one Topic 8 quiz the student scored 5/19, so
+most of what a naive OCR pass would have indexed as Japanese is Japanese the
+teacher crossed out. Past papers get their own vision prompt that reads the
+printed sheet and leaves the ink on it — blanks stay blank, the name field
+keeps its label and loses its value — and `ingest verify` fails the corpus if a
+name, ID or mark ever reaches a chunk, because a prompt is an instruction and
+not a guarantee.
 
 **Copyright is handled deliberately.** The textbooks are commercial. Chat
 citations quote short excerpts with page numbers instead of serving pages;
