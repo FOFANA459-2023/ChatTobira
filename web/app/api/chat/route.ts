@@ -5,6 +5,7 @@ import { convertToModelMessages, streamText, type UIMessage } from "ai";
 import { z } from "zod";
 
 import { detectLanguageMode, withoutLanguageRequest } from "@/lib/language";
+import { pageSpellings } from "@/lib/pages";
 import { aspectOf } from "@/lib/topics";
 import { contextBlock, recentTurns, systemPrompt, type AttachedUpload } from "@/lib/prompt";
 import { isProviderDead, noteProviderFailure } from "@/lib/providers";
@@ -20,6 +21,7 @@ import {
   resolveQuery,
   retrieve,
   retrieveByTopic,
+  retrieveByPage,
   retrieveExact,
   selectContext,
   tokensForQuery,
@@ -282,7 +284,12 @@ export async function POST(request: Request) {
     const divisions = query.topics;
     const aspect = aspectOf(query.text);
 
-    const [{ data: cached }, retrieval, exact, byTopic] = await Promise.all([
+    // The page arm. Runs alongside the ranked ones rather than instead of
+    // them: a student who names a page usually wants something explained
+    // from it, and the explanation may live elsewhere in the book.
+    const pageQuery = query.pageQuery;
+
+    const [{ data: cached }, retrieval, exact, byTopic, byPage] = await Promise.all([
       cacheable
         ? db.rpc("cache_get", {
             query_embedding: vectorLiteral,
@@ -300,6 +307,7 @@ export async function POST(request: Request) {
       // in a supplementary arm should cost a page, not the reply.
       retrieveExact(db, patterns).catch(() => [] as RetrievedChunk[]),
       retrieveByTopic(db, divisions, aspect).catch(() => [] as RetrievedChunk[]),
+      retrieveByPage(db, pageQuery, scope).catch(() => [] as RetrievedChunk[]),
     ]);
 
     // Semantic cache: 100 students ask the same ~30 grammar questions, and a
@@ -322,20 +330,24 @@ export async function POST(request: Request) {
       }
       return [...byId.values()];
     };
-    chunks = merge(byTopic, exact, retrieval.rows);
+    // Ordered by how specific the arm is. A page number is the most specific
+    // thing a student can say, so those chunks lead — and they carry the
+    // exact flag, which is what keeps selectContext from dropping them for
+    // scoring below a similarity floor they were never ranked against.
+    chunks = merge(byPage, byTopic, exact, retrieval.rows);
 
     // Nothing convincing came back. A ranked search always returns SOMETHING,
     // so this is the moment the app used to mistake a missed search for a gap
     // in the corpus and tell the student to go and open the book themselves.
     // Instead, ask again in the corpus's own words before drawing any
     // conclusion — one embedding, on the minority of turns that need it.
-    if (isThinResult(chunks)) {
+    if (!byPage.length && isThinResult(chunks)) {
       const broadened = broadenQuery(query.text, divisions, aspect);
       if (broadened && broadened !== query.text) {
         const retry = await embedQuery(broadened)
           .then((vector) => retrieve(db, vector, tokensForQuery(broadened), scope, 14))
           .catch(() => [] as RetrievedChunk[]);
-        chunks = merge(byTopic, exact, retry, retrieval.rows);
+        chunks = merge(byPage, byTopic, exact, retry, retrieval.rows);
       }
     }
   }
@@ -347,12 +359,46 @@ export async function POST(request: Request) {
   const context = selectContext(chunks);
   const citations = buildCitations(context);
 
+  // Did the page the student named actually make it into what the model
+  // reads? Not "was it retrieved" — retrieved and then dropped by the context
+  // budget is the same as missing, and the prompt rule that forbids inventing
+  // an exercise has to key on what is genuinely there.
+  const askedPage = query.pageQuery.pages[0]?.page ?? null;
+  const pageInContext =
+    askedPage !== null &&
+    context.some((chunk) => pageSpellings(askedPage).includes(chunk.book_page ?? ""));
+
+  // Retrieval diagnostics, for the worker log and nobody else. A page query
+  // that comes back empty is either an ingestion gap, a metadata problem or a
+  // parse failure, and without this the three are indistinguishable from the
+  // outside — which is how "I don't have page 85" went unexplained for a
+  // page that was indexed correctly the whole time.
+  if (askedPage !== null) {
+    console.info(
+      "page query:",
+      JSON.stringify({
+        asked: query.asked.slice(0, 120),
+        page: askedPage,
+        book: query.pageQuery.level ?? scope.level ?? "any textbook",
+        sections: query.pageQuery.sections,
+        topics: query.topics.map((t) => t.marker),
+        pageChunks: chunks.filter((c) =>
+          pageSpellings(askedPage).includes(c.book_page ?? ""),
+        ).length,
+        totalCandidates: chunks.length,
+        inContext: pageInContext,
+        contextPages: context.map((c) => c.book_page),
+      }),
+    );
+  }
+
   const system = `${systemPrompt(scope as StudyScope, {
     language,
     isFollowUp: query.isFollowUp,
     canPointToBook: citations.length > 0,
     hasUploads: attached.length > 0,
     hasPastPapers: context.some((chunk) => chunk.doc_type === "past_paper"),
+    page: askedPage !== null ? { asked: askedPage, retrieved: pageInContext } : undefined,
     speaking: speaking
       ? { mode: speaking.mode, level: speaking.level ?? null, subject: speaking.subject }
       : undefined,

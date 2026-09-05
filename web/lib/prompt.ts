@@ -19,6 +19,11 @@ export interface PromptOptions {
   /** True when a textbook page was retrieved that the student could be
    * pointed at. Without one, the closing offer would be an empty promise. */
   canPointToBook?: boolean;
+  /** The page the student named, when they named one, and whether anything
+   * from it was actually retrieved. Both halves matter: one licenses the
+   * tutor to work from that page, the other forbids it inventing what the
+   * page says. */
+  page?: { asked: number; retrieved: boolean };
   /** Set when the student is SPEAKING rather than typing. The tutor becomes
    * a conversation partner: short Japanese turns that hand the conversation
    * back, rather than an explanation the student would have to listen to. */
@@ -38,6 +43,7 @@ export function systemPrompt(scope: StudyScope, options: PromptOptions = {}): st
     hasUploads = false,
     hasPastPapers = false,
     speaking,
+    page,
   } = options;
 
   const scopeLine = scope.topic
@@ -69,6 +75,26 @@ export function systemPrompt(scope: StudyScope, options: PromptOptions = {}): st
 `
     : "";
 
+  // The failure this exists to stop, in the student's words: they asked for
+  // the practice questions on page 122 and were handed four invented ones.
+  // An approximation of a textbook exercise is worse than no answer — the
+  // student cannot tell it apart from the real thing, and they are revising
+  // from it.
+  const pageRules = page
+    ? page.retrieved
+      ? `
+THE STUDENT ASKED FOR PAGE ${page.asked}
+- The source material below includes that page. Answer from what is printed there and nothing else.
+- Reproduce the exercise as it stands: the instruction line, the numbering, the example, every question. Do not renumber, do not paraphrase the instruction, do not skip an item because it depends on a picture — say what the picture shows if the source describes it.
+- When you answer the questions, answer THOSE questions. Never substitute one of your own, and never round the count up or down to something tidier.
+- If the page's material below is only part of the exercise — it continues past the page break, or a table came through incomplete — answer the part you can see and say plainly which part is missing.`
+      : `
+THE STUDENT ASKED FOR PAGE ${page.asked}, AND IT WAS NOT RETRIEVED
+- Nothing below is from that page. Say so in one line, plainly: you could not pull up page ${page.asked}.
+- Do NOT write questions of your own and present them as what is on the page. Inventing a plausible exercise is the worst possible answer here: the student is revising from it and cannot tell it apart from the real one.
+- You may offer what you do have — the topic that page belongs to, the grammar it covers — as long as it is clearly labelled as that rather than as the page.`
+    : "";
+
   const closingLine = canPointToBook
     ? `- If — and only if — there is more worth reading than you covered, close with ONE short, natural offer to point them at it: "I can show you where this is covered in the book if you want." Never a fixed formula, never on every answer, never more than a sentence.`
     : `- Do not offer to point at a textbook section; nothing retrieved supports one.`;
@@ -92,7 +118,7 @@ GROUNDING
 - Build the answer from the source material below. It was retrieved for this question and it is what the student owns. Do not invent grammar rules or vocabulary.
 - Prefer the passage that actually addresses the question over the one that merely shares words with it. The material is ordered with the closest first.
 - Casual conversation (greetings, thanks) needs no sources: reply briefly and warmly, and do not mention the textbook.
-${uploadRules}${pastPaperRules}- NEVER withhold source content the student asked for. When they ask what a passage, table or list says, reproduce it in full — complete conjugation tables, complete example lists, whole reading passages.
+${uploadRules}${pastPaperRules}${pageRules ? pageRules + "\n" : ""}- NEVER withhold source content the student asked for. When they ask what a passage, table or list says, reproduce it in full — complete conjugation tables, complete example lists, whole reading passages.
 
 WHAT NEVER APPEARS IN YOUR ANSWER
 - No reference to the retrieval machinery: no "Source 2", no "the excerpt", no "the provided material", no document names, no "（語彙練習ページより追加）", no chunk or page markers copied from the headers below. The student is reading a tutor's answer, not a search result.

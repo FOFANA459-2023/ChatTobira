@@ -1,6 +1,7 @@
 import TinySegmenter from "tiny-segmenter";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { pageSpellings, pageWindow, parsePageQuery, type PageQuery } from "./pages";
 import { printedForms, topicRefs, type Aspect, type TopicRef } from "./topics";
 
 /** One retrieved chunk from match_chunks. */
@@ -22,6 +23,11 @@ export interface RetrievedChunk {
    * score, and it does not need one: the student asked about 〜てある and
    * this page prints 〜てある. */
   exact?: boolean;
+  /** Set when the chunk came from a page the student named by number. It
+   * exempts the chunk from the one-chunk-per-page and per-document rules
+   * below, which exist to stop one book crowding out the rest and are the
+   * wrong rules entirely for the page somebody asked to read. */
+  fromPage?: boolean;
 }
 
 export interface Citation {
@@ -77,6 +83,10 @@ export interface ResolvedQuery {
    * know it is in Foundation 3" has named the division once and expects it
    * to still be the subject two turns later. */
   topics: TopicRef[];
+  /** Where in the book the conversation is, carried forward for the same
+   * reason: "can you read page 85 though" names the page once, and the two
+   * turns after it are still about page 85. */
+  pageQuery: PageQuery;
 }
 
 /** Words and shapes that mean "about the thing we were just discussing". */
@@ -147,10 +157,15 @@ export function resolveQuery(turns: Turn[]): ResolvedQuery {
       topicRefs(previousAnswer),
     ) ?? [];
 
+  // A page named in this turn wins; otherwise the most recent one the
+  // student named still stands. Their own words only — a page number the
+  // TUTOR mentioned in passing is not a request to open it.
+  const pageQuery = firstPageQuery([asked, ...[...askedBefore].reverse()]);
+
   const dependent = Boolean(previousQuestion || previousAnswer) && !standsAlone(asked);
 
   if (!asked || !dependent) {
-    return { text: asked, asked, isFollowUp: false, topics };
+    return { text: asked, asked, isFollowUp: false, topics, pageQuery };
   }
 
   const carried = [previousQuestion.slice(0, 160), ...salientTerms(previousAnswer)].filter(
@@ -161,7 +176,23 @@ export function resolveQuery(turns: Turn[]): ResolvedQuery {
     asked,
     isFollowUp: true,
     topics,
+    pageQuery,
   };
+}
+
+/** The most recent turn that named a page, parsed whole.
+ *
+ * Whole rather than field by field, because the parts belong together: the
+ * book, the page and the section in "Foundation 2 textbook page 217 section
+ * III-4" are one reference, and taking the page from one turn and the book
+ * from another would invent a page nobody asked for.
+ */
+function firstPageQuery(texts: string[]): PageQuery {
+  for (const text of texts) {
+    const parsed = parsePageQuery(text);
+    if (parsed.pages.length > 0) return parsed;
+  }
+  return { pages: [], level: null, textbookOnly: false, sections: [] };
 }
 
 function firstNonEmpty<T>(...lists: T[][]): T[] | null {
@@ -316,7 +347,26 @@ export function selectContext(
   const perDocumentCount = new Map<number, number>();
   const picked: RetrievedChunk[] = [];
 
+  // A page the student named by number goes in whole, before anything else.
+  //
+  // The two rules below — one chunk per page, three chunks per document —
+  // stop one book crowding the prompt when a question could be answered from
+  // several. They are exactly wrong here. Page 122 of the Foundation book is
+  // four chunks, the practice exercise is in the fourth, and keeping one
+  // chunk per page meant the student who asked for that exercise was told
+  // the page "only contains the grammar note".
+  const pageChunks = pool.filter((chunk) => chunk.fromPage);
+  for (const chunk of pageChunks) {
+    seenPages.add(`${chunk.document_id}:${chunk.book_page ?? chunk.pdf_page}`);
+    perDocumentCount.set(chunk.document_id, 0);
+    picked.push(chunk);
+  }
+  // The rest still fill the prompt around it, up to a ceiling that grows with
+  // the page so a four-chunk page does not squeeze out every other source.
+  const ceiling = limit + pageChunks.length;
+
   for (const chunk of pool) {
+    if (chunk.fromPage) continue;
     const page = `${chunk.document_id}:${chunk.book_page ?? chunk.pdf_page}`;
     if (seenPages.has(page)) continue;
     const used = perDocumentCount.get(chunk.document_id) ?? 0;
@@ -324,12 +374,13 @@ export function selectContext(
     seenPages.add(page);
     perDocumentCount.set(chunk.document_id, used + 1);
     picked.push(chunk);
-    if (picked.length >= limit) break;
+    if (picked.length >= ceiling) break;
   }
 
   // Pages that print the pattern the student named lead, then the closest
   // ranked passages. A model weights what it reads first.
   return picked.sort((a, b) => {
+    if (Boolean(a.fromPage) !== Boolean(b.fromPage)) return a.fromPage ? -1 : 1;
     if (Boolean(a.exact) !== Boolean(b.exact)) return a.exact ? -1 : 1;
     return (b.similarity ?? 0) - (a.similarity ?? 0);
   });
@@ -387,9 +438,10 @@ interface ChunkRow {
   documents?: { title: string; doc_type: string; is_citable: boolean } | null;
 }
 
-function toRetrieved(row: unknown): RetrievedChunk {
+function toRetrieved(row: unknown, fromPage = false): RetrievedChunk {
   const chunk = row as ChunkRow;
   return {
+    ...(fromPage ? { fromPage: true } : {}),
     chunk_id: chunk.id,
     document_id: chunk.document_id,
     doc_title: chunk.documents?.title ?? "",
@@ -462,7 +514,7 @@ export async function retrieveExact(
     ),
   );
 
-  return results.flat().map(toRetrieved);
+  return results.flat().map((row) => toRetrieved(row));
 }
 
 /** Did the first search actually find anything about the question?
@@ -498,6 +550,91 @@ export function broadenQuery(text: string, refs: TopicRef[], aspect: Aspect | nu
     ...tokensForQuery(text).filter((token) => /[぀-ヿ一-鿿]/.test(token) || token.length >= 4),
   ];
   return [...new Set(parts)].slice(0, 12).join(" ");
+}
+
+/** The pages a student named by number.
+ *
+ * A metadata filter, not a ranked search, and that is the whole point. The
+ * three ranked arms all failed the same way on "Foundation 2 page 85": the
+ * lexical arm never saw the number (tokensForQuery drops anything under three
+ * characters), the vector arm has no notion of a page, and between them they
+ * returned pages 31, 21, 81 and 12 for a page that is indexed, correct, and
+ * numbered 85. No amount of reranking recovers from not having asked.
+ *
+ * Scoped by book because book_page collides: page 85 exists in Foundation
+ * 1 & 2, in Foundation 3, in both Intermediate volumes and in a class
+ * handout. A student who said which book gets that book; one who did not gets
+ * the textbooks rather than the handouts, because a page number is a thing
+ * printed in a book.
+ */
+export async function retrieveByPage(
+  supabase: SupabaseClient,
+  query: PageQuery,
+  scope: StudyScope,
+  perPage = 4,
+): Promise<RetrievedChunk[]> {
+  if (query.pages.length === 0) return [];
+
+  const select =
+    "id, document_id, pdf_page, book_page, content, metadata, documents!inner(title, doc_type, is_citable, level)";
+  // The student's own words first, then the conversation's study scope, then
+  // nothing — in which case the textbooks stand in for "the book".
+  const level = query.level ?? scope.level ?? null;
+
+  const perRef = await Promise.all(
+    query.pages.map(async (ref) => {
+      const wanted = pageWindow(ref.page).flatMap(pageSpellings);
+      let request = supabase
+        .from("chunks")
+        .select(select)
+        .in("book_page", wanted)
+        // Never a handout: a page reference means a printed book, and the
+        // handouts carry page numbers of their own that mean something else.
+        .eq("documents.is_citable", true);
+      if (level) request = request.eq("documents.level", level);
+
+      const { data } = await request.limit(24);
+      return rankPageChunks((data ?? []) as unknown as PageChunkRow[], ref.page, query.sections)
+        .slice(0, perPage)
+        .map((row) => toRetrieved(row, true));
+    }),
+  );
+
+  return perRef.flat();
+}
+
+/** A chunk fetched by page, in the shape the page filter returns. */
+export interface PageChunkRow {
+  book_page: string | null;
+  content: string;
+  documents?: { is_citable?: boolean } | null;
+}
+
+/** Of the pages fetched, the ones the question was actually about.
+ *
+ * The page asked for outranks its neighbours, always — the neighbours are
+ * there because an exercise runs over a page break, not because they are
+ * equally good answers. Within a page, a chunk carrying the subsection the
+ * student named comes first: "section III-4" is a request for one exercise on
+ * a page that holds several.
+ */
+export function rankPageChunks<T extends PageChunkRow>(
+  rows: T[],
+  page: number,
+  sections: string[] = [],
+): T[] {
+  const exact = new Set(pageSpellings(page));
+  const score = (row: T) => {
+    let value = exact.has(row.book_page ?? "") ? 10 : 0;
+    for (const section of sections) {
+      // The books space the hyphen inconsistently — "III - 4" and "III-4" are
+      // the same heading — so the comparison ignores it.
+      const loose = section.replace("-", "\\s*[-‐–—ー－]\\s*");
+      if (new RegExp(loose, "i").test(row.content)) value += 6;
+    }
+    return value;
+  };
+  return [...rows].sort((a, b) => score(b) - score(a));
 }
 
 /** Pages belonging to a course division the student named, from anywhere in
@@ -549,7 +686,7 @@ export async function retrieveByTopic(
     }),
   );
 
-  return perRef.flat().map(toRetrieved);
+  return perRef.flat().map((row) => toRetrieved(row));
 }
 
 /** Of the pages carrying a division's header, the ones worth reading.
