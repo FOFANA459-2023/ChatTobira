@@ -17,6 +17,10 @@ export interface PromptOptions {
   /** True when a textbook page was retrieved that the student could be
    * pointed at. Without one, the closing offer would be an empty promise. */
   canPointToBook?: boolean;
+  /** True when one of the retrieved sources is a past exam paper. The rules
+   * for reading one are omitted otherwise: a model told how to talk about
+   * past papers with none in front of it starts referring to them anyway. */
+  hasPastPapers?: boolean;
 }
 
 /** System prompt: a tutor who answers, grounded in the course material. */
@@ -26,6 +30,7 @@ export function systemPrompt(scope: StudyScope, options: PromptOptions = {}): st
     isFollowUp = false,
     canPointToBook = false,
     hasUploads = false,
+    hasPastPapers = false,
   } = options;
 
   const scopeLine = scope.topic
@@ -42,6 +47,18 @@ export function systemPrompt(scope: StudyScope, options: PromptOptions = {}): st
     ? `- The upload is not the knowledge base. It stays attached while the conversation moves on, so when the question is not about it, ignore it and answer from the course material. Never tell a student that something is missing because their upload does not contain it.
 - A source marked [your upload] is a file this student uploaded — a photo of their own handout, worksheet or notes. Use it as the subject when they ask about it and refer to it by filename, never as "the textbook". Anything marked 手書き is the student's own working and may be wrong: check it against the course material rather than repeating it back as correct, and if it contradicts the textbook, the textbook wins — say so kindly.
 - If an upload's text begins UNREADABLE, the photo was too blurred or cropped to transcribe. Say so and suggest retaking it rather than guessing.
+`
+    : "";
+
+  // A past paper answers a different question from the textbook — not "what
+  // does this mean" but "what does the course do with it" — and it is worth
+  // saying so, because "this came up on the Topic 8 quiz" is the sentence a
+  // student revising for an exam actually wants.
+  const pastPaperRules = hasPastPapers
+    ? `- A source marked "past exam paper" is a real paper students at this level sat. Use it to show HOW the course tests something: the question shapes, the kind of sentence, the instruction wording. Say so naturally when it helps — "this came up as a fill-in-the-blank on the Topic 8 quiz" — using only the sitting and topic named in that source's header.
+- It is not an authority on the language. Grammar rules, meanings and readings come from the textbook and the handouts; where a paper seems to disagree with the textbook, the textbook is right.
+- These papers were scanned with their answers blank. Never claim to know the answer to a past-paper question because it was "printed" — work it out from the course material like any other question, and never invent a mark scheme, a date, an exam name or a question number that is not in the source.
+- Do not tell a student a point is "commonly tested" or "always comes up" on the strength of one or two retrieved pages.
 `
     : "";
 
@@ -68,7 +85,7 @@ GROUNDING
 - Build the answer from the source material below. It was retrieved for this question and it is what the student owns. Do not invent grammar rules or vocabulary.
 - Prefer the passage that actually addresses the question over the one that merely shares words with it. The material is ordered with the closest first.
 - Casual conversation (greetings, thanks) needs no sources: reply briefly and warmly, and do not mention the textbook.
-${uploadRules}- NEVER withhold source content the student asked for. When they ask what a passage, table or list says, reproduce it in full — complete conjugation tables, complete example lists, whole reading passages.
+${uploadRules}${pastPaperRules}- NEVER withhold source content the student asked for. When they ask what a passage, table or list says, reproduce it in full — complete conjugation tables, complete example lists, whole reading passages.
 
 WHAT NEVER APPEARS IN YOUR ANSWER
 - No reference to the retrieval machinery: no "Source 2", no "the excerpt", no "the provided material", no document names, no "（語彙練習ページより追加）", no chunk or page markers copied from the headers below. The student is reading a tutor's answer, not a search result.
@@ -115,6 +132,22 @@ export interface AttachedUpload {
   extracted: string;
 }
 
+/** How a past-paper excerpt names itself: the sitting and the topic it
+ * tested, where the page printed them. Only what was actually transcribed —
+ * a paper whose header did not survive is described as a past paper and
+ * nothing more, rather than being given a term it might not have. */
+function pastPaperLabel(chunk: RetrievedChunk): string {
+  const meta = chunk.metadata ?? {};
+  const text = (key: string) => (typeof meta[key] === "string" ? (meta[key] as string) : null);
+  const topic = text("topic");
+  const parts = [
+    text("exam_term"),
+    text("paper_title"),
+    topic ? `Topic ${topic.replace(/^T/, "")}` : null,
+  ].filter(Boolean);
+  return parts.length > 0 ? `: ${parts.join(" ")}` : "";
+}
+
 /** Context block handed to the model alongside the student's question. */
 export function contextBlock(
   chunks: RetrievedChunk[],
@@ -141,7 +174,13 @@ export function contextBlock(
   for (const chunk of chunks) {
     const header = chunk.is_citable
       ? `${chunk.doc_title}${chunk.book_page ? `, p. ${chunk.book_page}` : ""}`
-      : `class handout: ${chunk.doc_title}`;
+      : chunk.doc_type === "past_paper"
+        ? // A past paper is neither the textbook nor a handout, and calling it
+          // one costs the answer its best sentence: a student asking how a
+          // pattern is tested wants to hear "this came up on the Topic 8
+          // quiz", which the model can only say if the header tells it so.
+          `past exam paper${pastPaperLabel(chunk)}`
+        : `class handout: ${chunk.doc_title}`;
     const body = chunk.content.slice(0, CHUNK_CHAR_BUDGET);
     const part = `--- ${header} ---\n${body}`;
     if (used + part.length > TOTAL_CHAR_BUDGET && parts.length > 0) break;

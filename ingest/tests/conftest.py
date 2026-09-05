@@ -33,6 +33,11 @@ SYNTHETIC_TREE = CITABLE + [
     "Foundation 3/T14, 15, 16 Materials used in class/Kanji storyT16.pdf",
     "Foundation 3/T14, 15, 16 Materials used in class/文法復習シート_T14(答え).pdf",
     "Foundation 3/T17 Materials used in class-20260808/T15-T17ふくしゅうシートのこたえ.pdf",
+    # Past papers: compilations naming no topic in the filename, because the
+    # topic each paper covers is printed on its pages instead.
+    "Foundation 2/Found 1 Papers.pdf",
+    "Foundation 2/Found 2 Papers.pdf",
+    "Foundation 3/Foundation 3 Past Papers.pdf",
 ]
 
 

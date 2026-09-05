@@ -25,22 +25,37 @@ describe("corpus pool cache", () => {
     expect(cachedPool(1, 11 * MINUTE)).toBeNull();
   });
 
-  it("holds two books and evicts the least recently used", () => {
-    rememberPool(1, "one");
-    rememberPool(2, "two");
-    rememberPool(3, "three");
+  it("holds four entries and evicts the least recently used", () => {
+    for (const n of [1, 2, 3, 4, 5]) rememberPool(n, String(n));
     expect(cachedPool(1)).toBeNull();
-    expect(cachedPool(2)).toBe("two");
-    expect(cachedPool(3)).toBe("three");
+    expect(cachedPool(2)).toBe("2");
+    expect(cachedPool(5)).toBe("5");
   });
 
   it("counts a read as use, so the book being studied is not the one evicted", () => {
-    rememberPool(1, "one");
-    rememberPool(2, "two");
-    expect(cachedPool(1)).toBe("one"); // 1 is now the most recent
-    rememberPool(3, "three");
-    expect(cachedPool(1)).toBe("one");
+    for (const n of [1, 2, 3, 4]) rememberPool(n, String(n));
+    expect(cachedPool(1)).toBe("1"); // 1 is now the most recent
+    rememberPool(5, "5");
+    expect(cachedPool(1)).toBe("1");
     expect(cachedPool(2)).toBeNull();
+  });
+
+  it("keys past-paper pools by level alongside the books", () => {
+    // The exemplar pool is fetched per level, not per document, and it is
+    // read on every generation for that level — so it needs a key of its own
+    // and a slot the book pools do not evict on the next test.
+    rememberPool(7, "book");
+    rememberPool("papers:F3", ["exemplar"]);
+    expect(cachedPool<string[]>("papers:F3")).toEqual(["exemplar"]);
+    expect(cachedPool("papers:F2")).toBeNull();
+    expect(cachedPool(7)).toBe("book");
+  });
+
+  it("remembers that a level has no papers, rather than re-asking", () => {
+    // An empty result is a real answer: without storing it, every test at a
+    // level with no past papers would pay the query again.
+    rememberPool("papers:INT", []);
+    expect(cachedPool<string[]>("papers:INT")).toEqual([]);
   });
 
   it("replaces an entry rather than storing it twice", () => {

@@ -144,7 +144,7 @@ def test_a_model_rejecting_the_request_does_not_end_the_run(monkeypatch):
 
     calls: list[str] = []
 
-    def fake_call_model(api_key, model, images, count, temperature=0.0):
+    def fake_call_model(api_key, model, images, count, temperature=0.0, profile=None):
         calls.append(model)
         if model == CONFIG.vision_model:
             raise ModelRejectedError(f"{model} rejected the request")
@@ -182,15 +182,18 @@ GOOD = {"markdown": "# 目次", "has_japanese": True}
 def _calls_returning(*outcomes):
     """Stub _call that yields each outcome in turn; exceptions are raised."""
     seen: list[float] = []
+    profiles: list[object] = []
 
-    def call(images, count, temperature=0.0):
+    def call(images, count, temperature=0.0, profile=None):
         seen.append(temperature)
+        profiles.append(profile)
         outcome = outcomes[len(seen) - 1]
         if isinstance(outcome, Exception):
             raise outcome
         return [outcome]
 
     call.temperatures = seen
+    call.profiles = profiles
     return call
 
 
