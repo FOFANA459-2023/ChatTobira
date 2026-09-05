@@ -22,6 +22,8 @@ describe("resolveQuery", () => {
       asked: "What is the difference between に and で?",
       isFollowUp: false,
       topics: [],
+      // No page named, so nothing for the page arm to filter on.
+      pageQuery: { pages: [], level: null, textbookOnly: false, sections: [] },
     });
   });
 
@@ -75,7 +77,13 @@ describe("resolveQuery", () => {
   });
 
   it("has nothing to resolve for an empty conversation", () => {
-    expect(resolveQuery([])).toEqual({ text: "", asked: "", isFollowUp: false, topics: [] });
+    expect(resolveQuery([])).toEqual({
+      text: "",
+      asked: "",
+      isFollowUp: false,
+      topics: [],
+      pageQuery: { pages: [], level: null, textbookOnly: false, sections: [] },
+    });
   });
 });
 

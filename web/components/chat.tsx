@@ -8,11 +8,13 @@ import { useEffect, useRef, useState } from "react";
 import { Answer } from "@/components/answer";
 import { FeedbackButtons } from "@/components/feedback-buttons";
 import { MagicLinkForm } from "@/components/magic-link-form";
-import { MicButton } from "@/components/mic-button";
+import { VoiceInput } from "@/components/voice-input";
 import { NavBar } from "@/components/nav";
 import { UploadButton, type AttachedFile } from "@/components/upload-button";
 import type { Citation } from "@/lib/retrieval";
 import type { CourseLevel } from "@/lib/uploads";
+import { SPEAKING_MODES, type SpeakingMode } from "@/lib/speech";
+import { useSpeechToText, useTextToSpeech } from "@/lib/use-voice";
 
 interface MessageMeta {
   citations?: Citation[];
@@ -69,6 +71,22 @@ export function Chat({
   level?: CourseLevel | null;
 }) {
   const [input, setInput] = useState("");
+  // Speaking practice: the same conversation, entered by voice and read back
+  // aloud. Off by default — a student who came to look something up should
+  // not have their answer spoken at them.
+  const [speakingPractice, setSpeakingPractice] = useState(false);
+  const [speakingMode, setSpeakingMode] = useState<SpeakingMode>("free");
+  // Which user turns arrived by voice, so the transcript is shown as the
+  // spoken message it was rather than looking like something they typed.
+  const [spokenTurns, setSpokenTurns] = useState<Set<string>>(() => new Set());
+  const awaitingSpokenId = useRef(false);
+  // Read inside the transport body, which is built once.
+  const practiceRef = useRef({ on: false, mode: "free" as SpeakingMode });
+  practiceRef.current = { on: speakingPractice, mode: speakingMode };
+  // Whether the turn now being answered came by voice, so only those replies
+  // are spoken. A typed question in the middle of a spoken conversation gets
+  // a written answer, which is what typing one means.
+  const replyShouldSpeak = useRef(false);
   // Files stay attached across turns: a student asks several questions about
   // one worksheet, and re-picking it for each would be absurd.
   const [attached, setAttached] = useState<AttachedFile[]>([]);
@@ -78,12 +96,20 @@ export function Chat({
   // conversation row so history and feedback attach correctly.
   const conversationRef = useRef<number | undefined>(undefined);
 
+  const tts = useTextToSpeech();
+
   const { messages, sendMessage, status, error } = useChat({
     transport: new DefaultChatTransport({
       api: "/api/chat",
       // Read from a ref so the id set mid-conversation applies immediately.
       body: () => ({
         conversationId: conversationRef.current,
+        // The one thing voice changes about the request. Retrieval, history,
+        // scope and grounding are untouched: this only tells the tutor it is
+        // being listened to rather than read.
+        speaking: practiceRef.current.on
+          ? { mode: practiceRef.current.mode, level }
+          : undefined,
         // Only files that actually extracted carry context; one still
         // uploading would just be an id the server finds nothing for.
         uploadIds: attachedRef.current
@@ -94,10 +120,36 @@ export function Chat({
     onFinish: ({ message }) => {
       const meta = (message.metadata ?? {}) as MessageMeta;
       if (meta.conversationId) conversationRef.current = meta.conversationId;
+      // The other half of the conversation. Only turns that arrived by voice
+      // are spoken back, and a failure to speak is silent by design: the
+      // answer is already on screen, and the useTextToSpeech fallback has
+      // tried the browser's own voice before giving up.
+      if (!replyShouldSpeak.current) return;
+      replyShouldSpeak.current = false;
+      const said = message.parts
+        .filter((part): part is { type: "text"; text: string } => part.type === "text")
+        .map((part) => part.text)
+        .join("");
+      if (said.trim()) void tts.speak(said);
     },
   });
 
+  const voice = useSpeechToText((text) => {
+    // Straight into the same pipeline a typed question uses. No separate
+    // conversation, no separate retrieval — sendMessage is the identical
+    // call the form makes, so history and context carry across freely.
+    if (busyRef.current) return;
+    awaitingSpokenId.current = true;
+    replyShouldSpeak.current = practiceRef.current.on;
+    tts.stop();
+    void sendMessage({ text });
+  });
+
   const busy = status === "submitted" || status === "streaming";
+  // The transcript callback closes over its first render; a ref keeps it
+  // honest about whether a request is already in flight.
+  const busyRef = useRef(false);
+  busyRef.current = busy;
   const last = messages.at(-1);
   const answerStarted =
     last?.role === "assistant" &&
@@ -105,6 +157,16 @@ export function Chat({
   const pending = busy && !answerStarted;
   const trialExhausted =
     !authenticated && /trial_exhausted/.test(error?.message ?? "");
+
+  // The transcript's message id is only knowable once useChat has added it,
+  // so the turn is tagged on the render after it appears.
+  useEffect(() => {
+    if (!awaitingSpokenId.current) return;
+    const spoken = [...messages].reverse().find((message) => message.role === "user");
+    if (!spoken) return;
+    awaitingSpokenId.current = false;
+    setSpokenTurns((all) => new Set(all).add(spoken.id));
+  }, [messages]);
 
   function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -174,6 +236,15 @@ export function Chat({
                   : "max-w-[95%] break-words rounded-2xl rounded-bl-sm border border-stone-200 bg-white px-4 py-3 text-sm shadow-sm"
               }
             >
+              {message.role === "user" && spokenTurns.has(message.id) && (
+                // What the app heard, shown as what it heard it as. A
+                // mishearing is the student's to catch, and they can only
+                // catch it if it is on the screen.
+                <p className="mb-1 flex items-center gap-1 text-[11px] text-white/60">
+                  <MicGlyph />
+                  spoken
+                </p>
+              )}
               {message.parts.map((part, index) =>
                 part.type === "text" ? (
                   message.role === "assistant" ? (
@@ -187,9 +258,20 @@ export function Chat({
                   )
                 ) : null,
               )}
-              {message.role === "assistant" &&
-                message.id === messages.at(-1)?.id &&
-                !busy && <FeedbackButtons conversationId={meta.conversationId} />}
+              {message.role === "assistant" && !busy && (
+                <div className="mt-1 flex flex-wrap items-center gap-2">
+                  <SpeakButton
+                    text={message.parts
+                      .filter((part): part is { type: "text"; text: string } => part.type === "text")
+                      .map((part) => part.text)
+                      .join("")}
+                    tts={tts}
+                  />
+                  {message.id === messages.at(-1)?.id && (
+                    <FeedbackButtons conversationId={meta.conversationId} />
+                  )}
+                </div>
+              )}
             </div>
           );
         })}
@@ -286,11 +368,56 @@ export function Chat({
             </ul>
           )}
 
+          {authenticated && (
+            // The one switch that changes what a spoken turn gets back: a
+            // conversation partner rather than an explanation. Off by
+            // default, because a student who came to look something up wants
+            // the written answer they have always had.
+            <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
+              <label className="flex cursor-pointer items-center gap-1.5 text-stone-600">
+                <input
+                  type="checkbox"
+                  checked={speakingPractice}
+                  onChange={(e) => {
+                    setSpeakingPractice(e.target.checked);
+                    if (!e.target.checked) tts.stop();
+                  }}
+                  className="h-3.5 w-3.5 accent-stone-900"
+                />
+                <span lang="ja">会話練習</span>
+                <span className="text-stone-400">Speaking practice</span>
+              </label>
+              {speakingPractice && (
+                <>
+                  <select
+                    value={speakingMode}
+                    onChange={(e) => setSpeakingMode(e.target.value as SpeakingMode)}
+                    aria-label="Practice mode"
+                    className="rounded-lg border border-stone-300 bg-white px-2 py-1 text-xs outline-none focus:border-stone-500"
+                  >
+                    {Object.values(SPEAKING_MODES).map((mode) => (
+                      <option key={mode.id} value={mode.id}>
+                        {mode.labelJa} — {mode.label}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-stone-400">
+                    Press the microphone and speak — I will reply in Japanese and read it back.
+                  </span>
+                </>
+              )}
+            </div>
+          )}
+
           <div className="flex gap-2">
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="質問をどうぞ — ask in Japanese or English"
+            placeholder={
+              speakingPractice
+                ? "話しかけてください — or type your turn"
+                : "質問をどうぞ — ask in Japanese or English"
+            }
             className="flex-1 rounded-xl border border-stone-300 px-4 py-2.5 text-sm outline-none focus:border-stone-500"
           />
           {authenticated && (
@@ -306,11 +433,11 @@ export function Chat({
             />
           )}
           {authenticated && (
-            <MicButton
-              disabled={busy}
-              onTranscript={(text) =>
-                setInput((current) => (current ? `${current} ${text}` : text))
-              }
+            <VoiceInput
+              voice={voice}
+              replying={busy}
+              speaking={tts.speaking}
+              onStopSpeaking={tts.stop}
             />
           )}
           <button
@@ -324,5 +451,55 @@ export function Chat({
         </form>
       )}
     </div>
+  );
+}
+
+/** A small mic glyph for the "this turn was spoken" label. */
+function MicGlyph() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
+      <rect x="9" y="2" width="6" height="12" rx="3" />
+      <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+    </svg>
+  );
+}
+
+/** Play any answer aloud, whether or not it arrived by voice.
+ *
+ * Separate from the conversation loop on purpose: a student reading a written
+ * explanation often wants to HEAR the Japanese in it — that is most of what
+ * listening practice is — and they should not have to re-ask by voice to get
+ * it. The button is also the manual control the auto-play needs to be
+ * acceptable: anything that starts talking on its own must be stoppable.
+ */
+function SpeakButton({
+  text,
+  tts,
+}: {
+  text: string;
+  tts: ReturnType<typeof useTextToSpeech>;
+}) {
+  if (!text.trim()) return null;
+  const busy = tts.speaking || tts.loading;
+  return (
+    <button
+      type="button"
+      onClick={() => (busy ? tts.stop() : void tts.speak(text))}
+      className="flex items-center gap-1 rounded-lg px-1.5 py-1 text-xs text-stone-400 hover:bg-stone-100 hover:text-stone-700"
+      aria-label={busy ? "Stop reading this answer" : "Read this answer aloud"}
+      title={busy ? "Stop" : "Read aloud"}
+    >
+      {busy ? (
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <rect x="5" y="5" width="14" height="14" rx="2" />
+        </svg>
+      ) : (
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M11 5 6 9H2v6h4l5 4V5Z" />
+          <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+        </svg>
+      )}
+      {busy ? "Stop" : "Listen"}
+    </button>
   );
 }
