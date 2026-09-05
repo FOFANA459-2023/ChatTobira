@@ -110,9 +110,12 @@ describe("QuizView", () => {
     expect(
       screen.getByText("Particles and polite past-tense forms from Topic 6."),
     ).toBeInTheDocument();
-    // 問題I, 問題II, 問題III — the I-prefix regex matches all three headers.
-    expect(screen.getAllByText(/問題I/)).toHaveLength(3);
-    expect(screen.getByText(/問題II\b/)).toBeInTheDocument();
+    // Sections are headed with a bare Roman numeral and the marks the
+    // section carries — "I. …(1×5)" — which is how the sat papers print
+    // them. None of the 40 papers in the corpus writes 問題I.
+    expect(screen.getAllByText(/^I+\./)).toHaveLength(3);
+    expect(screen.getByText(/^II\./)).toBeInTheDocument();
+    expect(screen.queryByText(/問題/)).not.toBeInTheDocument();
     expect(screen.getByText(/適切なことばを選んでください/)).toBeInTheDocument();
     expect(screen.getByText("Choose the word that fits the blank.")).toBeInTheDocument();
 
@@ -139,7 +142,9 @@ describe("QuizView", () => {
     expect(underlined).toHaveTextContent("食べる");
     expect(screen.queryByText(/【/)).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /① で/ }));
+    // Listed options are lettered a. b. c. — the only labelling the sat
+    // papers use for them.
+    fireEvent.click(screen.getByRole("button", { name: /a\.\s*で/ }));
     fireEvent.change(screen.getByPlaceholderText("こたえ"), {
       target: { value: "食べた" },
     });
@@ -218,7 +223,9 @@ describe("QuizView", () => {
     fireEvent.click(screen.getByRole("button", { name: /Start the Grammar Practice Test/ }));
 
     await screen.findByText("Grammar Practice Test");
-    fireEvent.click(screen.getByRole("button", { name: /① で/ }));
+    // Listed options are lettered a. b. c. — the only labelling the sat
+    // papers use for them.
+    fireEvent.click(screen.getByRole("button", { name: /a\.\s*で/ }));
     fireEvent.change(screen.getByPlaceholderText("こたえ"), {
       target: { value: "tabemashita" },
     });

@@ -12,7 +12,11 @@ export const QuizItemSchema = z.object({
   question: z.string().min(1),
   // Japanese text of the sentence being drilled, when distinct from question.
   sentence: z.string().optional(),
-  choices: z.array(z.string()).length(4).optional(),
+  // 2–5, not a fixed 4. The sat papers print two options inside a bracket
+  // (「はやい ( 早い / 速い )」), three under an a〜c list, four under a〜d,
+  // and five for the kana-identification items. A schema that demanded four
+  // forced every question into a shape the course does not use.
+  choices: z.array(z.string()).min(2).max(5).optional(),
   answer: z.string().min(1),
   // The answer written entirely in hiragana, when answer contains kanji.
   // Grading accepts either script — see isCorrect.
@@ -23,6 +27,11 @@ export const QuizItemSchema = z.object({
   // Shown with the explanation and aggregated into the post-test study plan.
   review: z.string().min(1),
   grammar_point: z.string().optional(),
+  // What this item is FOR, in the generator's own words: the grammar pattern
+  // or the kanji word being tested. It is the axis the duplicate check turns
+  // on — two questions drilling 〜ながら with different nouns are the same
+  // question — and it is what validation checks the item actually exercises.
+  target: z.string().optional(),
 });
 
 /** One 問題 (numbered section) of the paper, mirroring the course review
@@ -31,6 +40,15 @@ export const QuizItemSchema = z.object({
 export const QuizSectionSchema = z.object({
   instruction_ja: z.string().min(1),
   instruction_en: z.string().min(1),
+  /** How this section is answered, from the paper-format catalogue. Decides
+   * how the section renders and which validity rules apply to its items. */
+  form: z.enum(["bracket", "lettered", "written", "maru_batsu"]).optional(),
+  /** The shared list of words a word-bank section draws on, printed in a box
+   * under the items exactly as the papers print it. Each may be used once,
+   * which is a rule the paper states and the validator enforces. */
+  word_bank: z.array(z.string()).max(14).optional(),
+  /** Marks per item, printed beside the instruction as (1×5) or (2点×5). */
+  marks: z.number().int().min(1).max(3).optional(),
   // Reading sections carry the short passage their ○× statements are about,
   // rendered above the items in the style of the printed papers.
   passage: z.string().optional(),
@@ -41,7 +59,7 @@ export const QuizSchema = z.object({
   // 1–2 sentences telling the student what the test covers — the grammar
   // points or vocabulary drilled and where they sit in the course.
   scope_description: z.string().min(1),
-  sections: z.array(QuizSectionSchema).min(1).max(4),
+  sections: z.array(QuizSectionSchema).min(1).max(5),
 });
 
 export type QuizItem = z.infer<typeof QuizItemSchema>;
@@ -444,9 +462,17 @@ export function selectExemplars<T extends ExemplarChunk>(
     if (paperTitle && marker.test(paperTitle)) value += 6;
     else if (paperTitle && other.test(paperTitle)) value -= 4;
     if (marker.test(text)) value += 2;
-    // Same division as the test being written: the closest thing to seeing
-    // the real paper for it.
-    if (topicScope !== null && topic === `T${topicScope}`) value += 5;
+    // A paper from a DIFFERENT topic than the one being tested.
+    //
+    // Counter-intuitive, and measured: showing the generator the Topic 11
+    // paper while asking it to write a Topic 11 test produced six copied
+    // questions out of sixteen. The format of these papers does not vary by
+    // topic — the same four sections, the same instruction lines, the same
+    // option counts run from Topic 1 to Topic 17 — so a neighbouring topic's
+    // paper teaches the form just as well while giving the model nothing
+    // on-topic to lift. The copy filter still runs behind this; the point is
+    // to stop manufacturing the temptation.
+    if (topicScope !== null && topic && topic !== `T${topicScope}`) value += 4;
     // A page with no instruction line is a cover sheet or an overflow page,
     // and it shows the generator nothing about question form.
     if (INSTRUCTION_RE.test(chunk.content)) value += 3;
