@@ -9,6 +9,7 @@ function voiceStub(overrides: Partial<SpeechToText> = {}): SpeechToText {
     state: "idle",
     error: null,
     level: 0,
+    hearing: false,
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn(),
     cancel: vi.fn(),
@@ -17,30 +18,36 @@ function voiceStub(overrides: Partial<SpeechToText> = {}): SpeechToText {
   };
 }
 
-function setup(overrides: Partial<SpeechToText> = {}, props: Partial<Parameters<typeof VoiceInput>[0]> = {}) {
-  const voice = voiceStub(overrides);
+type Props = Parameters<typeof VoiceInput>[0];
+
+function setup(voiceOverrides: Partial<SpeechToText> = {}, props: Partial<Props> = {}) {
+  const voice = voiceStub(voiceOverrides);
+  const onLiveChange = vi.fn();
   const onStopSpeaking = vi.fn();
   render(
     <VoiceInput
       voice={voice}
+      live={false}
+      onLiveChange={onLiveChange}
       replying={false}
       speaking={false}
       onStopSpeaking={onStopSpeaking}
       {...props}
     />,
   );
-  return { voice, onStopSpeaking };
+  return { voice, onLiveChange, onStopSpeaking };
 }
 
-describe("the microphone at rest", () => {
-  it("invites the student to speak", () => {
+describe("starting a conversation", () => {
+  it("offers to start one", () => {
     setup();
-    expect(screen.getByRole("button", { name: "Speak Japanese" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Start a spoken conversation" })).toBeEnabled();
   });
 
-  it("starts recording when pressed", () => {
-    const { voice } = setup();
-    fireEvent.click(screen.getByRole("button", { name: "Speak Japanese" }));
+  it("goes live and opens the microphone on one press", () => {
+    const { voice, onLiveChange } = setup();
+    fireEvent.click(screen.getByRole("button"));
+    expect(onLiveChange).toHaveBeenCalledWith(true);
     expect(voice.start).toHaveBeenCalledTimes(1);
   });
 
@@ -52,77 +59,80 @@ describe("the microphone at rest", () => {
   });
 });
 
-describe("listening", () => {
-  it("shows that it is listening, in the language being practised", () => {
-    setup({ state: "listening" });
+describe("while the conversation is live", () => {
+  it("waits without claiming to hear anything", () => {
+    // The microphone is open and the student has not started. Saying
+    // "listening" here would be a lie the meter immediately contradicts.
+    setup({ state: "listening", hearing: false }, { live: true });
+    expect(screen.getByRole("status")).toHaveTextContent("go ahead");
+  });
+
+  it("says it is listening once the student actually speaks", () => {
+    setup({ state: "listening", hearing: true }, { live: true });
     expect(screen.getByRole("status")).toHaveTextContent("聞いています");
   });
 
-  it("turns the button into a stop, which sends the turn", () => {
-    const { voice } = setup({ state: "listening" });
-    const button = screen.getByRole("button", { name: "Stop recording and send" });
-    expect(button).toHaveAttribute("aria-pressed", "true");
-    fireEvent.click(button);
-    expect(voice.stop).toHaveBeenCalledTimes(1);
-    expect(voice.start).not.toHaveBeenCalled();
-  });
-
-  it("offers a cancel that throws the recording away", () => {
-    // Stopping sends what you said; cancelling is how you take it back.
-    const { voice } = setup({ state: "listening" });
-    fireEvent.click(screen.getByRole("button", { name: /Cancel/ }));
-    expect(voice.cancel).toHaveBeenCalledTimes(1);
-    expect(voice.stop).not.toHaveBeenCalled();
-  });
-
-  it("has no cancel when there is nothing to cancel", () => {
-    setup();
+  it("has no stop button for the utterance, because there is nothing to press", () => {
+    // The whole point of the redesign: the end of a sentence is detected, not
+    // declared. A student who has to press stop is not having a conversation.
+    setup({ state: "listening", hearing: true }, { live: true });
     expect(screen.queryByRole("button", { name: /Cancel/ })).not.toBeInTheDocument();
-  });
-});
-
-describe("while the turn is being processed", () => {
-  it("locks the button during transcription", () => {
-    // The failure this prevents: a second recording starting on top of the
-    // first, so two turns race into one conversation.
-    const { voice } = setup({ state: "transcribing" });
-    const button = screen.getByRole("button", { name: "Transcribing your speech" });
-    expect(button).toBeDisabled();
-    fireEvent.click(button);
-    expect(voice.start).not.toHaveBeenCalled();
-    expect(screen.getByRole("status")).toHaveTextContent("Transcribing");
+    expect(screen.getAllByRole("button")).toHaveLength(1);
   });
 
-  it("locks it again while the tutor is thinking", () => {
-    const { voice } = setup({}, { replying: true });
-    const button = screen.getByRole("button", { name: "Waiting for the reply" });
-    expect(button).toBeDisabled();
-    fireEvent.click(button);
-    expect(voice.start).not.toHaveBeenCalled();
-  });
-
-  it("stays locked however many times it is pressed", () => {
-    // Requirement: rapid repeated clicks must not queue recordings.
-    const { voice } = setup({ state: "transcribing" });
-    const button = screen.getByRole("button");
-    for (let i = 0; i < 6; i++) fireEvent.click(button);
-    expect(voice.start).not.toHaveBeenCalled();
-  });
-});
-
-describe("while the tutor is speaking", () => {
-  it("becomes a way to stop the audio", () => {
-    const { voice, onStopSpeaking } = setup({}, { speaking: true });
-    fireEvent.click(screen.getByRole("button", { name: "Stop the reply" }));
+  it("ends the whole conversation on one press", () => {
+    const { voice, onLiveChange, onStopSpeaking } = setup(
+      { state: "listening", hearing: true },
+      { live: true },
+    );
+    fireEvent.click(screen.getByRole("button"));
+    expect(onLiveChange).toHaveBeenCalledWith(false);
+    expect(voice.cancel).toHaveBeenCalledTimes(1);
     expect(onStopSpeaking).toHaveBeenCalledTimes(1);
-    // Stopping the reply must not also start recording: a student silencing
-    // the app has not yet decided to say anything.
     expect(voice.start).not.toHaveBeenCalled();
   });
 
-  it("says so", () => {
-    setup({}, { speaking: true });
-    expect(screen.getByRole("status")).toHaveTextContent("話しています");
+  it("reports each stage of the turn", () => {
+    for (const [voiceState, props, expected] of [
+      [{ state: "transcribing" as const }, { live: true }, "Transcribing"],
+      [{}, { live: true, replying: true }, "Thinking"],
+      [{}, { live: true, speaking: true }, "話しています"],
+    ] as const) {
+      const { unmount } = render(
+        <VoiceInput
+          voice={voiceStub(voiceState)}
+          onLiveChange={vi.fn()}
+          replying={false}
+          speaking={false}
+          onStopSpeaking={vi.fn()}
+          {...props}
+        />,
+      );
+      expect(screen.getByRole("status")).toHaveTextContent(expected);
+      unmount();
+    }
+  });
+
+  it("stays one button through every stage", () => {
+    // Nothing appears or disappears mid-turn: a control that changes shape
+    // while the student is mid-sentence is a control they stop trusting.
+    for (const props of [
+      { live: true, replying: true },
+      { live: true, speaking: true },
+    ]) {
+      const { unmount } = render(
+        <VoiceInput
+          voice={voiceStub({ state: "idle" })}
+          onLiveChange={vi.fn()}
+          replying={false}
+          speaking={false}
+          onStopSpeaking={vi.fn()}
+          {...props}
+        />,
+      );
+      expect(screen.getAllByRole("button")).toHaveLength(1);
+      unmount();
+    }
   });
 });
 
@@ -141,6 +151,8 @@ describe("errors", () => {
       const { unmount } = render(
         <VoiceInput
           voice={voiceStub({ state: "error", error: reason })}
+          live
+          onLiveChange={vi.fn()}
           replying={false}
           speaking={false}
           onStopSpeaking={vi.fn()}
@@ -153,10 +165,11 @@ describe("errors", () => {
     }
   });
 
-  it("lets the student retry, which clears the error first", () => {
-    const { voice } = setup({ state: "error", error: "permission" });
-    fireEvent.click(screen.getByRole("button", { name: "Speak Japanese" }));
+  it("clears the error before trying again", () => {
+    const { voice, onLiveChange } = setup({ state: "error", error: "permission" });
+    fireEvent.click(screen.getByRole("button"));
     expect(voice.clearError).toHaveBeenCalledTimes(1);
+    expect(onLiveChange).toHaveBeenCalledWith(true);
     expect(voice.start).toHaveBeenCalledTimes(1);
   });
 });
@@ -164,6 +177,6 @@ describe("errors", () => {
 describe("when the composer is disabled", () => {
   it("goes with it", () => {
     setup({}, { disabled: true });
-    expect(screen.getByRole("button", { name: "Speak Japanese" })).toBeDisabled();
+    expect(screen.getByRole("button")).toBeDisabled();
   });
 });
