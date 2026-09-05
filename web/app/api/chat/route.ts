@@ -44,6 +44,17 @@ const BodySchema = z.object({
   // Files the student attached to this turn. Their extracted text becomes
   // context; the files themselves never leave Storage.
   uploadIds: z.array(z.number().int().positive()).max(4).optional(),
+  // Set when the turn arrived by voice. It changes the SHAPE of the reply —
+  // a conversation partner rather than a tutor writing an explanation — and
+  // nothing else: the same retrieval, the same conversation, the same
+  // history, so a spoken turn and a typed one sit in one thread.
+  speaking: z
+    .object({
+      mode: z.enum(["free", "topic", "roleplay", "grammar"]).default("free"),
+      level: z.enum(["F2", "F3", "INT"]).nullable().optional(),
+      subject: z.string().trim().max(120).optional(),
+    })
+    .optional(),
 });
 
 function textOf(message: UIMessage): string {
@@ -75,7 +86,7 @@ export async function POST(request: Request) {
   if (!parsed.success) {
     return Response.json({ error: "bad_request" }, { status: 400 });
   }
-  const { messages, scope, uploadIds } = parsed.data;
+  const { messages, scope, uploadIds, speaking } = parsed.data;
   let { conversationId } = parsed.data;
 
   // Retrieval used to search on the last message alone, so "what about the
@@ -342,6 +353,9 @@ export async function POST(request: Request) {
     canPointToBook: citations.length > 0,
     hasUploads: attached.length > 0,
     hasPastPapers: context.some((chunk) => chunk.doc_type === "past_paper"),
+    speaking: speaking
+      ? { mode: speaking.mode, level: speaking.level ?? null, subject: speaking.subject }
+      : undefined,
   })}\n\n=== SOURCE MATERIAL ===\n${contextBlock(context, attached)}`;
   const modelMessages = await convertToModelMessages(recentTurns(messages));
 

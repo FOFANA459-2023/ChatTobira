@@ -1,5 +1,7 @@
 import { languageRule, type LanguageMode } from "./language";
 import type { RetrievedChunk, StudyScope } from "./retrieval";
+import { speakingPrompt, type SpeakingMode } from "./speech";
+import type { CourseLevel } from "./uploads";
 
 export interface PromptOptions {
   /** True when the student actually attached a file this turn. The upload
@@ -17,6 +19,10 @@ export interface PromptOptions {
   /** True when a textbook page was retrieved that the student could be
    * pointed at. Without one, the closing offer would be an empty promise. */
   canPointToBook?: boolean;
+  /** Set when the student is SPEAKING rather than typing. The tutor becomes
+   * a conversation partner: short Japanese turns that hand the conversation
+   * back, rather than an explanation the student would have to listen to. */
+  speaking?: { mode: SpeakingMode; level: CourseLevel | null; subject?: string };
   /** True when one of the retrieved sources is a past exam paper. The rules
    * for reading one are omitted otherwise: a model told how to talk about
    * past papers with none in front of it starts referring to them anyway. */
@@ -31,6 +37,7 @@ export function systemPrompt(scope: StudyScope, options: PromptOptions = {}): st
     canPointToBook = false,
     hasUploads = false,
     hasPastPapers = false,
+    speaking,
   } = options;
 
   const scopeLine = scope.topic
@@ -107,7 +114,15 @@ ${
     ? "- Example sentences go one per line. No English translation under them: the student asked for Japanese, and a translation under every line is the answer written twice."
     : "- Example sentences go one per line, each followed by its English translation on the next line."
 }
-${scopeLine}`;
+${scopeLine}${
+    // Last, and deliberately so. Speaking practice contradicts most of what
+    // is above — lead with the answer, earn it with examples, close by
+    // pointing at a page — and the closing instruction is the one a model
+    // follows. Nothing above is deleted, because a student mid-conversation
+    // still asks real questions, and the grounding and language rules still
+    // apply to the answer they get.
+    speaking ? `\n\n${speakingPrompt(speaking.mode, speaking.level, speaking.subject)}` : ""
+  }`;
 }
 
 /** Per-chunk and total character budgets for the model context. Groq's free
