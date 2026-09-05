@@ -13,8 +13,7 @@ import { NavBar } from "@/components/nav";
 import { UploadButton, type AttachedFile } from "@/components/upload-button";
 import type { Citation } from "@/lib/retrieval";
 import type { CourseLevel } from "@/lib/uploads";
-import { SPEAKING_MODES, type SpeakingMode } from "@/lib/speech";
-import { useSpeechToText, useTextToSpeech } from "@/lib/use-voice";
+import { useSpeechToText, useTextToSpeech, type SpeechToText } from "@/lib/use-voice";
 
 interface MessageMeta {
   citations?: Citation[];
@@ -71,18 +70,19 @@ export function Chat({
   level?: CourseLevel | null;
 }) {
   const [input, setInput] = useState("");
-  // Speaking practice: the same conversation, entered by voice and read back
-  // aloud. Off by default — a student who came to look something up should
-  // not have their answer spoken at them.
-  const [speakingPractice, setSpeakingPractice] = useState(false);
-  const [speakingMode, setSpeakingMode] = useState<SpeakingMode>("free");
+  // Voice is a way of taking a turn, not a mode the student configures. The
+  // dropdown that used to ask whether this was free conversation, topic
+  // practice, role play or grammar practice is gone: a conversation partner
+  // works that out from what is being said, and asking the student to
+  // declare it up front is the opposite of a conversation.
+  const [voiceLive, setVoiceLive] = useState(false);
   // Which user turns arrived by voice, so the transcript is shown as the
   // spoken message it was rather than looking like something they typed.
   const [spokenTurns, setSpokenTurns] = useState<Set<string>>(() => new Set());
   const awaitingSpokenId = useRef(false);
   // Read inside the transport body, which is built once.
-  const practiceRef = useRef({ on: false, mode: "free" as SpeakingMode });
-  practiceRef.current = { on: speakingPractice, mode: speakingMode };
+  const voiceLiveRef = useRef(false);
+  voiceLiveRef.current = voiceLive;
   // Whether the turn now being answered came by voice, so only those replies
   // are spoken. A typed question in the middle of a spoken conversation gets
   // a written answer, which is what typing one means.
@@ -96,7 +96,21 @@ export function Chat({
   // conversation row so history and feedback attach correctly.
   const conversationRef = useRef<number | undefined>(undefined);
 
-  const tts = useTextToSpeech();
+  // The two halves of the loop refer to each other, so each reaches the
+  // other through a ref rather than a closure over a value that does not
+  // exist yet.
+  const voiceRef = useRef<SpeechToText | null>(null);
+
+  const tts = useTextToSpeech({
+    // The turn is over and the student is expected to reply, so the
+    // microphone opens itself. This is the whole difference between a
+    // conversation and a walkie-talkie: nobody presses anything between
+    // turns. It stops the moment they leave voice — by typing, or by
+    // pressing the button again.
+    onDone: () => {
+      if (voiceLiveRef.current) void voiceRef.current?.start();
+    },
+  });
 
   const { messages, sendMessage, status, error } = useChat({
     transport: new DefaultChatTransport({
@@ -104,12 +118,11 @@ export function Chat({
       // Read from a ref so the id set mid-conversation applies immediately.
       body: () => ({
         conversationId: conversationRef.current,
-        // The one thing voice changes about the request. Retrieval, history,
-        // scope and grounding are untouched: this only tells the tutor it is
-        // being listened to rather than read.
-        speaking: practiceRef.current.on
-          ? { mode: practiceRef.current.mode, level }
-          : undefined,
+        // The one thing voice changes about the request: it tells the tutor
+        // it is being listened to rather than read. Retrieval, history and
+        // grounding are untouched, which is what keeps a spoken turn and a
+        // typed one in the same conversation.
+        speaking: voiceLiveRef.current ? { mode: "free" as const, level } : undefined,
         // Only files that actually extracted carry context; one still
         // uploading would just be an id the server finds nothing for.
         uploadIds: attachedRef.current
@@ -134,16 +147,24 @@ export function Chat({
     },
   });
 
-  const voice = useSpeechToText((text) => {
-    // Straight into the same pipeline a typed question uses. No separate
-    // conversation, no separate retrieval — sendMessage is the identical
-    // call the form makes, so history and context carry across freely.
-    if (busyRef.current) return;
-    awaitingSpokenId.current = true;
-    replyShouldSpeak.current = practiceRef.current.on;
-    tts.stop();
-    void sendMessage({ text });
-  });
+  const voice = useSpeechToText(
+    (text) => {
+      // Straight into the same pipeline a typed question uses. No separate
+      // conversation, no separate retrieval — sendMessage is the identical
+      // call the form makes, so history and context carry across freely.
+      if (busyRef.current) return;
+      awaitingSpokenId.current = true;
+      replyShouldSpeak.current = voiceLiveRef.current;
+      tts.stop();
+      void sendMessage({ text });
+    },
+    {
+      // Barge-in. The student starting to talk is the end of the tutor's
+      // turn, exactly as it would be with a person.
+      onSpeechStart: () => tts.stop(),
+    },
+  );
+  voiceRef.current = voice;
 
   const busy = status === "submitted" || status === "streaming";
   // The transcript callback closes over its first render; a ref keeps it
@@ -368,54 +389,35 @@ export function Chat({
             </ul>
           )}
 
-          {authenticated && (
-            // The one switch that changes what a spoken turn gets back: a
-            // conversation partner rather than an explanation. Off by
-            // default, because a student who came to look something up wants
-            // the written answer they have always had.
-            <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
-              <label className="flex cursor-pointer items-center gap-1.5 text-stone-600">
-                <input
-                  type="checkbox"
-                  checked={speakingPractice}
-                  onChange={(e) => {
-                    setSpeakingPractice(e.target.checked);
-                    if (!e.target.checked) tts.stop();
-                  }}
-                  className="h-3.5 w-3.5 accent-stone-900"
-                />
-                <span lang="ja">会話練習</span>
-                <span className="text-stone-400">Speaking practice</span>
-              </label>
-              {speakingPractice && (
-                <>
-                  <select
-                    value={speakingMode}
-                    onChange={(e) => setSpeakingMode(e.target.value as SpeakingMode)}
-                    aria-label="Practice mode"
-                    className="rounded-lg border border-stone-300 bg-white px-2 py-1 text-xs outline-none focus:border-stone-500"
-                  >
-                    {Object.values(SPEAKING_MODES).map((mode) => (
-                      <option key={mode.id} value={mode.id}>
-                        {mode.labelJa} — {mode.label}
-                      </option>
-                    ))}
-                  </select>
-                  <span className="text-stone-400">
-                    Press the microphone and speak — I will reply in Japanese and read it back.
-                  </span>
-                </>
-              )}
-            </div>
+          {voiceLive && (
+            // The only thing the interface has to say about voice: that it is
+            // on, and how to leave. No mode picker, no practice switch — the
+            // tutor infers what kind of conversation this is from what is
+            // being said.
+            <p className="mb-2 flex items-center gap-2 text-xs text-stone-500">
+              <span lang="ja">会話中</span>
+              <span className="text-stone-400">
+                Speak whenever you like — I am listening between replies. Type to go back to writing.
+              </span>
+            </p>
           )}
 
           <div className="flex gap-2">
           <input
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              // Typing IS the switch back to text: the loop stops listening
+              // and stops talking, and the conversation carries on unbroken.
+              if (e.target.value && voiceLiveRef.current) {
+                setVoiceLive(false);
+                voice.cancel();
+                tts.stop();
+              }
+            }}
             placeholder={
-              speakingPractice
-                ? "話しかけてください — or type your turn"
+              voiceLive
+                ? "話しかけてください — or type to switch back"
                 : "質問をどうぞ — ask in Japanese or English"
             }
             className="flex-1 rounded-xl border border-stone-300 px-4 py-2.5 text-sm outline-none focus:border-stone-500"
@@ -435,6 +437,8 @@ export function Chat({
           {authenticated && (
             <VoiceInput
               voice={voice}
+              live={voiceLive}
+              onLiveChange={setVoiceLive}
               replying={busy}
               speaking={tts.speaking}
               onStopSpeaking={tts.stop}

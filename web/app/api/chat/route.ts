@@ -6,17 +6,24 @@ import { z } from "zod";
 
 import { detectLanguageMode, withoutLanguageRequest } from "@/lib/language";
 import { pageSpellings } from "@/lib/pages";
+import { classifyTurn, contextSizeFor } from "@/lib/intent";
 import { aspectOf } from "@/lib/topics";
 import { contextBlock, recentTurns, systemPrompt, type AttachedUpload } from "@/lib/prompt";
-import { isProviderDead, noteProviderFailure } from "@/lib/providers";
+import {
+  canTakePrompt,
+  estimateTokens,
+  isProviderDead,
+  noteProviderFailure,
+  noteProviderSuccess,
+} from "@/lib/providers";
 import { serviceClient } from "@/lib/supabase/service";
+import { Stopwatch } from "@/lib/timing";
 import { trialCookie, trialUsed, TRIALS } from "@/lib/trial";
 import {
   broadenQuery,
   buildCitations,
   embedQuery,
   grammarPatterns,
-  isSmallTalk,
   isThinResult,
   resolveQuery,
   retrieve,
@@ -84,6 +91,7 @@ export async function POST(request: Request) {
   // question inside it is what the embedding call needs and that call is the
   // longest single hop in the route. Firing it here rather than after
   // authentication lets the two overlap instead of queueing.
+  const clock = new Stopwatch();
   const parsed = BodySchema.safeParse(await request.json());
   if (!parsed.success) {
     return Response.json({ error: "bad_request" }, { status: 400 });
@@ -115,7 +123,13 @@ export async function POST(request: Request) {
   // Small talk skips the whole retrieval stack — no embedding round-trip, no
   // cache probe, no vector search. Faster first token, and no absurd
   // textbook citation under "hello".
-  const trivial = isSmallTalk(question);
+  // What this turn is for, and therefore whether it needs the corpus at all.
+  // Retrieval used to be unconditional, which cost a casual spoken sentence
+  // ten seconds: it searched every book, filled the prompt with 8,000
+  // characters of textbook, and pushed the request past the fast model's
+  // ceiling so the slow tier had to answer it.
+  const intent = classifyTurn(question, Boolean(speaking));
+  const trivial = !intent.needsRetrieval;
   // When the question arrived, so the stored turn keeps its real order even
   // though it is written after the answer has finished streaming.
   const askedAt = new Date().toISOString();
@@ -126,7 +140,9 @@ export async function POST(request: Request) {
   // paid on the highest-quota model in the stack.
   // Embedded on the RESOLVED query, so a follow-up searches the corpus for
   // what it is actually about rather than for the pronoun it was typed with.
-  const embedding = trivial ? Promise.resolve(null) : embedQuery(query.text).catch(() => null);
+  const embedding = trivial
+    ? Promise.resolve(null)
+    : clock.time("embed", embedQuery(query.text).catch(() => null));
 
   const supabase = await createClient();
   let user = null;
@@ -241,12 +257,10 @@ export async function POST(request: Request) {
     return null;
   };
 
-  const [persistedId, quotaVerdict, queryVector, attached] = await Promise.all([
-    ensureConversation(),
-    checkQuota(),
-    embedding,
-    fetchAttached(),
-  ]);
+  const [persistedId, quotaVerdict, queryVector, attached] = await clock.time(
+    "session",
+    Promise.all([ensureConversation(), checkQuota(), embedding, fetchAttached()]),
+  );
   conversationId = persistedId ?? conversationId;
   if (quotaVerdict) return quotaVerdict;
 
@@ -289,7 +303,9 @@ export async function POST(request: Request) {
     // from it, and the explanation may live elsewhere in the book.
     const pageQuery = query.pageQuery;
 
-    const [{ data: cached }, retrieval, exact, byTopic, byPage] = await Promise.all([
+    const [{ data: cached }, retrieval, exact, byTopic, byPage] = await clock.time(
+      "retrieve",
+      Promise.all([
       cacheable
         ? db.rpc("cache_get", {
             query_embedding: vectorLiteral,
@@ -308,7 +324,8 @@ export async function POST(request: Request) {
       retrieveExact(db, patterns).catch(() => [] as RetrievedChunk[]),
       retrieveByTopic(db, divisions, aspect).catch(() => [] as RetrievedChunk[]),
       retrieveByPage(db, pageQuery, scope).catch(() => [] as RetrievedChunk[]),
-    ]);
+      ]),
+    );
 
     // Semantic cache: 100 students ask the same ~30 grammar questions, and a
     // hit here costs no Groq/Gemini quota at all.
@@ -344,9 +361,12 @@ export async function POST(request: Request) {
     if (!byPage.length && isThinResult(chunks)) {
       const broadened = broadenQuery(query.text, divisions, aspect);
       if (broadened && broadened !== query.text) {
-        const retry = await embedQuery(broadened)
-          .then((vector) => retrieve(db, vector, tokensForQuery(broadened), scope, 14))
-          .catch(() => [] as RetrievedChunk[]);
+        const retry = await clock.time(
+          "broaden",
+          embedQuery(broadened)
+            .then((vector) => retrieve(db, vector, tokensForQuery(broadened), scope, 14))
+            .catch(() => [] as RetrievedChunk[]),
+        );
         chunks = merge(byPage, byTopic, exact, retry, retrieval.rows);
       }
     }
@@ -356,7 +376,9 @@ export async function POST(request: Request) {
   // first. Citations come from that same set rather than from every
   // candidate — a page the answer was never built from is not a page the
   // answer can honestly offer to send the student to.
-  const context = selectContext(chunks);
+  const context = selectContext(chunks, {
+    limit: contextSizeFor(intent.intent, Boolean(speaking)),
+  });
   const citations = buildCitations(context);
 
   // Did the page the student named actually make it into what the model
@@ -421,21 +443,41 @@ export async function POST(request: Request) {
   }[] = [];
   const chatOptions = { system, messages: modelMessages, temperature: 0.3 };
 
-  // Verified against the Groq catalogue: llama-3.3-70b-versatile was retired
-  // and every request to it came back 404, which silently demoted the whole
-  // cascade to its last-resort tier. gpt-oss-120b is the largest model the
-  // free tier serves, and it is the one the quiz route already runs on.
-  const groqModel = process.env.CHAT_MODEL ?? "openai/gpt-oss-120b";
-  tiers.push({
-    provider: "groq",
-    label: groqModel,
-    start: () => streamText({ model: groq(groqModel), ...chatOptions }),
-  });
+  // What this turn will cost, so a tier that cannot take it is skipped rather
+  // than discovered. Measured: an oversized prompt costs seven seconds to be
+  // refused by Groq, on a turn where the answer was always going to come from
+  // somewhere else.
+  const promptTokens =
+    estimateTokens(system) +
+    modelMessages.reduce(
+      (total, message) => total + estimateTokens(JSON.stringify(message.content)),
+      0,
+    );
+
+  /** A tier worth trying: alive, and big enough for this prompt. */
+  const usable = (provider: string) =>
+    !isProviderDead(provider) && canTakePrompt(provider, promptTokens);
+
+  // Verified against the live Groq catalogue, twice over. llama-3.3-70b-versatile
+  // was retired and answers 404. gpt-oss-120b — which replaced it here — is a
+  // REASONING model: it streams its reasoning and returns empty content, which
+  // the SDK reports as "No output generated" after about seven seconds. Both
+  // failures are silent from the outside and both demoted every turn to the
+  // slow tier. Measured first-token latency on a Japanese conversational turn:
+  // qwen 282ms, gpt-oss-20b 698ms, gpt-oss-120b never.
+  const groqModel = process.env.CHAT_MODEL ?? "qwen/qwen3.8-27b";
+  if (usable("groq")) {
+    tiers.push({
+      provider: "groq",
+      label: groqModel,
+      start: () => streamText({ model: groq(groqModel), ...chatOptions }),
+    });
+  }
 
   // Skipped once it has answered 402 (unfunded balance) or 401 (bad key):
   // that verdict holds until the account is topped up, and re-asking every
   // request would just add a round-trip in front of Gemini.
-  if (process.env.DEEPSEEK_API_KEY && !isProviderDead("deepseek")) {
+  if (process.env.DEEPSEEK_API_KEY && usable("deepseek")) {
     const deepseek = createDeepSeek({ apiKey: process.env.DEEPSEEK_API_KEY });
     const deepseekModel = process.env.DEEPSEEK_MODEL ?? "deepseek-v4-flash";
     tiers.push({
@@ -445,6 +487,9 @@ export async function POST(request: Request) {
     });
   }
 
+  // Always last and never skipped: it is the tier that has to answer when the
+  // others cannot, so a health check that could empty the list is worse than
+  // a call that might fail.
   const geminiModel = process.env.FALLBACK_MODEL ?? "gemini-3.6-flash";
   tiers.push({
     provider: "google",
@@ -456,10 +501,13 @@ export async function POST(request: Request) {
   let modelUsed = "";
   for (const tier of tiers) {
     const attempt = tier.start();
+    const tierFrom = Date.now();
     try {
       // Resolves once the provider accepts the request; rejects on 429/5xx
       // before any tokens stream, which is exactly the fallback window.
       await attempt.warnings;
+      clock.mark(`model:${tier.provider}`);
+      noteProviderSuccess(tier.provider);
       result = attempt;
       modelUsed = tier.label;
       break;
@@ -468,7 +516,7 @@ export async function POST(request: Request) {
       // Unfunded or revoked: stop offering it until the isolate recycles.
       // Logged so an all-tiers failure is diagnosable from the worker logs.
       console.error(
-        `chat tier ${tier.label} declined:`,
+        `chat tier ${tier.label} declined after ${Date.now() - tierFrom}ms:`,
         error instanceof Error ? error.message : error,
       );
       noteProviderFailure(tier.provider, error);
@@ -478,6 +526,15 @@ export async function POST(request: Request) {
   if (!result) {
     return Response.json({ error: "all_models_unavailable" }, { status: 502 });
   }
+
+  // One line per turn, slowest stage first. This is the whole of the
+  // performance instrumentation: the answer streams from here, so the time
+  // recorded is the time until the student sees a first word.
+  console.info(
+    clock.format(
+      `turn ${speaking ? "spoken" : "typed"}/${intent.intent} (${intent.because}) ~${promptTokens}tok via ${modelUsed}`,
+    ),
+  );
 
   return result.toUIMessageStreamResponse({
     headers: setCookie ? { "Set-Cookie": setCookie } : undefined,

@@ -6,6 +6,7 @@ import {
   SPEAKING_MODES,
   speakableText,
   speakingPrompt,
+  sentences,
   speechSegments,
 } from "@/lib/speech";
 
@@ -208,5 +209,43 @@ describe("the speaking prompt inside the system prompt", () => {
     const prompt = systemPrompt({}, { speaking: { mode: "topic", level: "F2", subject: "買い物" } });
     expect(prompt).toMatch(/GROUNDING/);
     expect(prompt).toContain("買い物");
+  });
+});
+
+describe("sentences", () => {
+  it("splits a reply so the first clause can play while the rest is made", () => {
+    expect(
+      sentences("京都では何をしましたか？わたしも去年、京都へ行きました。"),
+    ).toEqual(["京都では何をしましたか？", "わたしも去年、京都へ行きました。"]);
+  });
+
+  it("will not send a clause too short for the voice to synthesise", () => {
+    // Measured against the live service: 「いいですね！」 alone came back with
+    // no audio at all. A clause shorter than a real sentence rides with the
+    // next one instead of being sent on its own.
+    expect(sentences("いいですね！京都では何をしましたか？")).toEqual([
+      "いいですね！ 京都では何をしましたか？",
+    ]);
+  });
+
+  it("splits English sentences too", () => {
+    expect(sentences("That is right. What did you do there?")).toEqual([
+      "That is right.",
+      "What did you do there?",
+    ]);
+  });
+
+  it("folds a bare acknowledgement into the sentence after it", () => {
+    expect(sentences("はい。京都はとてもきれいな町ですね。")).toEqual([
+      "はい。 京都はとてもきれいな町ですね。",
+    ]);
+  });
+
+  it("keeps a single sentence whole", () => {
+    expect(sentences("京都はとてもきれいな町ですね")).toEqual(["京都はとてもきれいな町ですね"]);
+  });
+
+  it("never returns nothing for text that had something in it", () => {
+    expect(sentences("あ")).toEqual(["あ"]);
   });
 });

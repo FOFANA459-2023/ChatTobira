@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { speakableText, speechSegments } from "./speech";
+import { speakableText, sentences, speechSegments } from "./speech";
 
 /* ------------------------------------------------------------------------ */
 /* Recording                                                                  */
@@ -35,15 +35,13 @@ export const VOICE_ERROR_TEXT: Record<VoiceError, string> = {
  *
  * Chrome and Firefox produce webm/opus; Safari, including every browser on
  * iOS, produces mp4. Hardcoding webm meant the mic silently failed on iPhone,
- * which is where a student practising speaking is most likely to be. Whisper
- * accepts both, so the only requirement is that we ask for one the browser
- * has and label the upload with what we actually got. */
+ * which is where a student practising speaking is most likely to be. */
 function pickMimeType(): string | undefined {
   if (typeof MediaRecorder === "undefined") return undefined;
   for (const type of ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg"]) {
     if (MediaRecorder.isTypeSupported(type)) return type;
   }
-  return undefined; // let the browser choose its own default
+  return undefined;
 }
 
 function extensionFor(mimeType: string): string {
@@ -52,30 +50,56 @@ function extensionFor(mimeType: string): string {
   return "webm";
 }
 
+/* --- Voice activity detection -------------------------------------------
+ *
+ * Built on the AnalyserNode that was already there to draw the level meter,
+ * because the alternative is a new dependency: a Silero/ONNX VAD is a better
+ * detector and costs a WASM model download and a package this project has
+ * not agreed to. Energy over a threshold is cruder and good enough for one
+ * speaker close to a microphone, which is the case here.
+ *
+ * The numbers are the whole design. A pause inside a sentence — 「昨日、
+ * 大学の友達と……」 — runs a few hundred milliseconds; the gap after a finished
+ * thought runs longer. 1.1 seconds sits between the two: long enough not to
+ * cut a student off mid-sentence while they search for a word, short enough
+ * that the reply does not feel like it is waiting for permission.
+ */
+const SPEECH_LEVEL = 0.12; // above this, someone is talking
+const SILENCE_LEVEL = 0.07; // below this, nobody is (hysteresis, not one line)
+const SILENCE_MS = 1100; // quiet for this long after speech ends the turn
+const MIN_SPEECH_MS = 300; // shorter than this was a cough, not a sentence
+const MAX_UTTERANCE_MS = 30_000; // a safety stop, never reached in conversation
+const LEAD_IN_MS = 6000; // give someone this long to start before giving up
+
 export interface SpeechToText {
   state: ListenState;
   error: VoiceError | null;
   /** Rough input loudness, 0–1, for the listening indicator. */
   level: number;
+  /** True once the student has actually started talking this turn. */
+  hearing: boolean;
   start: () => Promise<void>;
   stop: () => void;
   cancel: () => void;
   clearError: () => void;
 }
 
-/** Microphone capture and transcription, as one state machine.
+/** Microphone capture, endpointing and transcription, as one state machine.
  *
  * Speech-to-text is the app's existing /api/transcribe — Groq Whisper, no
- * language pin so it detects Japanese or English. This adds only the things a
- * conversation needs that push-to-talk did not: a loudness reading so the
- * student can see they are being heard, a cancel that throws the audio away,
- * and a guarantee that a second recording cannot start while the first is
- * still in flight.
+ * language pin so it detects Japanese or English and the same route serves
+ * both. What this adds is the part that makes it a conversation rather than
+ * a dictation box: the student does not press stop. Speech is detected,
+ * the end of it is detected, and the turn goes on its own.
  */
-export function useSpeechToText(onTranscript: (text: string) => void): SpeechToText {
+export function useSpeechToText(
+  onTranscript: (text: string) => void,
+  options: { onSpeechStart?: () => void } = {},
+): SpeechToText {
   const [state, setState] = useState<ListenState>("idle");
   const [error, setError] = useState<VoiceError | null>(null);
   const [level, setLevel] = useState(0);
+  const [hearing, setHearing] = useState(false);
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -83,9 +107,10 @@ export function useSpeechToText(onTranscript: (text: string) => void): SpeechToT
   const audioContextRef = useRef<AudioContext | null>(null);
   const frameRef = useRef<number | null>(null);
   const abandonedRef = useRef(false);
-  // Read inside the recorder's callback, which closes over its first value.
   const onTranscriptRef = useRef(onTranscript);
   onTranscriptRef.current = onTranscript;
+  const onSpeechStartRef = useRef(options.onSpeechStart);
+  onSpeechStartRef.current = options.onSpeechStart;
 
   const teardown = useCallback(() => {
     if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
@@ -95,20 +120,28 @@ export function useSpeechToText(onTranscript: (text: string) => void): SpeechToT
     for (const track of streamRef.current?.getTracks() ?? []) track.stop();
     streamRef.current = null;
     setLevel(0);
+    setHearing(false);
   }, []);
 
-  // A student who closes the tab mid-recording should not leave the
-  // microphone light on.
   useEffect(() => teardown, [teardown]);
 
-  const fail = useCallback((reason: VoiceError) => {
-    setError(reason);
-    setState("error");
+  const fail = useCallback(
+    (reason: VoiceError) => {
+      teardown();
+      setError(reason);
+      setState("error");
+    },
+    [teardown],
+  );
+
+  const stop = useCallback(() => {
+    if (recorderRef.current?.state === "recording") recorderRef.current.stop();
   }, []);
 
   const start = useCallback(async () => {
-    if (state !== "idle" && state !== "error") return; // no overlapping recordings
+    if (state === "listening" || state === "transcribing") return;
     setError(null);
+    setHearing(false);
     abandonedRef.current = false;
 
     if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
@@ -119,8 +152,6 @@ export function useSpeechToText(onTranscript: (text: string) => void): SpeechToT
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        // Browser-side cleanup costs nothing and measurably helps Whisper in
-        // a room with other people in it, which is where this gets used.
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
     } catch (cause) {
@@ -136,28 +167,6 @@ export function useSpeechToText(onTranscript: (text: string) => void): SpeechToT
     }
     streamRef.current = stream;
 
-    // The loudness meter. Decorative in the sense that nothing depends on it,
-    // and not decorative at all in the sense that a student cannot otherwise
-    // tell a listening app from a frozen one.
-    try {
-      const context = new AudioContext();
-      audioContextRef.current = context;
-      const analyser = context.createAnalyser();
-      analyser.fftSize = 512;
-      context.createMediaStreamSource(stream).connect(analyser);
-      const samples = new Uint8Array(analyser.frequencyBinCount);
-      const tick = () => {
-        analyser.getByteTimeDomainData(samples);
-        let peak = 0;
-        for (const sample of samples) peak = Math.max(peak, Math.abs(sample - 128));
-        setLevel(Math.min(1, peak / 64));
-        frameRef.current = requestAnimationFrame(tick);
-      };
-      tick();
-    } catch {
-      // No meter on this browser; recording is unaffected.
-    }
-
     const mimeType = pickMimeType();
     let recorder: MediaRecorder;
     try {
@@ -167,14 +176,12 @@ export function useSpeechToText(onTranscript: (text: string) => void): SpeechToT
       fail("recording_failed");
       return;
     }
+
     chunksRef.current = [];
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0) chunksRef.current.push(event.data);
     };
-    recorder.onerror = () => {
-      teardown();
-      fail("recording_failed");
-    };
+    recorder.onerror = () => fail("recording_failed");
     recorder.onstop = async () => {
       teardown();
       if (abandonedRef.current) {
@@ -184,8 +191,6 @@ export function useSpeechToText(onTranscript: (text: string) => void): SpeechToT
       const type = recorder.mimeType || mimeType || "audio/webm";
       const audio = new Blob(chunksRef.current, { type });
       chunksRef.current = [];
-      // A tap rather than a hold: too short to contain speech, and sending it
-      // spends a Whisper request to be told so.
       if (audio.size < 1200) {
         fail("empty");
         return;
@@ -213,14 +218,68 @@ export function useSpeechToText(onTranscript: (text: string) => void): SpeechToT
       }
     };
 
+    // The endpointer. Runs on the same analyser that draws the meter, so
+    // listening costs one audio graph rather than two.
+    try {
+      const context = new AudioContext();
+      audioContextRef.current = context;
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 512;
+      context.createMediaStreamSource(stream).connect(analyser);
+      const samples = new Uint8Array(analyser.frequencyBinCount);
+
+      const openedAt = Date.now();
+      let speechStartedAt: number | null = null;
+      let quietSince: number | null = null;
+
+      const tick = () => {
+        analyser.getByteTimeDomainData(samples);
+        let peak = 0;
+        for (const sample of samples) peak = Math.max(peak, Math.abs(sample - 128));
+        const loudness = Math.min(1, peak / 64);
+        setLevel(loudness);
+
+        const now = Date.now();
+        if (loudness > SPEECH_LEVEL) {
+          quietSince = null;
+          if (speechStartedAt === null) {
+            speechStartedAt = now;
+            setHearing(true);
+            // Barge-in: the tutor stops talking the moment the student does.
+            onSpeechStartRef.current?.();
+          }
+        } else if (loudness < SILENCE_LEVEL && speechStartedAt !== null) {
+          quietSince ??= now;
+          const spoken = now - speechStartedAt;
+          if (now - quietSince >= SILENCE_MS && spoken >= MIN_SPEECH_MS) {
+            stop(); // end of utterance — the student never pressed anything
+            return;
+          }
+        }
+
+        // Two safety stops: an open microphone nobody spoke into, and a turn
+        // that has run far past any real sentence.
+        if (speechStartedAt === null && now - openedAt > LEAD_IN_MS) {
+          abandonedRef.current = true;
+          stop();
+          return;
+        }
+        if (speechStartedAt !== null && now - speechStartedAt > MAX_UTTERANCE_MS) {
+          stop();
+          return;
+        }
+        frameRef.current = requestAnimationFrame(tick);
+      };
+      tick();
+    } catch {
+      // No analyser on this browser: recording still works, the student just
+      // has to press stop themselves.
+    }
+
     recorderRef.current = recorder;
     recorder.start();
     setState("listening");
-  }, [fail, state, teardown]);
-
-  const stop = useCallback(() => {
-    if (recorderRef.current?.state === "recording") recorderRef.current.stop();
-  }, []);
+  }, [fail, state, stop, teardown]);
 
   const cancel = useCallback(() => {
     abandonedRef.current = true;
@@ -236,7 +295,7 @@ export function useSpeechToText(onTranscript: (text: string) => void): SpeechToT
     setState("idle");
   }, []);
 
-  return { state, error, level, start, stop, cancel, clearError };
+  return { state, error, level, hearing, start, stop, cancel, clearError };
 }
 
 /* ------------------------------------------------------------------------ */
@@ -245,36 +304,38 @@ export function useSpeechToText(onTranscript: (text: string) => void): SpeechToT
 
 export interface TextToSpeech {
   speaking: boolean;
-  /** True while the audio is being fetched but has not started playing. */
   loading: boolean;
   speak: (markdown: string) => Promise<void>;
   stop: () => void;
 }
 
-/** Speak an answer, with the browser's own voice as the safety net.
+/** Speak an answer, a sentence at a time, with the browser voice as the net.
  *
- * Two engines, deliberately. The server route reads Japanese properly, and it
- * can fail for reasons that have nothing to do with the student: the Google
- * key it shares with vision and embeddings hits a daily limit, the network
- * drops, the model is briefly unavailable. None of that should mean silence,
- * so any failure falls through to speechSynthesis, which is free, local, and
- * always there — worse at Japanese, and far better than nothing.
+ * Sentence at a time because the whole reply is the wrong unit. Measured:
+ * the cloud voice takes about four seconds to return audio for a two-sentence
+ * reply and about a second for the first sentence alone. Splitting the reply
+ * and playing the first clause while the rest is still being synthesised
+ * takes time-to-first-audio from four seconds to roughly one — the difference
+ * between a conversation and a wait.
  *
- * The text is on screen either way. Speech is the second channel, never the
- * only one.
+ * The fallback stays: any failure drops to speechSynthesis, which is free,
+ * local, worse at Japanese and always there. The text is on screen either
+ * way; speech is the second channel, never the only one.
  */
-export function useTextToSpeech(): TextToSpeech {
+export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSpeech {
   const [speaking, setSpeaking] = useState(false);
   const [loading, setLoading] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const urlRef = useRef<string | null>(null);
+  const urlsRef = useRef<string[]>([]);
   // Bumped on every stop and every new utterance, so a slow fetch that
-  // resolves after the student moved on cannot start talking over them.
+  // resolves after the student has moved on cannot start talking over them.
   const turnRef = useRef(0);
+  const onDoneRef = useRef(options.onDone);
+  onDoneRef.current = options.onDone;
 
   const release = useCallback(() => {
-    if (urlRef.current) URL.revokeObjectURL(urlRef.current);
-    urlRef.current = null;
+    for (const url of urlsRef.current) URL.revokeObjectURL(url);
+    urlsRef.current = [];
     audioRef.current = null;
   }, []);
 
@@ -293,8 +354,8 @@ export function useTextToSpeech(): TextToSpeech {
 
   useEffect(() => stop, [stop]);
 
-  /** The fallback: the operating system's own voice, one utterance per
-   * language run so a Japanese sentence is not read by an English voice. */
+  /** The operating system's own voice, one utterance per language run so a
+   * Japanese sentence is not read by an English voice. */
   const speakLocally = useCallback((text: string, turn: number) => {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) {
       setSpeaking(false);
@@ -309,19 +370,36 @@ export function useTextToSpeech(): TextToSpeech {
     segments.forEach((segment, index) => {
       const utterance = new SpeechSynthesisUtterance(segment.text);
       utterance.lang = segment.lang === "ja" ? "ja-JP" : "en-US";
-      // Japanese learners are not native listeners; a shade under natural
-      // pace is the difference between practice and noise.
       utterance.rate = segment.lang === "ja" ? 0.95 : 1;
       if (index === segments.length - 1) {
-        utterance.onend = () => {
-          if (turnRef.current === turn) setSpeaking(false);
+        const finish = () => {
+          if (turnRef.current === turn) {
+            setSpeaking(false);
+            onDoneRef.current?.();
+          }
         };
-        utterance.onerror = () => {
-          if (turnRef.current === turn) setSpeaking(false);
-        };
+        utterance.onend = finish;
+        utterance.onerror = finish;
       }
       window.speechSynthesis.speak(utterance);
     });
+  }, []);
+
+  /** One clause of audio from the server, or null if it could not be had. */
+  const fetchClause = useCallback(async (text: string): Promise<string | null> => {
+    try {
+      const response = await fetch("/api/speak", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!response.ok) return null;
+      const url = URL.createObjectURL(await response.blob());
+      urlsRef.current.push(url);
+      return url;
+    } catch {
+      return null;
+    }
   }, []);
 
   const speak = useCallback(
@@ -341,41 +419,46 @@ export function useTextToSpeech(): TextToSpeech {
       setSpeaking(true);
       setLoading(true);
 
-      try {
-        const response = await fetch("/api/speak", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text }),
-        });
-        if (turnRef.current !== turn) return; // superseded while fetching
-        if (!response.ok) throw new Error(String(response.status));
+      const clauses = sentences(text);
+      // The next clause is fetched while the current one plays, so only the
+      // first one is ever waited for.
+      let pending = fetchClause(clauses[0]);
 
-        const blob = await response.blob();
-        if (turnRef.current !== turn) return;
-        const url = URL.createObjectURL(blob);
-        urlRef.current = url;
-        const audio = new Audio(url);
-        audioRef.current = audio;
-        audio.onended = () => {
-          if (turnRef.current === turn) {
-            setSpeaking(false);
-            release();
-          }
-        };
-        audio.onerror = () => {
-          // The bytes arrived and would not play — a codec the browser
-          // dislikes. The local voice can still say it.
-          if (turnRef.current === turn) speakLocally(text, turn);
-        };
+      for (let index = 0; index < clauses.length; index++) {
+        const url = await pending;
+        if (turnRef.current !== turn) return; // superseded, or stopped
+        if (index + 1 < clauses.length) pending = fetchClause(clauses[index + 1]);
+
+        if (!url) {
+          // The server voice failed. Say the rest with the local one rather
+          // than stopping mid-reply.
+          setLoading(false);
+          speakLocally(clauses.slice(index).join(" "), turn);
+          return;
+        }
+
         setLoading(false);
-        await audio.play();
-      } catch {
+        const played = await new Promise<boolean>((resolve) => {
+          const audio = new Audio(url);
+          audioRef.current = audio;
+          audio.onended = () => resolve(true);
+          audio.onerror = () => resolve(false);
+          void audio.play().catch(() => resolve(false));
+        });
         if (turnRef.current !== turn) return;
-        setLoading(false);
-        speakLocally(text, turn);
+        if (!played) {
+          speakLocally(clauses.slice(index).join(" "), turn);
+          return;
+        }
+      }
+
+      if (turnRef.current === turn) {
+        setSpeaking(false);
+        release();
+        onDoneRef.current?.();
       }
     },
-    [release, speakLocally],
+    [fetchClause, release, speakLocally],
   );
 
   return { speaking, loading, speak, stop };

@@ -77,6 +77,43 @@ export function speakableText(markdown: string, limit = SPEAKABLE_LIMIT): string
   return lastStop > limit * 0.5 ? head.slice(0, lastStop + 1) : head;
 }
 
+/** Split spoken text into clauses that can be synthesised independently.
+ *
+ * So the first clause can be played while the rest is still being made.
+ * Measured against the live voice, the gain is real but smaller than the
+ * shape of the idea suggests, because synthesis latency is mostly fixed cost
+ * rather than per-character:
+ *
+ *   48 characters   ~5.4s        12 characters   ~4.3s
+ *
+ * — roughly a second, not the four the naive reading promises.
+ *
+ * The floor matters more than it looks. A clause of a few characters is not
+ * merely a poor trade: 「いいですね！」 on its own came back from the service
+ * with no audio at all. Twelve keeps a clause to something the length of a
+ * real sentence, which is both reliable and the natural unit anyway; anything
+ * shorter is folded into its neighbour rather than sent alone.
+ */
+export function sentences(text: string, minLength = 12): string[] {
+  const parts = text
+    // Japanese stops split on the mark itself; an English full stop only when
+    // whitespace follows, so a decimal or an abbreviation stays whole.
+    .split(/(?<=[。？！?!])\s*|(?<=\.)\s+|\n+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  const clauses: string[] = [];
+  for (const part of parts) {
+    const previous = clauses[clauses.length - 1];
+    if (previous !== undefined && previous.length < minLength) {
+      clauses[clauses.length - 1] = `${previous} ${part}`;
+    } else {
+      clauses.push(part);
+    }
+  }
+  return clauses.length > 0 ? clauses : [text];
+}
+
 /** One run of text in one language. */
 export interface SpeechSegment {
   text: string;

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Chat } from "../chat";
@@ -81,9 +81,9 @@ describe("chat composer", () => {
     ).toEqual([
       "",
       "Attach a photo or PDF",
-      // The mic no longer drops a transcript into the box for proof-reading;
-      // it speaks a turn into the conversation. The label says so.
-      "Speak Japanese",
+      // The mic is a conversation switch now: one press starts a spoken
+      // exchange, one press ends it, and nothing is pressed in between.
+      "Start a spoken conversation",
       "Send",
     ]);
   });
@@ -145,58 +145,44 @@ describe("chat pending state", () => {
   });
 });
 
-/** Speaking practice, from the composer's side.
+/** Voice, from the composer's side.
  *
- * The mode switch is the one control that changes what a spoken turn gets
- * back — a conversation partner rather than a written explanation — so it has
- * to be findable, off by default, and honest about what it does.
+ * The mode selector is gone. It asked the student to declare, before saying
+ * anything, whether this was free conversation, topic practice, role play or
+ * grammar practice — which is a question no conversation partner asks, and
+ * one the tutor can answer for itself from what is actually said.
  */
-describe("speaking practice", () => {
-  it("offers the microphone to a signed-in student", () => {
+describe("voice", () => {
+  it("offers a spoken conversation to a signed-in student", () => {
     render(<Chat authenticated firstName="Rin" />);
-    expect(screen.getByRole("button", { name: "Speak Japanese" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Start a spoken conversation" }),
+    ).toBeInTheDocument();
   });
 
-  it("keeps voice behind sign-in, like every other stored feature", () => {
+  it("keeps it behind sign-in, like every other stored feature", () => {
     // /api/transcribe and /api/speak both refuse an anonymous caller, so a
     // button that could never work should not be on the screen.
     render(<Chat authenticated={false} />);
-    expect(screen.queryByRole("button", { name: "Speak Japanese" })).not.toBeInTheDocument();
-  });
-
-  it("is off until the student asks for it", () => {
-    // A student who came to look something up should not have a conjugation
-    // table read aloud at them.
-    render(<Chat authenticated firstName="Rin" />);
-    const toggle = screen.getByRole("checkbox", { name: /Speaking practice/ });
-    expect(toggle).not.toBeChecked();
-    expect(screen.queryByRole("combobox", { name: "Practice mode" })).not.toBeInTheDocument();
-  });
-
-  it("reveals the practice modes once it is on", () => {
-    render(<Chat authenticated firstName="Rin" />);
-    fireEvent.click(screen.getByRole("checkbox", { name: /Speaking practice/ }));
-    const modes = screen.getByRole("combobox", { name: "Practice mode" });
-    expect(modes).toBeInTheDocument();
-    // All four exist in the architecture and all four are offered.
     expect(
-      [...modes.querySelectorAll("option")].map((option) => option.getAttribute("value")),
-    ).toEqual(["free", "topic", "roleplay", "grammar"]);
+      screen.queryByRole("button", { name: "Start a spoken conversation" }),
+    ).not.toBeInTheDocument();
   });
 
-  it("changes the prompt in the box, so the mode is visible without reading a label", () => {
+  it("asks the student to choose no mode at all", () => {
     render(<Chat authenticated firstName="Rin" />);
-    expect(screen.getByPlaceholderText(/質問をどうぞ/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("checkbox", { name: /Speaking practice/ }));
-    expect(screen.getByPlaceholderText(/話しかけてください/)).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Practice mode" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /Speaking practice/ })).not.toBeInTheDocument();
+    for (const gone of [/Role play/i, /Free conversation/i, /Topic practice/i, /Grammar practice/i]) {
+      expect(screen.queryByText(gone)).not.toBeInTheDocument();
+    }
   });
 
-  it("can still be typed into while practising", () => {
-    // Requirement: a student alternates voice and typing without losing the
-    // thread, so the text box never goes away.
+  it("keeps the text box available so a student can switch by typing", () => {
+    // Modality follows what the student is doing. Typing is the switch back
+    // to text, so the box never goes away.
     render(<Chat authenticated firstName="Rin" />);
-    fireEvent.click(screen.getByRole("checkbox", { name: /Speaking practice/ }));
-    expect(screen.getByPlaceholderText(/話しかけてください/)).toBeEnabled();
+    expect(screen.getByPlaceholderText(/質問をどうぞ/)).toBeEnabled();
     expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
   });
 
