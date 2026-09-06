@@ -115,6 +115,14 @@ export async function POST(request: Request) {
   const model = process.env.TTS_MODEL ?? "gemini-2.5-flash-preview-tts";
   // ONE voice, for every language, for the life of the deployment.
   //
+  // Kore is female, and that is part of the contract rather than an accident
+  // of the default: the browser fallback in lib/use-voice.ts picks a female
+  // system voice to match her, so a student who loses the network mid-answer
+  // hears the same person carry on rather than a stranger. A TTS_VOICE that
+  // changes the sex of the voice breaks that pairing — change both or
+  // neither. (Gemini's female prebuilts include Kore, Aoede, Leda and Zephyr;
+  // Puck, Charon and Fenrir are male.)
+  //
   // Kore reads Japanese clearly and unhurriedly, and reads English in the
   // same voice — which is the property that matters and the reason nothing
   // here looks at the language of the text. The tutor is one person: a
@@ -158,10 +166,17 @@ export async function POST(request: Request) {
     // embeddings, so a busy ingestion run can starve the voice. The client
     // reads the status and falls back to the browser rather than going silent.
     console.error(`tts ${model} failed: ${response.status} ${await response.text()}`);
-    return Response.json(
-      { error: response.status === 429 ? "tts_quota" : "tts_failed" },
-      { status: 502 },
-    );
+    // A quota refusal is answered AS a quota refusal, 429 and all, rather
+    // than being flattened into a generic 502. The client cannot tell the
+    // difference from a body alone without reading it, and it needs to: a
+    // one-off failure is worth retrying on the next clause, while an
+    // exhausted daily quota means every remaining clause of every remaining
+    // answer will fail the same way. Measured on the free tier, this model
+    // allows ten requests A DAY, so that distinction is the difference
+    // between a wasted round trip per clause and none.
+    return response.status === 429
+      ? Response.json({ error: "tts_quota" }, { status: 429 })
+      : Response.json({ error: "tts_failed" }, { status: 502 });
   }
 
   const json = (await response.json()) as TtsResponse;

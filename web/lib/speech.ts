@@ -115,6 +115,50 @@ export function sentences(text: string, minLength = 12): string[] {
   return clauses.length > 0 ? clauses : [text];
 }
 
+/** How much of a still-arriving answer is finished enough to speak.
+ *
+ * The spoken half of the app now starts talking while the answer is still
+ * being written, which means something has to decide, on every chunk, where
+ * the safe cutting point is. Two rules, and both were learned the hard way:
+ *
+ * - Cut only at a sentence end. The text after the last 。 is still being
+ *   typed, and half a sentence read aloud is worse than a pause.
+ * - Do not send a fragment on its own. Measured against the service,
+ *   「いいですね！」 alone came back with no audio at all, and synthesis
+ *   latency is mostly fixed cost — a six-character request measured 3.0s
+ *   against 3.6s for a whole sentence — so a scrap costs nearly as much as a
+ *   sentence and buys nothing.
+ *
+ * Returns the text to speak now and how much of the input it consumed, so the
+ * caller can carry the remainder forward. Consumed length is counted on the
+ * SPOKEN text, which is what the caller is tracking.
+ */
+export function readyToSpeak(
+  spokenTextSoFar: string,
+  consumed: number,
+  done: boolean,
+  minChars = 12,
+): { region: string; consumed: number } {
+  const remaining = spokenTextSoFar.slice(consumed);
+  if (!remaining.trim()) return { region: "", consumed };
+
+  if (done) return { region: remaining, consumed: consumed + remaining.length };
+
+  const lastStop = Math.max(
+    remaining.lastIndexOf("。"),
+    remaining.lastIndexOf("？"),
+    remaining.lastIndexOf("！"),
+    remaining.lastIndexOf("?"),
+    remaining.lastIndexOf("!"),
+    remaining.lastIndexOf("\n"),
+  );
+  if (lastStop < 0) return { region: "", consumed };
+
+  const region = remaining.slice(0, lastStop + 1);
+  if (region.trim().length < minChars) return { region: "", consumed };
+  return { region, consumed: consumed + region.length };
+}
+
 /** One run of text in one language. */
 export interface SpeechSegment {
   text: string;

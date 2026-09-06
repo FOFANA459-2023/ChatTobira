@@ -123,8 +123,22 @@ export function canTakePrompt(name: string, tokens: number): boolean {
  * tier that was about to answer, too long spends the student's whole turn.
  * Measured acceptance through the AI SDK is ~1.9s for DeepSeek and under a
  * second for Groq, both including the reasoning models' first thinking token.
+ *
+ * `typed` came down from 12s once Groq led the chain again: 12 seconds of
+ * silence was being spent discovering that DeepSeek had stalled, on a turn
+ * Groq then answered in under a second. 8s is still three times the healthy
+ * DeepSeek acceptance, and it is only ever paid on the large prompts where
+ * DeepSeek leads because Groq cannot take them.
+ *
+ * `structured` is a whole generation rather than an acceptance — generateObject
+ * returns a finished paper or nothing — so it is measured against 6.2s for
+ * gpt-oss-120b on a real fifteen-item paper. 25s rather than the 45s it was
+ * first given, because the budget has to leave room for the REST of the chain:
+ * the route's ceiling is 60s, and a first tier allowed to burn 45 of them
+ * leaves no time to fall back, which turns one slow provider into a failed
+ * request. Three tiers at 25s still fit.
  */
-export const ACCEPT_BUDGET_MS = { spoken: 6_000, typed: 12_000, structured: 45_000 } as const;
+export const ACCEPT_BUDGET_MS = { spoken: 6_000, typed: 8_000, structured: 25_000 } as const;
 
 /** Reject if `work` has not settled within `ms`.
  *

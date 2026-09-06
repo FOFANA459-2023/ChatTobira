@@ -87,38 +87,111 @@ export interface RouteOptions {
   /** Providers whose keys this deployment actually has. Google is assumed:
    * it is the last resort and the route checks for its key before calling. */
   hasDeepSeek?: boolean;
-  /** Model ids, so a deploy can move a tier without a code change. */
-  models?: Partial<Record<Provider, string>>;
+  /** Model ids by slot, so a deploy can move one tier without a code change
+   * and without moving another tier that happens to share its provider. */
+  models?: Partial<Record<ModelSlot, string>>;
 }
 
-/** Defaults matching the environment variables the routes already read. */
-const DEFAULT_MODELS: Record<Provider, string> = {
-  groq: "qwen/qwen3.8-27b",
+/** A slot is a model a deploy can swap independently, not a provider: Groq
+ * serves the chat with one model and builds papers with another, and the two
+ * are moved for different reasons. Slot names match the environment variables
+ * the routes already read. */
+export type ModelSlot = "chat" | "quiz" | "quizSmall" | "deepseek" | "google";
+
+const DEFAULT_MODELS: Record<ModelSlot, string> = {
+  chat: "qwen/qwen3.8-27b",
+  // generateObject needs response_format json_schema, which Groq implements
+  // only on the gpt-oss models.
+  quiz: "openai/gpt-oss-120b",
+  quizSmall: "openai/gpt-oss-20b",
   deepseek: "deepseek-v4-flash",
   google: "gemini-3.6-flash",
 };
+
+interface TierSpec {
+  provider: Provider;
+  slot: ModelSlot;
+}
 
 /** The preference order per task, before health and size are considered.
  *
  * Google is last in all three and is never filtered out: it is the tier that
  * has to answer when the others cannot, and a health check that could empty
  * the list is worse than a call that might fail. */
-const PREFERENCE: Record<ModelTask, Provider[]> = {
+const PREFERENCE: Record<ModelTask, TierSpec[]> = {
   // Groq first purely on the clock: 0.42s against 1.35s, on a turn where the
   // student is waiting in silence for a reply they will hear rather than read.
   // A spoken turn's prompt is small by design, so this is also the one job
   // that reliably fits inside the free tier's budget.
-  voice_turn: ["groq", "deepseek", "google"],
-  // DeepSeek first because this is the job Groq cannot hold: a typed question
-  // carries six passages, and at 8,300 tokens Groq answers 413 rather than
-  // answering. Groq stays in the chain below it for the short typed turns
-  // that do fit, where it is still three times faster and free.
-  chat_answer: ["deepseek", "groq", "google"],
-  // DeepSeek first because a paper is high-volume, non-interactive and
-  // validated after the fact — exactly the shape of work worth moving off a
-  // metered free tier. Gemini's own budget here is 20 requests a day, which
-  // one student pressing "New Test" can spend in an afternoon.
-  structured: ["deepseek", "groq", "google"],
+  voice_turn: [
+    { provider: "groq", slot: "chat" },
+    { provider: "deepseek", slot: "deepseek" },
+    { provider: "google", slot: "google" },
+  ],
+  // Groq first, and this is a deliberate reversal of the order this file
+  // shipped with a day ago. DeepSeek led it because it has no daily cap and
+  // holds a large prompt, both of which are still true. What changed is that
+  // deepseek-v4-flash turned out not to be reliably fast — it is reliably
+  // fast SOMETIMES, which is a different thing. Observed on this app, all on
+  // ordinary turns:
+  //
+  //   1.3–2.3s to first token when healthy
+  //   97s on a typed question it had answered in 1.3s a minute earlier
+  //   12s (the deadline) on a page lookup, which then fell to Groq anyway
+  //   134s on a practice paper
+  //
+  // Against a measured 0.55s for Groq on the same shape of turn. A tier that
+  // is three times slower at its best and occasionally two orders of
+  // magnitude slower at its worst does not belong in front of a student who
+  // is waiting for a reply.
+  //
+  // DeepSeek keeps the job it is genuinely needed for and Groq genuinely
+  // cannot do: a prompt above Groq's shared 7,000 input tokens a minute,
+  // where Groq answers 413 rather than answering. The size filter below drops
+  // Groq for exactly those, so a large typed question still goes to DeepSeek
+  // first without this list having to say so.
+  chat_answer: [
+    { provider: "groq", slot: "chat" },
+    { provider: "deepseek", slot: "deepseek" },
+    { provider: "google", slot: "google" },
+  ],
+  // Two findings decide this order, and neither was what I expected.
+  //
+  // DeepSeek is NOT here. It led this list on the strength of a check that
+  // took 3.8s — on a two-item schema. A real paper is fifteen to twenty-one
+  // items with an explanation and a review reference each, and measured on the
+  // actual QuizSchema on 2026-09-06:
+  //
+  //   groq openai/gpt-oss-120b     6.2s    2,534 output tokens
+  //   deepseek-v4-flash          134.2s   17,493, of which 15,490 REASONING
+  //
+  // The route's ceiling is 60s, so DeepSeek cannot finish a paper inside a
+  // request at all: live, a kanji paper took 61.4s and would have been killed
+  // on Cloudflare, which is exactly the "Could not generate a test" students
+  // saw. A reasoning model is the wrong tool for filling a large schema.
+  //
+  // Google leads, which the old comment here said was wasteful. Measured on
+  // the real prompt, with a real 17-item paper as the bar:
+  //
+  //   google gemini-3.5-flash-lite   7.5s   17 items, 198-char passage, bank of 8
+  //   groq openai/gpt-oss-120b       8.9s   17 items, 113-char passage, bank of 5
+  //
+  // and Groq's free tier meters PROMPT PLUS RESERVED OUTPUT against 8,000
+  // tokens a minute for these models. A paper is ~3,200 prompt and needs ~3,900
+  // output, so it only just fits when nothing else is happening and never fits
+  // when two students press "New Test" in the same minute:
+  //
+  //   "Request too large ... on tokens per minute (TPM): Limit 8000, Requested 8034"
+  //
+  // Groq stays second because it is free and fast when it does fit. It keeps a
+  // second model behind it because Gemini is not a reliable backstop for this
+  // job either — gemini-3.5-flash and gemini-3.6-flash both failed to return
+  // parseable objects for the same schema.
+  structured: [
+    { provider: "google", slot: "google" },
+    { provider: "groq", slot: "quiz" },
+    { provider: "groq", slot: "quizSmall" },
+  ],
 };
 
 /** The models to try, in order, for this task right now.
@@ -133,15 +206,15 @@ export function routeModels(task: ModelTask, options: RouteOptions = {}): Tier[]
   const { promptTokens = 0, hasDeepSeek = true, models = {} } = options;
 
   return PREFERENCE[task]
-    .filter((provider) => {
+    .filter(({ provider }) => {
       if (provider === "google") return true; // never filtered: the last resort
       if (provider === "deepseek" && !hasDeepSeek) return false;
       if (isProviderDead(provider)) return false;
       return canTakePrompt(provider, promptTokens);
     })
-    .map((provider) => ({
+    .map(({ provider, slot }) => ({
       provider,
-      model: models[provider] ?? DEFAULT_MODELS[provider],
+      model: models[slot] ?? DEFAULT_MODELS[slot],
     }));
 }
 

@@ -24,13 +24,24 @@ export async function middleware(request: NextRequest) {
     path.startsWith("/auth") ||
     path.startsWith("/admin");
 
-  // The public APIs establish who is asking themselves — each one calls
-  // getUser() and meters anonymous callers on its own cookie — so the
-  // round trip here would be a second, discarded copy of that answer in
-  // front of every message a student sends and every test they generate.
-  // Skipped for those routes only: session refresh still happens on page
-  // navigations, and on these routes inside the handler's own client.
-  if (isPublic && path.startsWith("/api/")) {
+  // APIs that establish who is asking themselves. Each calls getUser() in its
+  // own handler and returns 401 on its own, so the round trip here would be a
+  // second, discarded copy of that answer.
+  //
+  // The voice routes are here for a reason worth spelling out: they are called
+  // PER CLAUSE, not per turn. A three-sentence reply is three calls to
+  // /api/speak, and each was paying for two auth round trips — one in this
+  // middleware and one in the handler — before a single byte of audio was
+  // synthesised. That is the cheapest latency in the whole spoken turn to
+  // give back, and it is silence the student is sitting in.
+  //
+  // Safe because neither route trusts the middleware for authorisation:
+  // /api/speak and /api/transcribe both fail closed with 401 when getUser()
+  // comes back empty. Session refresh still happens on page navigations and
+  // inside each handler's own client.
+  const authenticatesItself =
+    path === "/api/speak" || path === "/api/transcribe" || (isPublic && path.startsWith("/api/"));
+  if (authenticatesItself) {
     return response;
   }
 

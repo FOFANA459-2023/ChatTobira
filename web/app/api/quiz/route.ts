@@ -53,6 +53,18 @@ const BodySchema = z.object({
   avoid: z.array(z.string().max(300)).max(40).optional(),
 });
 
+/** The shortest reading passage a ○× section can be built on, and what the
+ * plan asks for.
+ *
+ * One pair of constants used by BOTH the prompt and the validity gate, for the
+ * same reason `ingest/redact.py` keeps its redactor and its detector in one
+ * file: a rule enforced in one place and described in another drifts, and the
+ * drift is silent. Here it was not even described — the gate rejected papers
+ * for a requirement the model was never given.
+ */
+const MIN_PASSAGE_CHARS = 150;
+const PASSAGE_TARGET_CHARS = 220;
+
 const SYSTEM = `You create Japanese practice tests for university students from
 provided course material, in the format of the course's own test papers. Rules:
 - Base every item ONLY on the provided material; test the grammar patterns and
@@ -76,6 +88,12 @@ provided course material, in the format of the course's own test papers. Rules:
   many options each item has, whether it has a word bank or a passage — is
   specified per section below. Follow it exactly; it is read off the papers
   this course sets, not invented.
+- If a section's plan asks for a passage, that section MUST carry a "passage"
+  field of at least ${PASSAGE_TARGET_CHARS} Japanese characters. This is the single
+  commonest way a generated paper is thrown away: ○× statements about a
+  passage that was never written refer to a text the student cannot see, so
+  the app rejects the whole paper below ${MIN_PASSAGE_CHARS} characters. Write the
+  passage first, then write statements about it.
 - "type" is how the app grades the item and must match the section's form:
   form "bracket" and "lettered" are type "multiple_choice", form "written" is
   "fill_blank", form "maru_batsu" is "true_false".
@@ -105,6 +123,7 @@ provided course material, in the format of the course's own test papers. Rules:
   the textbook or lesson area they come from.
 - Never reference "the source", file names, or page numbers in questions or
   explanations; page numbers belong in review only.`;
+
 
 // The paper's shape comes from the format catalogue, not from a template.
 //
@@ -154,7 +173,15 @@ function sectionPlan(
       );
     } else if (archetype.form === "maru_batsu") {
       parts.push(
-        `  Each item is ONE statement about this section's passage; "answer" is exactly ○ or ×. Mix them. A × statement must be contradicted by the passage, not merely absent from it, and the explanation must quote the phrase that decides it.`,
+        // The length is stated because it is ENFORCED. The validator rejects a
+        // paper whose passage is under MIN_PASSAGE_CHARS, and the plan used to
+        // say only "this section's passage" — never that a passage field was
+        // required, never how long. Every model guessed, and guessed short:
+        // gpt-oss-120b wrote 113 characters and had the whole paper thrown
+        // away for it. Asking for a margin above the floor rather than the
+        // floor itself, because a model told "at least 150" writes 150.
+        `  Set "passage" on this section: a short Japanese text of AT LEAST ${PASSAGE_TARGET_CHARS} characters (the app rejects the paper below ${MIN_PASSAGE_CHARS}), written from the course material, that all of this section's statements are about.`,
+        `  Each item is ONE statement about that passage; "answer" is exactly ○ or ×. Mix them. A × statement must be contradicted by the passage, not merely absent from it, and the explanation must quote the phrase that decides it.`,
       );
     } else {
       parts.push(
@@ -644,27 +671,24 @@ the line specified above — it is what the students read on the day.`
   // the chat route and this one used to keep two hand-written cascades that
   // had already drifted apart.
   //
-  // DeepSeek leads here, which is a change: generateObject against
-  // deepseek-v4-flash was measured returning a schema-valid paper in 3.8s
-  // with correct Japanese and every answer present among its own options.
-  // A paper is high-volume, non-interactive work, and it is validated after
-  // the fact — so a tier that returns something malformed costs a fall-through
-  // and not a bad paper on a student's screen, which is exactly the shape of
-  // job worth moving off a metered free tier. Gemini's structured-output
-  // budget is 20 requests a day; one student pressing "New Test" can spend it
-  // in an afternoon.
+  // Groq builds papers, on the gpt-oss models rather than the chat model:
+  // generateObject needs response_format json_schema, which Groq implements
+  // only on those — llama-3.3 rejected it, which silently sent every quiz to
+  // Gemini and its 20-requests-a-day budget.
   //
-  // Groq stays in the chain but NOT on the chat model: generateObject needs
-  // response_format json_schema, which Groq implements only on the gpt-oss
-  // models — llama-3.3 rejected it, which silently sent every quiz to Gemini.
+  // DeepSeek was briefly first here and must not be again; lib/router.ts
+  // carries the measurements. Short version: it reasons for over two minutes
+  // on a fifteen-item schema, which is longer than this route is allowed to
+  // run, and that is what "Could not generate a test" was.
+  const promptTokens = estimateTokens(system) + estimateTokens(prompt);
   const route = routeModels("structured", {
     // A paper's prompt is a system prompt plus ~10 short excerpts, well
     // inside every tier's ceiling; the size gate is not what decides here.
-    promptTokens: estimateTokens(system) + estimateTokens(prompt),
+    promptTokens,
     hasDeepSeek: Boolean(process.env.DEEPSEEK_API_KEY),
     models: {
-      groq: process.env.QUIZ_MODEL ?? "openai/gpt-oss-120b",
-      deepseek: process.env.DEEPSEEK_MODEL,
+      quiz: process.env.QUIZ_MODEL,
+      quizSmall: process.env.QUIZ_FALLBACK_MODEL,
       google: process.env.FALLBACK_MODEL,
     },
   });
@@ -678,8 +702,29 @@ the line specified above — it is what the students read on the day.`
     google: (model: string) => google(model),
   } as const;
 
+  // One line per paper, so the size that decides everything below is visible.
+  // Groq's free tier meters PROMPT PLUS RESERVED OUTPUT against 8,000 tokens a
+  // minute, so what fits is a property of this number and nothing else.
+  console.info(
+    `quiz ${kind} doc=${documentId} ~${promptTokens}tok → ${route
+      .map((t) => t.model)
+      .join(",")}`,
+  );
+  // Opt-in, because it is the only way to see what the model was actually
+  // asked. Set QUIZ_DEBUG_PROMPT=1 locally: a requirement that lives in the
+  // validator but never reached the prompt is invisible from the outside, and
+  // that was the whole of the "Could not generate a test" bug.
+  if (process.env.QUIZ_DEBUG_PROMPT === "1") {
+    console.info(`---- QUIZ SYSTEM ----`);
+    console.info(system);
+    console.info(`---- END QUIZ SYSTEM ----`);
+  }
+
+  // The label is the model id. Two tiers now share the provider "groq", so a
+  // log line naming only the provider cannot say which of them failed.
   const tiers = route.map(({ provider, model }) => ({
     provider,
+    label: model,
     model: clientFor[provider](model),
   }));
 
@@ -699,6 +744,31 @@ the line specified above — it is what the students read on the day.`
           // Test papers should vary between sittings; greedy decoding regrows
           // the same questions from the same excerpts.
           temperature: 0.8,
+          // The paper is the largest thing this app generates and nothing was
+          // reserving room for it. Left unset, the provider's default output
+          // budget truncates the JSON part way through, and every symptom
+          // students actually saw comes from that one omission:
+          //
+          //   unset            7.2s   11 items for a 17-item plan, 116-char passage
+          //   maxOutputTokens  14.0s  17 items, 4 sections, passage intact
+          //
+          // Truncated JSON does not arrive as short JSON — it arrives as
+          // INVALID JSON, so the validity gates below reported "paper too
+          // short: 4 items for a 17-item plan" and "passage is missing or too
+          // short", and on the gpt-oss reasoning models it came back as no
+          // content at all: Groq answers json_validate_failed with an empty
+          // failed_generation. Three different-looking failures, one cause.
+          //
+          // The size is bounded from BOTH ends, which is why it is a constant
+          // and not simply "large". Groq's free tier meters prompt plus
+          // RESERVED output against 8,000 tokens a minute, and reserving 16,000
+          // put every request over it — "Request too large ... on tokens per
+          // minute (TPM): Limit 8000, Requested 8216" — so a generous ceiling
+          // fails just as surely as a small one, only with a different error.
+          //
+          // 4,800 sits above the 3,852 a full seventeen-item paper actually
+          // used, and leaves a ~3,000-token prompt inside the minute's budget.
+          maxOutputTokens: 4_800,
           abortSignal: controller.signal,
         }),
         ACCEPT_BUDGET_MS.structured,
@@ -768,7 +838,10 @@ the line specified above — it is what the students read on the day.`
       // section carries its own context in the items, so seen live it failed
       // this gate for a passage it never needed.
       const needsPassage = blueprint.some((a) => a.passage && a.form === "maru_batsu");
-      if (needsPassage && !paper.sections.some((s) => s.passage && s.passage.length >= 150)) {
+      if (
+        needsPassage &&
+        !paper.sections.some((s) => s.passage && s.passage.length >= MIN_PASSAGE_CHARS)
+      ) {
         throw new Error("paper's passage is missing or too short to support its questions");
       }
 
@@ -814,9 +887,20 @@ the line specified above — it is what the students read on the day.`
       // Declined or produced an unusable paper — try the next provider. The
       // reason is logged because a silent cascade turns "every tier failed"
       // into an undiagnosable 502.
+      //
+      // The message alone is not the reason. Groq's structured-output failure
+      // reads "Failed to validate JSON. Please adjust your prompt. See
+      // 'failed_generation' for more details" — and 'failed_generation' is in
+      // the response body, which was being thrown away, so the one line that
+      // says WHICH field the model got wrong never reached the log. That is
+      // the difference between diagnosing this in a minute and guessing at it.
+      const detail =
+        (error as { responseBody?: string; cause?: unknown } | null)?.responseBody ??
+        (error as { cause?: { responseBody?: string } } | null)?.cause?.responseBody;
       console.error(
-        `quiz generation failed on ${tier.provider}:`,
+        `quiz generation failed on ${tier.provider} (${tier.label}):`,
         error instanceof Error ? error.message : error,
+        detail ? `\n  response: ${String(detail).slice(0, 1200)}` : "",
       );
       noteProviderFailure(tier.provider, error);
     }
