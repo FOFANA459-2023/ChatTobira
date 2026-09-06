@@ -4,17 +4,20 @@ import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { convertToModelMessages, streamText, type UIMessage } from "ai";
 import { z } from "zod";
 
-import { detectLanguageMode, withoutLanguageRequest } from "@/lib/language";
+import { withoutLanguageRequest } from "@/lib/language";
+import { conversationState, languageModeFor } from "@/lib/conversation";
+import { routeModels, routeReason } from "@/lib/router";
+import { conversationKey, recallContext, rememberContext } from "@/lib/recent-context";
 import { pageSpellings } from "@/lib/pages";
-import { classifyTurn, contextSizeFor } from "@/lib/intent";
+import { contextSizeFor } from "@/lib/intent";
 import { aspectOf } from "@/lib/topics";
 import { contextBlock, recentTurns, systemPrompt, type AttachedUpload } from "@/lib/prompt";
 import {
-  canTakePrompt,
+  ACCEPT_BUDGET_MS,
   estimateTokens,
-  isProviderDead,
   noteProviderFailure,
   noteProviderSuccess,
+  withDeadline,
 } from "@/lib/providers";
 import { serviceClient } from "@/lib/supabase/service";
 import { Stopwatch } from "@/lib/timing";
@@ -104,7 +107,12 @@ export async function POST(request: Request) {
   // given the whole conversation and the corpus was searched for a fragment
   // of it, which is how a student ends up asking the same thing three times.
   const turns = turnsOf(messages);
-  const language = detectLanguageMode(turns);
+  // The conversation, before anything is stripped out of it: an explicit
+  // "let's speak Japanese" is exactly the phrase `withoutLanguageRequest`
+  // removes, so reading the language off the cleaned turns would read it off
+  // turns with the request deleted.
+  const conversation = conversationState(turns, { spoken: Boolean(speaking) });
+  const language = languageModeFor(conversation.language, Boolean(speaking));
   const query = resolveQuery(
     turns.map((t) =>
       t.role === "user" ? { ...t, text: withoutLanguageRequest(t.text) } : t,
@@ -128,7 +136,14 @@ export async function POST(request: Request) {
   // ten seconds: it searched every book, filled the prompt with 8,000
   // characters of textbook, and pushed the request past the fast model's
   // ceiling so the slow tier had to answer it.
-  const intent = classifyTurn(question, Boolean(speaking));
+  // Classified once, on the whole conversation, rather than twice on the same
+  // sentence: the state above already asked this question and asking it again
+  // would be a second answer free to disagree with the first.
+  const intent = conversation.intent;
+  // A turn that continues the exchange is answerable from the exchange. The
+  // corpus is for turns that reach outside it — and a follow-up that DOES
+  // need the corpus still says so through its own intent, so this only ever
+  // silences retrieval for "なるほど", "why?", "say that again".
   const trivial = !intent.needsRetrieval;
   // When the question arrived, so the stored turn keeps its real order even
   // though it is written after the answer has finished streaming.
@@ -264,6 +279,13 @@ export async function POST(request: Request) {
   conversationId = persistedId ?? conversationId;
   if (quotaVerdict) return quotaVerdict;
 
+  // Which conversation's recent grounding to reuse. Available for trial
+  // visitors too, who have no conversation row for the id to come from.
+  const contextKey = conversationKey(
+    conversationId,
+    turns.find((turn) => turn.role === "user")?.text ?? "",
+  );
+
   // An answer built from a private file must never enter the shared answer
   // cache: qa_cache is keyed by question embedding and study scope only, so
   // a classmate asking something similar in the same scope would be served
@@ -370,6 +392,24 @@ export async function POST(request: Request) {
         chunks = merge(byPage, byTopic, exact, retry, retrieval.rows);
       }
     }
+
+    // Still nothing convincing, and the turn continues an exchange that WAS
+    // grounded. The pages the last answer was built from are a better guess
+    // than a thin search: the student is still asking about the same thing,
+    // which is what "follow-up" means. Appended, never prepended — a fresh
+    // hit that did convince still outranks it.
+    if (conversation.dependsOnHistory && isThinResult(chunks)) {
+      chunks = merge(chunks, recallContext(contextKey));
+    }
+  }
+
+  // Retrieval was skipped — a conversational turn, an acknowledgement, a
+  // request to repeat. That was always right about the SEARCH and wrong about
+  // the grounding: the turn before it may have had six passages of textbook
+  // in front of the model, and "why?" was answered with none. The pages cost
+  // nothing to keep and are exactly what the follow-up is about.
+  if (chunks.length === 0 && conversation.dependsOnHistory) {
+    chunks = recallContext(contextKey);
   }
 
   // What the model actually reads: on topic, one page per passage, closest
@@ -380,6 +420,12 @@ export async function POST(request: Request) {
     limit: contextSizeFor(intent.intent, Boolean(speaking)),
   });
   const citations = buildCitations(context);
+
+  // Kept for the next turn, and it is the SELECTED context rather than every
+  // candidate: what the model actually read is what a follow-up to it is
+  // about. Costs nothing — these chunks are already in memory and already
+  // paid for.
+  rememberContext(contextKey, context);
 
   // Did the page the student named actually make it into what the model
   // reads? Not "was it retrieved" — retrieved and then dropped by the context
@@ -420,6 +466,7 @@ export async function POST(request: Request) {
     canPointToBook: citations.length > 0,
     hasUploads: attached.length > 0,
     hasPastPapers: context.some((chunk) => chunk.doc_type === "past_paper"),
+    conversation,
     page: askedPage !== null ? { asked: askedPage, retrieved: pageInContext } : undefined,
     speaking: speaking
       ? { mode: speaking.mode, level: speaking.level ?? null, subject: speaking.subject }
@@ -439,7 +486,7 @@ export async function POST(request: Request) {
   const tiers: {
     provider: string;
     label: string;
-    start: () => ReturnType<typeof streamText>;
+    start: (signal: AbortSignal) => ReturnType<typeof streamText>;
   }[] = [];
   const chatOptions = { system, messages: modelMessages, temperature: 0.3 };
 
@@ -454,58 +501,55 @@ export async function POST(request: Request) {
       0,
     );
 
-  /** A tier worth trying: alive, and big enough for this prompt. */
-  const usable = (provider: string) =>
-    !isProviderDead(provider) && canTakePrompt(provider, promptTokens);
-
-  // Verified against the live Groq catalogue, twice over. llama-3.3-70b-versatile
-  // was retired and answers 404. gpt-oss-120b — which replaced it here — is a
-  // REASONING model: it streams its reasoning and returns empty content, which
-  // the SDK reports as "No output generated" after about seven seconds. Both
-  // failures are silent from the outside and both demoted every turn to the
-  // slow tier. Measured first-token latency on a Japanese conversational turn:
-  // qwen 282ms, gpt-oss-20b 698ms, gpt-oss-120b never.
-  const groqModel = process.env.CHAT_MODEL ?? "qwen/qwen3.8-27b";
-  if (usable("groq")) {
-    tiers.push({
-      provider: "groq",
-      label: groqModel,
-      start: () => streamText({ model: groq(groqModel), ...chatOptions }),
-    });
-  }
-
-  // Skipped once it has answered 402 (unfunded balance) or 401 (bad key):
-  // that verdict holds until the account is topped up, and re-asking every
-  // request would just add a round-trip in front of Gemini.
-  if (process.env.DEEPSEEK_API_KEY && usable("deepseek")) {
-    const deepseek = createDeepSeek({ apiKey: process.env.DEEPSEEK_API_KEY });
-    const deepseekModel = process.env.DEEPSEEK_MODEL ?? "deepseek-v4-flash";
-    tiers.push({
-      provider: "deepseek",
-      label: deepseekModel,
-      start: () => streamText({ model: deepseek(deepseekModel), ...chatOptions }),
-    });
-  }
-
-  // Always last and never skipped: it is the tier that has to answer when the
-  // others cannot, so a health check that could empty the list is worse than
-  // a call that might fail.
-  const geminiModel = process.env.FALLBACK_MODEL ?? "gemini-3.6-flash";
-  tiers.push({
-    provider: "google",
-    label: geminiModel,
-    start: () => streamText({ model: google(geminiModel), ...chatOptions }),
+  // Which models, in which order, for this KIND of turn. A spoken turn and a
+  // typed one used to get the same cascade, which was right for neither: the
+  // spoken one wants the fastest tier because a student is waiting in silence
+  // for it, and the typed one wants the tier that can actually hold six
+  // passages of textbook. See lib/router.ts for the measurements.
+  const route = routeModels(speaking ? "voice_turn" : "chat_answer", {
+    promptTokens,
+    hasDeepSeek: Boolean(process.env.DEEPSEEK_API_KEY),
+    models: {
+      groq: process.env.CHAT_MODEL,
+      deepseek: process.env.DEEPSEEK_MODEL,
+      google: process.env.FALLBACK_MODEL,
+    },
   });
+
+  const clientFor = {
+    groq: (model: string) => groq(model),
+    deepseek: (model: string) => {
+      const deepseek = createDeepSeek({ apiKey: process.env.DEEPSEEK_API_KEY! });
+      return deepseek(model);
+    },
+    google: (model: string) => google(model),
+  } as const;
+
+  for (const { provider, model } of route) {
+    tiers.push({
+      provider,
+      label: model,
+      start: (abortSignal) =>
+        streamText({ model: clientFor[provider](model), ...chatOptions, abortSignal }),
+    });
+  }
 
   let result: ReturnType<typeof streamText> | undefined;
   let modelUsed = "";
+  // A tier that neither accepts nor refuses gets the same treatment as one
+  // that refuses. See ACCEPT_BUDGET_MS: a stalled provider used to hold the
+  // whole turn until the route's own 60s ceiling killed it, and the student
+  // got nothing where a fallback would have got them an answer.
+  const budget = speaking ? ACCEPT_BUDGET_MS.spoken : ACCEPT_BUDGET_MS.typed;
+
   for (const tier of tiers) {
-    const attempt = tier.start();
+    const controller = new AbortController();
+    const attempt = tier.start(controller.signal);
     const tierFrom = Date.now();
     try {
       // Resolves once the provider accepts the request; rejects on 429/5xx
       // before any tokens stream, which is exactly the fallback window.
-      await attempt.warnings;
+      await withDeadline(attempt.warnings, budget, "tier_timeout");
       clock.mark(`model:${tier.provider}`);
       noteProviderSuccess(tier.provider);
       result = attempt;
@@ -514,7 +558,9 @@ export async function POST(request: Request) {
     } catch (error) {
       // Rate limit or outage: try the next tier, retry this one next request.
       // Unfunded or revoked: stop offering it until the isolate recycles.
-      // Logged so an all-tiers failure is diagnosable from the worker logs.
+      // Timed out: abort it, or the abandoned stream keeps running — and on a
+      // metered provider an abandoned stream is still a paid one.
+      controller.abort();
       console.error(
         `chat tier ${tier.label} declined after ${Date.now() - tierFrom}ms:`,
         error instanceof Error ? error.message : error,
@@ -532,7 +578,8 @@ export async function POST(request: Request) {
   // recorded is the time until the student sees a first word.
   console.info(
     clock.format(
-      `turn ${speaking ? "spoken" : "typed"}/${intent.intent} (${intent.because}) ~${promptTokens}tok via ${modelUsed}`,
+      `turn ${conversation.modality}/${conversation.act}/${intent.intent} (${conversation.because}) ` +
+        `${routeReason(speaking ? "voice_turn" : "chat_answer", route, promptTokens)} via ${modelUsed}`,
     ),
   );
 
@@ -540,7 +587,16 @@ export async function POST(request: Request) {
     headers: setCookie ? { "Set-Cookie": setCookie } : undefined,
     messageMetadata: ({ part }) => {
       if (part.type === "finish") {
-        return { citations, model: modelUsed, conversationId };
+        // The conversation's language rides out with the answer so the voice
+        // UI can say which language it is listening in, and so a reload does
+        // not silently start a new conversation in a different one.
+        return {
+          citations,
+          model: modelUsed,
+          conversationId,
+          language: conversation.language.language,
+          languageLocked: conversation.language.locked,
+        };
       }
     },
     onFinish: async ({ responseMessage }) => {

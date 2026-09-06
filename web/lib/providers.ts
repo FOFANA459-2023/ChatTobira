@@ -78,17 +78,71 @@ export function estimateTokens(text: string): number {
 
 /** Can this provider take a prompt this size?
  *
- * Groq's free tier allows 8,000 tokens a minute, and a single oversized
- * request is refused rather than queued — after roughly seven seconds. That
- * refusal is predictable from the prompt, so it is predicted here instead of
- * discovered on every turn. The others have no ceiling worth modelling: the
- * Gemini context is far larger than anything this app builds.
+ * Groq's free tier meters INPUT TOKENS PER MINUTE, and a single oversized
+ * request is refused rather than queued. Measured against the live key on
+ * 2026-09-06 with a 7,790-token prompt, the refusal is explicit:
+ *
+ *   HTTP 413 — "Request too large for model `qwen/qwen3.8-27b` … on input
+ *   tokens per minute (ITPM): Limit 7000, Requested 7790"
+ *
+ * So the real number is 7,000, not the 8,000 this comment used to claim, and
+ * it is a budget shared by every request in the deployment for that minute
+ * rather than a per-request ceiling. 6,500 keeps a margin under it: a prompt
+ * that only just fits on its own will still be refused when a classmate is
+ * mid-question, and that refusal costs seconds of a student's turn to learn
+ * nothing. Predicted here instead of discovered on every turn.
+ *
+ * The others have no ceiling worth modelling: deepseek-v4-flash took an
+ * 8,300-token prompt in 1.3s to first token, and the Gemini context is far
+ * larger than anything this app builds.
  */
 const TOKEN_CEILING: Record<string, number> = { groq: 6500 };
 
 export function canTakePrompt(name: string, tokens: number): boolean {
   const ceiling = TOKEN_CEILING[name];
   return ceiling === undefined || tokens <= ceiling;
+}
+
+/** How long a tier gets to ACCEPT a request before the next one is tried.
+ *
+ * The cascade used to fall through on rejection and only on rejection, which
+ * quietly assumed that a provider either answers or says no. Measured on this
+ * app on 2026-09-06, that is not what happens: an ordinary typed question
+ * (~8,900 prompt tokens) sat on deepseek-v4-flash for 97 SECONDS before it
+ * streamed, on an account and a model that answered an identical prompt in
+ * 1.3s a minute earlier and a minute later. Nothing was wrong that the code
+ * could see — the request had been accepted, and the promise the cascade
+ * waits on simply never settled.
+ *
+ * In production that is worse than a failure. The route's own maxDuration is
+ * 60s, so the student waits a minute and gets nothing at all — where a
+ * fallback at ten seconds would have had Gemini answer them at twelve.
+ *
+ * The budgets are generous against what acceptance actually costs, because
+ * the cost of being wrong is asymmetric: too short spends a fallback on a
+ * tier that was about to answer, too long spends the student's whole turn.
+ * Measured acceptance through the AI SDK is ~1.9s for DeepSeek and under a
+ * second for Groq, both including the reasoning models' first thinking token.
+ */
+export const ACCEPT_BUDGET_MS = { spoken: 6_000, typed: 12_000, structured: 45_000 } as const;
+
+/** Reject if `work` has not settled within `ms`.
+ *
+ * The loser of the race is not cancelled by this — cancelling is the caller's
+ * job, because only the caller holds the AbortController that can stop the
+ * stream it started. Leaving that here would abort a stream that a later
+ * `await` still holds a reference to.
+ */
+export function withDeadline<T>(work: Promise<T>, ms: number, label = "timeout"): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  return Promise.race([
+    work,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(label)), ms);
+    }),
+    // Clearing the timer matters in a Worker: a pending timer keeps the
+    // isolate's event loop alive after the response has been returned.
+  ]).finally(() => clearTimeout(timer)) as Promise<T>;
 }
 
 /** Test seam — no production caller. */

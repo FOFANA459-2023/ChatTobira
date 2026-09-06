@@ -5,7 +5,13 @@ import { generateObject } from "ai";
 import { z } from "zod";
 
 import { cachedPool, rememberPool } from "@/lib/corpus-cache";
-import { isProviderDead, noteProviderFailure } from "@/lib/providers";
+import {
+  ACCEPT_BUDGET_MS,
+  estimateTokens,
+  noteProviderFailure,
+  withDeadline,
+} from "@/lib/providers";
+import { routeModels } from "@/lib/router";
 import {
   chunksForLesson,
   dedupeQuiz,
@@ -634,40 +640,70 @@ the line specified above — it is what the students read on the day.`
   const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
   const google = createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY });
 
-  // Same cascade as the chat route: Groq's free tier first, DeepSeek for the
-  // overflow it cannot cover, Gemini last. DeepSeek offers JSON mode rather
-  // than strict schema enforcement and its own docs warn it can return empty
-  // content, so a malformed paper throws inside generateObject and simply
-  // falls through to Gemini — which is exactly why Gemini stays in the chain.
-  // NOT the chat model: generateObject needs response_format json_schema,
-  // which Groq only implements on the gpt-oss models — llama-3.3 rejects it,
-  // which silently sent every quiz to Gemini and its 20-requests/day budget.
-  const tiers = [
-    { provider: "groq", model: groq(process.env.QUIZ_MODEL ?? "openai/gpt-oss-120b") },
-  ];
-  if (process.env.DEEPSEEK_API_KEY && !isProviderDead("deepseek")) {
-    const deepseek = createDeepSeek({ apiKey: process.env.DEEPSEEK_API_KEY });
-    tiers.push({
-      provider: "deepseek",
-      model: deepseek(process.env.DEEPSEEK_MODEL ?? "deepseek-v4-flash"),
-    });
-  }
-  tiers.push({
-    provider: "google",
-    model: google(process.env.FALLBACK_MODEL ?? "gemini-3.6-flash"),
+  // Ordered by lib/router.ts, which is the one place the policy lives now —
+  // the chat route and this one used to keep two hand-written cascades that
+  // had already drifted apart.
+  //
+  // DeepSeek leads here, which is a change: generateObject against
+  // deepseek-v4-flash was measured returning a schema-valid paper in 3.8s
+  // with correct Japanese and every answer present among its own options.
+  // A paper is high-volume, non-interactive work, and it is validated after
+  // the fact — so a tier that returns something malformed costs a fall-through
+  // and not a bad paper on a student's screen, which is exactly the shape of
+  // job worth moving off a metered free tier. Gemini's structured-output
+  // budget is 20 requests a day; one student pressing "New Test" can spend it
+  // in an afternoon.
+  //
+  // Groq stays in the chain but NOT on the chat model: generateObject needs
+  // response_format json_schema, which Groq implements only on the gpt-oss
+  // models — llama-3.3 rejected it, which silently sent every quiz to Gemini.
+  const route = routeModels("structured", {
+    // A paper's prompt is a system prompt plus ~10 short excerpts, well
+    // inside every tier's ceiling; the size gate is not what decides here.
+    promptTokens: estimateTokens(system) + estimateTokens(prompt),
+    hasDeepSeek: Boolean(process.env.DEEPSEEK_API_KEY),
+    models: {
+      groq: process.env.QUIZ_MODEL ?? "openai/gpt-oss-120b",
+      deepseek: process.env.DEEPSEEK_MODEL,
+      google: process.env.FALLBACK_MODEL,
+    },
   });
 
+  const clientFor = {
+    groq: (model: string) => groq(model),
+    deepseek: (model: string) => {
+      const deepseek = createDeepSeek({ apiKey: process.env.DEEPSEEK_API_KEY! });
+      return deepseek(model);
+    },
+    google: (model: string) => google(model),
+  } as const;
+
+  const tiers = route.map(({ provider, model }) => ({
+    provider,
+    model: clientFor[provider](model),
+  }));
+
   for (const tier of tiers) {
+    // Same reason as the chat route: a tier that neither accepts nor refuses
+    // would otherwise hold the whole request until the route's own ceiling.
+    // The budget is far longer here because a paper is a big structured
+    // generation and nobody is listening in silence for it.
+    const controller = new AbortController();
     try {
-      const { object } = await generateObject({
-        model: tier.model,
-        schema: QuizSchema,
-        system,
-        prompt,
-        // Test papers should vary between sittings; greedy decoding regrows
-        // the same questions from the same excerpts.
-        temperature: 0.8,
-      });
+      const { object } = await withDeadline(
+        generateObject({
+          model: tier.model,
+          schema: QuizSchema,
+          system,
+          prompt,
+          // Test papers should vary between sittings; greedy decoding regrows
+          // the same questions from the same excerpts.
+          temperature: 0.8,
+          abortSignal: controller.signal,
+        }),
+        ACCEPT_BUDGET_MS.structured,
+        "tier_timeout",
+      );
       // No question may repeat inside one paper. Dropping the repeat is
       // better than re-asking the model: it costs no second call, and a
       // 19-question paper with nothing duplicated beats a 20-question paper
@@ -772,6 +808,9 @@ the line specified above — it is what the students read on the day.`
         headers: setCookie ? { "Set-Cookie": setCookie } : undefined,
       });
     } catch (error) {
+      // Abort a timed-out generation rather than leaving it running: on a
+      // metered provider an abandoned paper is still a paid one.
+      controller.abort();
       // Declined or produced an unusable paper — try the next provider. The
       // reason is logged because a silent cascade turns "every tier failed"
       // into an undiagnosable 502.

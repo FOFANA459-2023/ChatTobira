@@ -9,16 +9,29 @@ import { Answer } from "@/components/answer";
 import { FeedbackButtons } from "@/components/feedback-buttons";
 import { MagicLinkForm } from "@/components/magic-link-form";
 import { VoiceInput } from "@/components/voice-input";
+import { VoiceSession } from "@/components/voice-session";
 import { NavBar } from "@/components/nav";
 import { UploadButton, type AttachedFile } from "@/components/upload-button";
+import { conversationLanguage, type ConversationLanguage } from "@/lib/conversation";
 import type { Citation } from "@/lib/retrieval";
 import type { CourseLevel } from "@/lib/uploads";
-import { useSpeechToText, useTextToSpeech, type SpeechToText } from "@/lib/use-voice";
+import { useAutoScroll } from "@/lib/use-autoscroll";
+import {
+  useSpeechToText,
+  useTextToSpeech,
+  voicePhase,
+  type SpeechToText,
+} from "@/lib/use-voice";
 
 interface MessageMeta {
   citations?: Citation[];
   model?: string;
   conversationId?: number;
+  /** The conversation's language as the server settled it. The client derives
+   * the same value from the same pure function for the turns it already has;
+   * this is the authority once a reply has come back. */
+  language?: ConversationLanguage;
+  languageLocked?: boolean;
 }
 
 /** What the student sees between pressing Send and the first word arriving.
@@ -95,6 +108,12 @@ export function Chat({
   // Set by the first answer's metadata; later turns append to the same
   // conversation row so history and feedback attach correctly.
   const conversationRef = useRef<number | undefined>(undefined);
+  // The last thing the microphone heard, shown on the voice screen so a
+  // mishearing is catchable. One turn, not a transcript.
+  const [heard, setHeard] = useState<string | null>(null);
+  // The transcript follows new content unless the student has scrolled up to
+  // read something. See lib/use-autoscroll.ts.
+  const scroll = useAutoScroll<HTMLDivElement>();
 
   // The two halves of the loop refer to each other, so each reaches the
   // other through a ref rather than a closure over a value that does not
@@ -143,9 +162,33 @@ export function Chat({
         .filter((part): part is { type: "text"; text: string } => part.type === "text")
         .map((part) => part.text)
         .join("");
-      if (said.trim()) void tts.speak(said);
+      // Spoken in the conversation's language, not the reply's script. The
+      // server has just told us which one it settled on; the local derivation
+      // is the same function over the same turns and covers the first reply
+      // of a conversation, before any metadata exists.
+      if (said.trim()) void tts.speak(said, meta.language ?? languageRef.current);
     },
   });
+
+  /** The language this conversation is being held in.
+   *
+   * Derived here rather than remembered, for the same reason it is derived on
+   * the server: the turns are the truth, so a reload, a modality switch or a
+   * resumed conversation all arrive at the same answer instead of at whatever
+   * a piece of component state happened to be holding.
+   */
+  const language: ConversationLanguage = conversationLanguage(
+    messages.map((message) => ({
+      role: message.role,
+      text: message.parts
+        .filter((part): part is { type: "text"; text: string } => part.type === "text")
+        .map((part) => part.text)
+        .join("\n"),
+    })),
+  ).language;
+  // onFinish closes over the render that created it; a ref keeps it honest.
+  const languageRef = useRef<ConversationLanguage>(language);
+  languageRef.current = language;
 
   const voice = useSpeechToText(
     (text) => {
@@ -155,6 +198,7 @@ export function Chat({
       if (busyRef.current) return;
       awaitingSpokenId.current = true;
       replyShouldSpeak.current = voiceLiveRef.current;
+      setHeard(text);
       tts.stop();
       void sendMessage({ text });
     },
@@ -179,6 +223,33 @@ export function Chat({
   const trialExhausted =
     !authenticated && /trial_exhausted/.test(error?.message ?? "");
 
+  // One value for what the voice loop is doing, so the voice screen, the
+  // microphone button and the status line cannot describe it differently.
+  const phase = voicePhase({
+    live: voiceLive,
+    listenState: voice.state,
+    hearing: voice.hearing,
+    replying: busy,
+    answerStarted,
+    speaking: tts.speaking,
+    loadingAudio: tts.loading,
+  });
+
+  /** Leave the spoken conversation and hand the student their transcript.
+   *
+   * Nothing about the conversation itself ends here: every spoken turn was
+   * written to the same conversation as a typed one while the voice screen
+   * was up, so this only puts the transcript back on screen — at the bottom,
+   * where the newest turn is. */
+  function endVoice() {
+    setVoiceLive(false);
+    voice.cancel();
+    tts.stop();
+    setHeard(null);
+    // After the transcript has been rendered again, not before it.
+    requestAnimationFrame(() => scroll.scrollToBottom());
+  }
+
   // The transcript's message id is only knowable once useChat has added it,
   // so the turn is tagged on the render after it appears.
   useEffect(() => {
@@ -194,6 +265,9 @@ export function Chat({
     const text = input.trim();
     if (!text || busy) return;
     setInput("");
+    // Sending is an unambiguous "I am done reading the old thing", so it
+    // re-pins the view even if the student had scrolled up.
+    scroll.scrollToBottom();
     void sendMessage({ text });
   }
 
@@ -210,7 +284,21 @@ export function Chat({
         )}
       </NavBar>
 
-      <div className="flex-1 space-y-4 overflow-y-auto px-4 py-6">
+      {/* While a spoken conversation is running, voice takes the screen. The
+          transcript is still being written underneath — every turn goes to the
+          same conversation — and comes back whole when the student finishes. */}
+      {voiceLive ? (
+        <VoiceSession
+          phase={phase}
+          level={voice.level}
+          language={language}
+          heard={heard}
+          error={voice.error}
+          onEnd={endVoice}
+          onInterrupt={tts.stop}
+        />
+      ) : (
+      <div ref={scroll.ref} className="relative flex-1 space-y-4 overflow-y-auto px-4 py-6">
         {messages.length === 0 && (
           <div className="mx-auto mt-16 max-w-xl text-center text-stone-500">
             <p className="text-xl font-medium text-stone-700">
@@ -287,6 +375,7 @@ export function Chat({
                       .map((part) => part.text)
                       .join("")}
                     tts={tts}
+                    language={language}
                   />
                   {message.id === messages.at(-1)?.id && (
                     <FeedbackButtons conversationId={meta.conversationId} />
@@ -307,6 +396,21 @@ export function Chat({
           </div>
         )}
       </div>
+      )}
+
+      {/* Only while they have scrolled away from it. A button that is always
+          there is a button that means nothing. */}
+      {!voiceLive && !scroll.pinned && messages.length > 0 && (
+        <div className="pointer-events-none relative">
+          <button
+            type="button"
+            onClick={() => scroll.scrollToBottom("smooth")}
+            className="pointer-events-auto absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full border border-stone-300 bg-white px-4 py-1.5 text-xs font-medium text-stone-600 shadow-md hover:bg-stone-100"
+          >
+            Jump to latest ↓
+          </button>
+        </div>
+      )}
 
       {trialExhausted ? (
         <div className="border-t border-stone-200 bg-white px-4 py-5">
@@ -325,7 +429,7 @@ export function Chat({
           onSubmit={submit}
           className="border-t border-stone-200 bg-white px-4 py-3"
         >
-          {attached.length > 0 && (
+          {!voiceLive && attached.length > 0 && (
             <ul className="mb-2 flex flex-wrap gap-2">
               {attached.map((file) => (
                 <li
@@ -389,31 +493,15 @@ export function Chat({
             </ul>
           )}
 
-          {voiceLive && (
-            // The only thing the interface has to say about voice: that it is
-            // on, and how to leave. No mode picker, no practice switch — the
-            // tutor infers what kind of conversation this is from what is
-            // being said.
-            <p className="mb-2 flex items-center gap-2 text-xs text-stone-500">
-              <span lang="ja">会話中</span>
-              <span className="text-stone-400">
-                Speak whenever you like — I am listening between replies. Type to go back to writing.
-              </span>
-            </p>
-          )}
-
           <div className="flex gap-2">
           <input
             value={input}
             onChange={(e) => {
               setInput(e.target.value);
               // Typing IS the switch back to text: the loop stops listening
-              // and stops talking, and the conversation carries on unbroken.
-              if (e.target.value && voiceLiveRef.current) {
-                setVoiceLive(false);
-                voice.cancel();
-                tts.stop();
-              }
+              // and stops talking, and the conversation carries on unbroken —
+              // same conversation, same history, now on the screen.
+              if (e.target.value && voiceLiveRef.current) endVoice();
             }}
             placeholder={
               voiceLive
@@ -422,7 +510,12 @@ export function Chat({
             }
             className="flex-1 rounded-xl border border-stone-300 px-4 py-2.5 text-sm outline-none focus:border-stone-500"
           />
-          {authenticated && (
+          {/* Everything except the input is hidden while a spoken
+              conversation is running. The controls that matter then are on the
+              voice screen; these would be a second set of them competing for
+              the same attention. The input stays because typing into it is how
+              a student goes back to writing. */}
+          {authenticated && !voiceLive && (
             <UploadButton
               defaultLevel={level}
               disabled={busy}
@@ -434,7 +527,7 @@ export function Chat({
               }
             />
           )}
-          {authenticated && (
+          {authenticated && !voiceLive && (
             <VoiceInput
               voice={voice}
               live={voiceLive}
@@ -444,13 +537,15 @@ export function Chat({
               onStopSpeaking={tts.stop}
             />
           )}
-          <button
-            type="submit"
-            disabled={busy || input.trim() === ""}
-            className="rounded-xl bg-stone-900 px-5 py-2.5 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
-          >
-            {busy ? "…" : "Send"}
-          </button>
+          {!voiceLive && (
+            <button
+              type="submit"
+              disabled={busy || input.trim() === ""}
+              className="rounded-xl bg-stone-900 px-5 py-2.5 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
+            >
+              {busy ? "…" : "Send"}
+            </button>
+          )}
           </div>
         </form>
       )}
@@ -479,8 +574,13 @@ function MicGlyph() {
 function SpeakButton({
   text,
   tts,
+  language,
 }: {
   text: string;
+  /** The conversation's language, so a student who presses Listen in an
+   * English conversation gets the same voice they would have heard if they
+   * had spoken the turn instead. */
+  language: ConversationLanguage;
   tts: ReturnType<typeof useTextToSpeech>;
 }) {
   if (!text.trim()) return null;
@@ -488,7 +588,7 @@ function SpeakButton({
   return (
     <button
       type="button"
-      onClick={() => (busy ? tts.stop() : void tts.speak(text))}
+      onClick={() => (busy ? tts.stop() : void tts.speak(text, language))}
       className="flex items-center gap-1 rounded-lg px-1.5 py-1 text-xs text-stone-400 hover:bg-stone-100 hover:text-stone-700"
       aria-label={busy ? "Stop reading this answer" : "Read this answer aloud"}
       title={busy ? "Stop" : "Read aloud"}

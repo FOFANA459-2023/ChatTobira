@@ -2,7 +2,71 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import type { ConversationLanguage } from "./conversation";
 import { speakableText, sentences, speechSegments } from "./speech";
+import { beginVoiceTurn, endVoiceTurn, markVoiceStage } from "./voice-metrics";
+
+/* ------------------------------------------------------------------------ */
+/* The state machine                                                          */
+/* ------------------------------------------------------------------------ */
+
+/** Where a spoken turn is, as one value.
+ *
+ * The loop always had these states; it just kept them in six booleans spread
+ * across two hooks and a component, and every place that wanted to render
+ * "what is happening" re-derived them slightly differently. One name for each
+ * state, derived once, so the button, the status line and the voice screen
+ * cannot disagree about whether the tutor is thinking or talking.
+ *
+ * The cycle is: idle → listening → hearing → transcribing → thinking →
+ * responding → speaking → listening. It returns to listening on its own —
+ * nobody presses anything between turns — and any state can be interrupted by
+ * the student speaking, which is barge-in and lands back at `hearing`.
+ */
+export type VoicePhase =
+  | "idle"
+  /** Microphone open, nothing said yet. */
+  | "listening"
+  /** The student is speaking right now. */
+  | "hearing"
+  /** Speech captured, Whisper working. */
+  | "transcribing"
+  /** Sent. The server is deciding what this turn means, retrieving if it has
+   * to, and generating. Indistinguishable from here, and deliberately shown
+   * as one state: a student does not care which. */
+  | "thinking"
+  /** The answer is arriving as text but no audio has played yet. */
+  | "responding"
+  /** The tutor is talking. */
+  | "speaking";
+
+export interface VoicePhaseInput {
+  live: boolean;
+  listenState: ListenState;
+  hearing: boolean;
+  /** A chat request is in flight. */
+  replying: boolean;
+  /** Tokens of the answer have started arriving. */
+  answerStarted: boolean;
+  speaking: boolean;
+  /** Audio is being fetched but has not started playing. */
+  loadingAudio: boolean;
+}
+
+/** The single source of truth for what the voice loop is doing.
+ *
+ * Ordered by what overrides what, and speaking comes first: audio playing is
+ * the most visible fact about the turn, and it briefly overlaps the tail of
+ * the request while the last clause is still being fetched.
+ */
+export function voicePhase(input: VoicePhaseInput): VoicePhase {
+  if (!input.live) return "idle";
+  if (input.speaking || input.loadingAudio) return "speaking";
+  if (input.listenState === "transcribing") return "transcribing";
+  if (input.replying) return input.answerStarted ? "responding" : "thinking";
+  if (input.listenState === "listening") return input.hearing ? "hearing" : "listening";
+  return "idle";
+}
 
 /* ------------------------------------------------------------------------ */
 /* Recording                                                                  */
@@ -196,6 +260,7 @@ export function useSpeechToText(
         return;
       }
 
+      markVoiceStage("capture");
       setState("transcribing");
       try {
         const body = new FormData();
@@ -211,6 +276,7 @@ export function useSpeechToText(
           fail("empty");
           return;
         }
+        markVoiceStage("stt");
         setState("idle");
         onTranscriptRef.current(said);
       } catch {
@@ -278,6 +344,7 @@ export function useSpeechToText(
 
     recorderRef.current = recorder;
     recorder.start();
+    beginVoiceTurn();
     setState("listening");
   }, [fail, state, stop, teardown]);
 
@@ -305,8 +372,70 @@ export function useSpeechToText(
 export interface TextToSpeech {
   speaking: boolean;
   loading: boolean;
-  speak: (markdown: string) => Promise<void>;
+  speak: (markdown: string, language?: ConversationLanguage) => Promise<void>;
   stop: () => void;
+}
+
+/* --- One voice, both languages -------------------------------------------
+ *
+ * The tutor has ONE voice. A student who says "let's speak Japanese" halfway
+ * through should hear the same person carry on in Japanese, not be handed to
+ * a different speaker — and the app was doing exactly that, twice over: the
+ * browser fallback picked a voice per LANGUAGE RUN, so a single bilingual
+ * sentence was read by two different people taking turns mid-clause.
+ *
+ * The cloud path never had this problem and is where the requirement is
+ * genuinely met: `/api/speak` synthesises every clause with one prebuilt
+ * Gemini voice (Kore by default), which speaks both languages in one voice
+ * identity, and nothing in the request varies by language. That is the voice
+ * students actually hear.
+ *
+ * This is the emergency path — the network failed, or the Google key is out
+ * of quota — where the browser gives us only whatever voices the student's
+ * operating system happens to ship, each pinned to one language. The best
+ * available answer, in order:
+ *
+ *   1. A genuinely multilingual system voice if there is one. The Edge and
+ *      Windows "Natural"/"Multilingual" voices speak both, which is the same
+ *      guarantee the cloud voice gives.
+ *   2. Otherwise one voice chosen for the conversation's language and HELD —
+ *      remembered for the life of the page, so it is the same speaker on
+ *      every reply rather than being re-picked per utterance.
+ *
+ * A Japanese voice reading an English clause is worse than an English one, so
+ * a single-language pick still sets `lang` per run for pronunciation. What it
+ * no longer does is change WHO is speaking part way through a sentence.
+ */
+let heldVoice: SpeechSynthesisVoice | null = null;
+
+/** Names that mean "this voice speaks more than one language". */
+const MULTILINGUAL = /multiling|natural/i;
+
+function fallbackVoice(language: ConversationLanguage): SpeechSynthesisVoice | null {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) return null;
+  // Still the one chosen earlier: identity must not change between replies.
+  if (heldVoice) return heldVoice;
+
+  // getVoices() is populated asynchronously and returns [] on the first call
+  // in some browsers. Returning null then is correct — the utterance falls
+  // back to the platform default for its lang, and the next reply, by which
+  // time the list has loaded, pins one properly.
+  const voices = window.speechSynthesis.getVoices();
+  if (voices.length === 0) return null;
+
+  const wanted = language === "ja" ? /^ja/i : /^en/i;
+  heldVoice =
+    voices.find((voice) => MULTILINGUAL.test(voice.name) && wanted.test(voice.lang)) ??
+    voices.find((voice) => MULTILINGUAL.test(voice.name)) ??
+    voices.find((voice) => wanted.test(voice.lang)) ??
+    null;
+  return heldVoice;
+}
+
+/** Test seam, and the one legitimate reason to forget the choice: the voice
+ * list changes when the student installs or removes a system voice. */
+export function resetFallbackVoice(): void {
+  heldVoice = null;
 }
 
 /** Speak an answer, a sentence at a time, with the browser voice as the net.
@@ -354,9 +483,11 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
 
   useEffect(() => stop, [stop]);
 
-  /** The operating system's own voice, one utterance per language run so a
-   * Japanese sentence is not read by an English voice. */
-  const speakLocally = useCallback((text: string, turn: number) => {
+  /** The operating system's own voice: one utterance per language run so the
+   * pronunciation is right, but ONE voice across all of them so the speaker
+   * does not change identity mid-sentence. */
+  const speakLocally = useCallback(
+    (text: string, turn: number, language: ConversationLanguage) => {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) {
       setSpeaking(false);
       return;
@@ -367,8 +498,10 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
       setSpeaking(false);
       return;
     }
+    const voice = fallbackVoice(language);
     segments.forEach((segment, index) => {
       const utterance = new SpeechSynthesisUtterance(segment.text);
+      if (voice) utterance.voice = voice;
       utterance.lang = segment.lang === "ja" ? "ja-JP" : "en-US";
       utterance.rate = segment.lang === "ja" ? 0.95 : 1;
       if (index === segments.length - 1) {
@@ -383,7 +516,9 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
       }
       window.speechSynthesis.speak(utterance);
     });
-  }, []);
+    },
+    [],
+  );
 
   /** One clause of audio from the server, or null if it could not be had. */
   const fetchClause = useCallback(async (text: string): Promise<string | null> => {
@@ -403,7 +538,7 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
   }, []);
 
   const speak = useCallback(
-    async (markdown: string) => {
+    async (markdown: string, language: ConversationLanguage = "ja") => {
       const text = speakableText(markdown);
       if (!text) return;
 
@@ -433,7 +568,7 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
           // The server voice failed. Say the rest with the local one rather
           // than stopping mid-reply.
           setLoading(false);
-          speakLocally(clauses.slice(index).join(" "), turn);
+          speakLocally(clauses.slice(index).join(" "), turn, language);
           return;
         }
 
@@ -441,13 +576,21 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
         const played = await new Promise<boolean>((resolve) => {
           const audio = new Audio(url);
           audioRef.current = audio;
+          if (index === 0) {
+            // The end of the measurement: the first syllable the student
+            // actually hears, not the moment the answer finished generating.
+            audio.onplaying = () => {
+              markVoiceStage("tts_first_audio");
+              endVoiceTurn("voice turn");
+            };
+          }
           audio.onended = () => resolve(true);
           audio.onerror = () => resolve(false);
           void audio.play().catch(() => resolve(false));
         });
         if (turnRef.current !== turn) return;
         if (!played) {
-          speakLocally(clauses.slice(index).join(" "), turn);
+          speakLocally(clauses.slice(index).join(" "), turn, language);
           return;
         }
       }

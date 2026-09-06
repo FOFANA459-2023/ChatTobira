@@ -66,11 +66,21 @@ export function withoutLanguageRequest(text: string): string {
 
 /** The mode for the turn being answered.
  *
- * An explicit request is sticky — it holds until the student asks for
- * something else, which is what "preserve the preference" has to mean if it
- * is to survive the next one-word follow-up. Absent a request, a question
- * written in Japanese is answered in Japanese, and everything else gets the
- * default: English carrying the Japanese terms the course actually uses.
+ * SUPERSEDED, and kept only for its tests. The live decision is
+ * `conversationLanguage` + `languageModeFor` in lib/conversation.ts, and the
+ * chat route calls those. Nothing in production calls this.
+ *
+ * It is left here because the difference between the two is the whole point
+ * of the newer one, and it is easier to see side by side than described. This
+ * reads the language off the LATEST message: absent an explicit request, a
+ * turn written in Japanese is answered in Japanese. That is right for a
+ * question typed on its own and wrong for a conversation, where it means one
+ * Japanese place name in an English sentence flips the reply — and there is
+ * nothing the student can say to make it stop, because the next turn is
+ * judged afresh too. The replacement decides once, from the first meaningful
+ * utterance, and changes only when asked.
+ *
+ * Delete this and its tests when nobody needs the comparison any more.
  */
 export function detectLanguageMode(turns: Turn[]): LanguageMode {
   const asked = turns.filter((t) => t.role === "user");
