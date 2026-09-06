@@ -119,3 +119,25 @@ describe("health and configuration", () => {
     );
   });
 });
+
+describe("the size filter is for turns somebody is waiting through", () => {
+  it("keeps Groq in the paper chain even on a prompt the estimate calls large", () => {
+    // estimateTokens counts a Japanese character as a whole token and runs
+    // about twice what the providers count — a quiz prompt it calls 6,374,
+    // Groq counted as 3,234. Filtering on that left Google as the only tier,
+    // so one bad generation became "Could not generate a test" with nothing
+    // behind it. A paper is not interactive; a 413 costs one round trip.
+    expect(routeModels("structured", { promptTokens: 9000 }).map((t) => t.provider)).toEqual([
+      "google",
+      "groq",
+      "groq",
+    ]);
+  });
+
+  it("still protects an interactive turn from an oversized request", () => {
+    expect(routeModels("chat_answer", { promptTokens: 9000 }).map((t) => t.provider)).toEqual([
+      "deepseek",
+      "google",
+    ]);
+  });
+});

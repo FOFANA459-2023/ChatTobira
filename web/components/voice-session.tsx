@@ -36,7 +36,13 @@ interface PhaseCopy {
 
 const PHASE_COPY: Record<VoicePhase, PhaseCopy> = {
   idle: { ja: "準備中", en: "Getting ready", announce: "Getting ready" },
-  listening: { ja: "どうぞ", en: "Go ahead", announce: "Listening. Go ahead." },
+  // Deliberately the same words as `hearing`. The microphone being open
+  // and the microphone hearing you are the app's business, not the
+  // student's, and labelling the gap between the tutor finishing and the
+  // student starting — "Go ahead", 「どうぞ」 — turned every turn into a
+  // handover with a cue to wait for. A conversation does not announce
+  // whose turn it is; you just talk.
+  listening: { ja: "聞いています", en: "Listening", announce: "Listening" },
   hearing: { ja: "聞いています", en: "Listening", announce: "Hearing you" },
   transcribing: { ja: "聞き取り中", en: "Catching that", announce: "Working out what you said" },
   thinking: { ja: "考えています", en: "Thinking", announce: "Thinking" },
@@ -159,9 +165,7 @@ export function VoiceSession({
           </p>
         ) : (
           <p className="text-center text-sm text-stone-300">
-            {language === "ja"
-              ? "話しかけてください。返事のあと、またマイクが開きます。"
-              : "Just start talking. The microphone reopens after each reply."}
+            {language === "ja" ? "話しかけてください。" : "Just start talking."}
           </p>
         )}
       </div>
