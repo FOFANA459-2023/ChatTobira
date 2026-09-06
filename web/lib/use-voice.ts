@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { ConversationLanguage } from "./conversation";
-import { readyToSpeak, speakableText, sentences, speechSegments } from "./speech";
+import { speakableText, sentences, speechSegments } from "./speech";
 import { beginVoiceTurn, endVoiceTurn, markVoiceStage } from "./voice-metrics";
 
 /* ------------------------------------------------------------------------ */
@@ -134,8 +134,6 @@ const SILENCE_MS = 1100; // quiet for this long after speech ends the turn
 const MIN_SPEECH_MS = 300; // shorter than this was a cough, not a sentence
 const MAX_UTTERANCE_MS = 30_000; // a safety stop, never reached in conversation
 const LEAD_IN_MS = 6000; // give someone this long to start before giving up
-/** Shortest run of text worth sending to the voice on its own. */
-const MIN_CLAUSE_CHARS = 12;
 
 export interface SpeechToText {
   state: ListenState;
@@ -375,9 +373,6 @@ export interface TextToSpeech {
   speaking: boolean;
   loading: boolean;
   speak: (markdown: string, language?: ConversationLanguage) => Promise<void>;
-  /** Speak a reply that is still streaming: the text so far, and whether the
-   * stream has finished. Clauses are spoken as they complete. */
-  speakStreaming: (soFar: string, done: boolean, language?: ConversationLanguage) => void;
   stop: () => void;
 }
 
@@ -416,29 +411,7 @@ let heldVoice: SpeechSynthesisVoice | null = null;
 /** Names that mean "this voice speaks more than one language". */
 const MULTILINGUAL = /multiling|natural/i;
 
-/* The tutor is one person, and she is the voice students already hear.
- *
- * The cloud path speaks with Gemini's Kore, which is female, for every
- * language and every flow. The browser fallback had no such rule: it asked for
- * a voice by LANGUAGE and took whatever the operating system offered first,
- * which on Windows is Microsoft David — male. So a student whose /api/speak
- * call failed heard a different person read the answer than the one who had
- * been talking to them a moment earlier, and the two flows appeared to have
- * two different voices.
- *
- * The Web Speech API does not expose gender, so this is a name list. It is
- * unavoidably incomplete and deliberately conservative: an unrecognised voice
- * is preferred over a recognised male one, and a recognised male one is used
- * only when there is nothing else in the right language at all — a wrong-sex
- * voice still beats silence, and beats English being read by a Japanese voice.
- */
-const FEMALE_VOICES =
-  /\b(zira|aria|jenny|michelle|ana|sara|nanami|ayumi|haruka|sayaka|mayu|samantha|ava|allison|susan|vicki|victoria|karen|moira|tessa|fiona|kyoko|o-ren|hazel|linda|heera|female)\b/i;
-
-const MALE_VOICES =
-  /\b(david|mark|george|james|daniel|alex|fred|guy|eric|christopher|roger|steffan|otoya|hattori|ichiro|keita|male)\b/i;
-
-export function fallbackVoice(language: ConversationLanguage): SpeechSynthesisVoice | null {
+function fallbackVoice(language: ConversationLanguage): SpeechSynthesisVoice | null {
   if (typeof window === "undefined" || !("speechSynthesis" in window)) return null;
   // Still the one chosen earlier: identity must not change between replies.
   if (heldVoice) return heldVoice;
@@ -451,22 +424,10 @@ export function fallbackVoice(language: ConversationLanguage): SpeechSynthesisVo
   if (voices.length === 0) return null;
 
   const wanted = language === "ja" ? /^ja/i : /^en/i;
-  const inLanguage = voices.filter((voice) => wanted.test(voice.lang));
-  const female = (voice: SpeechSynthesisVoice) => FEMALE_VOICES.test(voice.name);
-  const male = (voice: SpeechSynthesisVoice) => MALE_VOICES.test(voice.name);
-
   heldVoice =
-    // A known female voice in the conversation's language, multilingual first
-    // so one voice can carry both languages the way Kore does.
-    inLanguage.find((v) => female(v) && MULTILINGUAL.test(v.name)) ??
-    inLanguage.find(female) ??
-    // A known female voice in the other language beats a male one in this
-    // one: the persona is what the student notices across a conversation.
-    voices.find((v) => female(v) && MULTILINGUAL.test(v.name)) ??
-    voices.find(female) ??
-    // Nothing recognised. Prefer an unknown voice over a known male one.
-    inLanguage.find((v) => !male(v)) ??
-    inLanguage[0] ??
+    voices.find((voice) => MULTILINGUAL.test(voice.name) && wanted.test(voice.lang)) ??
+    voices.find((voice) => MULTILINGUAL.test(voice.name)) ??
+    voices.find((voice) => wanted.test(voice.lang)) ??
     null;
   return heldVoice;
 }
@@ -475,70 +436,6 @@ export function fallbackVoice(language: ConversationLanguage): SpeechSynthesisVo
  * list changes when the student installs or removes a system voice. */
 export function resetFallbackVoice(): void {
   heldVoice = null;
-}
-
-/* --- Audio already synthesised -------------------------------------------
- *
- * Synthesis is the same cost every time it is asked for the same sentence, and
- * this app asks for the same sentence more often than it looks: a student
- * presses Listen, reads on, and presses it again; a tutor opens two replies
- * with 「いいですね。」; a spoken turn is replayed after a mishearing. Each of
- * those was a fresh round trip and a fresh second of waiting.
- *
- * Blobs rather than object URLs, because `release()` revokes the URLs it hands
- * out and a revoked URL cannot be played again — the audio is what is worth
- * keeping, and wrapping it in a new URL is free.
- *
- * Small and oldest-first: this is a convenience for the last few minutes of a
- * conversation, not a store. Forty clauses of Gemini's 24 kHz PCM is a couple
- * of megabytes, and it is gone when the page is.
- */
-const CLAUSE_CACHE_LIMIT = 40;
-const clauseAudio = new Map<string, Blob>();
-
-/* --- When the cloud voice has run out ------------------------------------
- *
- * Measured against the live key on 2026-09-06, the free tier allows TEN
- * requests A DAY for gemini-2.5-flash-preview-tts:
- *
- *   "Quota exceeded ... limit: 10, model: gemini-2.5-flash-tts"
- *
- * A spoken reply is two or three clauses, so a student gets three or four
- * turns before the voice is gone for the rest of the day — and every clause
- * after that was still asking, waiting a few hundred milliseconds to be told
- * no, and only then falling back to the browser. Per clause, all day.
- *
- * So the refusal is remembered. The window is long enough to stop the asking
- * and short enough that a daily reset, or a topped-up plan, recovers on its
- * own without a deploy — the same reasoning as the model provider health in
- * lib/providers.ts.
- */
-const CLOUD_VOICE_BACKOFF_MS = 15 * 60 * 1000;
-let cloudVoiceBlockedUntil = 0;
-
-function cloudVoiceExhausted(): boolean {
-  return Date.now() < cloudVoiceBlockedUntil;
-}
-
-function noteCloudVoiceExhausted(): void {
-  cloudVoiceBlockedUntil = Date.now() + CLOUD_VOICE_BACKOFF_MS;
-}
-
-/** Test seam — no production caller. */
-export function resetCloudVoice(): void {
-  cloudVoiceBlockedUntil = 0;
-}
-
-function rememberClause(text: string, blob: Blob): void {
-  // Re-inserting moves the key to the end of the iteration order, so eviction
-  // drops the clause nobody has played for longest.
-  clauseAudio.delete(text);
-  clauseAudio.set(text, blob);
-  while (clauseAudio.size > CLAUSE_CACHE_LIMIT) {
-    const oldest = clauseAudio.keys().next().value;
-    if (oldest === undefined) break;
-    clauseAudio.delete(oldest);
-  }
 }
 
 /** Speak an answer, a sentence at a time, with the browser voice as the net.
@@ -559,17 +456,6 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
   const [loading, setLoading] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const urlsRef = useRef<string[]>([]);
-  const clausesRef = useRef<string[]>([]);
-  const streamDoneRef = useRef(true);
-  /** True between the first chunk of a streamed reply and its last.
-   *
-   * Needed because "is this a new reply?" cannot be read off the queue: a
-   * finished turn leaves its clauses in place, so the next turn would look
-   * like a continuation of it and never start a player. */
-  const streamingRef = useRef(false);
-  const consumedRef = useRef(0);
-  /** Resolved when more clauses arrive, so the player waits without polling. */
-  const wakeRef = useRef<(() => void) | null>(null);
   // Bumped on every stop and every new utterance, so a slow fetch that
   // resolves after the student has moved on cannot start talking over them.
   const turnRef = useRef(0);
@@ -584,14 +470,6 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
 
   const stop = useCallback(() => {
     turnRef.current += 1;
-    // Let a waiting player fall out of its loop rather than leaving it parked
-    // on a promise that will never resolve.
-    streamingRef.current = false;
-    streamDoneRef.current = true;
-    clausesRef.current = [];
-    consumedRef.current = 0;
-    wakeRef.current?.();
-    wakeRef.current = null;
     if (audioRef.current) {
       audioRef.current.pause();
       release();
@@ -644,34 +522,14 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
 
   /** One clause of audio from the server, or null if it could not be had. */
   const fetchClause = useCallback(async (text: string): Promise<string | null> => {
-    // The cloud voice is out of quota. Do not ask it again — go straight to
-    // the browser voice, which is the difference between a fallback that
-    // costs nothing and one that costs a round trip per clause.
-    if (cloudVoiceExhausted()) return null;
-
-    const cached = clauseAudio.get(text);
-    if (cached) {
-      // A fresh URL each time: `release()` revokes the URLs it handed out, and
-      // a revoked one cannot be played again. The BLOB is what is worth
-      // keeping, and it costs nothing to wrap it in a new URL.
-      const url = URL.createObjectURL(cached);
-      urlsRef.current.push(url);
-      return url;
-    }
     try {
       const response = await fetch("/api/speak", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
       });
-      if (response.status === 429) {
-        noteCloudVoiceExhausted();
-        return null;
-      }
       if (!response.ok) return null;
-      const blob = await response.blob();
-      rememberClause(text, blob);
-      const url = URL.createObjectURL(blob);
+      const url = URL.createObjectURL(await response.blob());
       urlsRef.current.push(url);
       return url;
     } catch {
@@ -679,58 +537,38 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
     }
   }, []);
 
-  /* --- The player ------------------------------------------------------
-   *
-   * Clauses go in one end and audio comes out the other, and the list is
-   * allowed to GROW while the player is working through it. That is the whole
-   * point: the answer is still being written when the tutor starts talking.
-   *
-   * Before this, speaking began in the chat's onFinish handler — after the
-   * last token of the answer had arrived. So the student waited for the model
-   * to finish writing a reply they were never going to read, and only THEN
-   * for the first clause to be synthesised. The generation time was pure
-   * silence, and it is the largest single component of a spoken turn.
-   */
+  const speak = useCallback(
+    async (markdown: string, language: ConversationLanguage = "ja") => {
+      const text = speakableText(markdown);
+      if (!text) return;
 
-  const wake = useCallback(() => {
-    wakeRef.current?.();
-    wakeRef.current = null;
-  }, []);
+      turnRef.current += 1;
+      const turn = turnRef.current;
+      if (audioRef.current) {
+        audioRef.current.pause();
+        release();
+      }
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+      setSpeaking(true);
+      setLoading(true);
 
-  const play = useCallback(
-    async (turn: number, language: ConversationLanguage) => {
-      let index = 0;
-      let pending: Promise<string | null> | null = null;
+      const clauses = sentences(text);
+      // The next clause is fetched while the current one plays, so only the
+      // first one is ever waited for.
+      let pending = fetchClause(clauses[0]);
 
-      for (;;) {
-        if (turnRef.current !== turn) return;
-
-        // Nothing ready yet. Either the answer is still being written — wait
-        // for the next clause — or it is finished and so are we.
-        if (index >= clausesRef.current.length) {
-          if (streamDoneRef.current) break;
-          await new Promise<void>((resolve) => {
-            wakeRef.current = resolve;
-          });
-          continue;
-        }
-
-        if (!pending) pending = fetchClause(clausesRef.current[index]);
+      for (let index = 0; index < clauses.length; index++) {
         const url = await pending;
-        pending = null;
-        if (turnRef.current !== turn) return;
-
-        // The next clause is fetched while this one plays, so only the first
-        // is ever waited for.
-        if (index + 1 < clausesRef.current.length) {
-          pending = fetchClause(clausesRef.current[index + 1]);
-        }
+        if (turnRef.current !== turn) return; // superseded, or stopped
+        if (index + 1 < clauses.length) pending = fetchClause(clauses[index + 1]);
 
         if (!url) {
           // The server voice failed. Say the rest with the local one rather
           // than stopping mid-reply.
           setLoading(false);
-          speakLocally(clausesRef.current.slice(index).join(" "), turn, language);
+          speakLocally(clauses.slice(index).join(" "), turn, language);
           return;
         }
 
@@ -752,10 +590,9 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
         });
         if (turnRef.current !== turn) return;
         if (!played) {
-          speakLocally(clausesRef.current.slice(index).join(" "), turn, language);
+          speakLocally(clauses.slice(index).join(" "), turn, language);
           return;
         }
-        index++;
       }
 
       if (turnRef.current === turn) {
@@ -767,99 +604,5 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
     [fetchClause, release, speakLocally],
   );
 
-  /** Reset the queue and take the turn. */
-  const beginTurn = useCallback((): number => {
-    turnRef.current += 1;
-    if (audioRef.current) {
-      audioRef.current.pause();
-      release();
-    }
-    if (typeof window !== "undefined" && "speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-    }
-    clausesRef.current = [];
-    consumedRef.current = 0;
-    streamDoneRef.current = false;
-    setSpeaking(true);
-    setLoading(true);
-    return turnRef.current;
-  }, [release]);
-
-  /** Turn as much of the answer-so-far as is FINISHED into clauses.
-   *
-   * Only up to the last sentence terminator, because the text after it is
-   * still being written and speaking half a sentence is worse than waiting.
-   * Already-queued clauses are never revised — the player may be reading one
-   * of them aloud at the time.
-   *
-   * The minimum length is not tidiness. Measured: 「いいですね！」 sent alone
-   * came back from the service with no audio at all, and synthesis latency is
-   * mostly fixed cost rather than per-character, so a three-character request
-   * costs nearly what a whole sentence costs. A short fragment waits for the
-   * next one instead of being sent by itself.
-   */
-  const enqueue = useCallback(
-    (soFar: string, done: boolean) => {
-      const text = speakableText(soFar);
-      const { region, consumed } = readyToSpeak(
-        text,
-        consumedRef.current,
-        done,
-        MIN_CLAUSE_CHARS,
-      );
-      if (!region) return;
-
-      consumedRef.current = consumed;
-      clausesRef.current = [...clausesRef.current, ...sentences(region)];
-      wake();
-    },
-    [wake],
-  );
-
-  /** Speak a finished answer — the Listen button, and any reply that arrived
-   * complete rather than streamed. */
-  const speak = useCallback(
-    async (markdown: string, language: ConversationLanguage = "ja") => {
-      const text = speakableText(markdown);
-      if (!text) return;
-      const turn = beginTurn();
-      clausesRef.current = sentences(text);
-      consumedRef.current = text.length;
-      streamDoneRef.current = true;
-      streamingRef.current = false;
-      await play(turn, language);
-    },
-    [beginTurn, play],
-  );
-
-  /** Speak an answer WHILE it is still being written.
-   *
-   * Called as the reply streams, with the text so far. The first call starts
-   * the player; later calls only extend its queue; the final call with `done`
-   * lets it finish and hand the microphone back. */
-  const speakStreaming = useCallback(
-    (soFar: string, done: boolean, language: ConversationLanguage = "ja") => {
-      if (!streamingRef.current) {
-        streamingRef.current = true;
-        const turn = beginTurn();
-        enqueue(soFar, done);
-        if (done) {
-          streamDoneRef.current = true;
-          streamingRef.current = false;
-        }
-        wake();
-        void play(turn, language);
-        return;
-      }
-      enqueue(soFar, done);
-      if (done) {
-        streamDoneRef.current = true;
-        streamingRef.current = false;
-      }
-      wake();
-    },
-    [beginTurn, enqueue, play, wake],
-  );
-
-  return { speaking, loading, speak, speakStreaming, stop };
+  return { speaking, loading, speak, stop };
 }
