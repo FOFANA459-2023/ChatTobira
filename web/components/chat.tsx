@@ -172,7 +172,7 @@ export function Chat({
       // is the same function over the same turns and covers the first reply
       // of a conversation, before any metadata exists.
       if (said.trim()) {
-        tts.speakStreaming(said, true);
+        tts.speakStreaming(said, true, meta.language ?? languageRef.current);
       }
     },
   });
@@ -278,7 +278,7 @@ export function Chat({
       .map((part) => part.text)
       .join("");
     if (!said.trim()) return;
-    speakStreaming(said, false);
+    speakStreaming(said, false, languageRef.current);
   }, [messages, speakStreaming]);
 
   // The transcript's message id is only knowable once useChat has added it,
@@ -406,6 +406,7 @@ export function Chat({
                       .map((part) => part.text)
                       .join("")}
                     tts={tts}
+                    language={language}
                   />
                   {message.id === messages.at(-1)?.id && (
                     <FeedbackButtons conversationId={meta.conversationId} />
@@ -604,8 +605,13 @@ function MicGlyph() {
 function SpeakButton({
   text,
   tts,
+  language,
 }: {
   text: string;
+  /** The conversation's language, so a student who presses Listen in an
+   * English conversation gets the same voice they would have heard if they
+   * had spoken the turn instead. */
+  language: ConversationLanguage;
   tts: ReturnType<typeof useTextToSpeech>;
 }) {
   if (!text.trim()) return null;
@@ -613,7 +619,7 @@ function SpeakButton({
   return (
     <button
       type="button"
-      onClick={() => (busy ? tts.stop() : void tts.speak(text))}
+      onClick={() => (busy ? tts.stop() : void tts.speak(text, language))}
       className="flex items-center gap-1 rounded-lg px-1.5 py-1 text-xs text-stone-400 hover:bg-stone-100 hover:text-stone-700"
       aria-label={busy ? "Stop reading this answer" : "Read this answer aloud"}
       title={busy ? "Stop" : "Read aloud"}

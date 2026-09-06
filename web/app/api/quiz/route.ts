@@ -24,7 +24,6 @@ import {
   rankChunksByFocus,
   selectExemplars,
   type ExemplarChunk,
-  type Quiz,
 } from "@/lib/quiz";
 import {
   blueprint as paperBlueprint,
@@ -609,17 +608,7 @@ material: none was retrieved, so anything you said about it would be invented.`;
   // measures against. Each archetype carries its own range — the papers'
   // word-bank sections run to seven items and their a〜c sections to two — so
   // the total is the plan's, not a division of the requested count.
-  // One more item per section than the paper needs, because everything below
-  // this line takes items AWAY: the duplicate check, the past-paper copy
-  // check, the validity gate, and the history check that stops "New Test"
-  // asking what the student was asked last week. A section planned at exactly
-  // its target loses items to those and comes up short — and a section that
-  // loses ALL of them disappears from the paper entirely, which is how a
-  // four-section paper renders as three.
-  //
-  // The extra is still clamped to the archetype's own maximum in sectionPlan,
-  // so this asks for a longer section only where the real papers have one.
-  const perSection = Math.max(2, Math.round(count / blueprint.length)) + 1;
+  const perSection = Math.max(2, Math.round(count / blueprint.length));
   const planned = blueprint.reduce(
     (total, archetype) =>
       total + Math.min(Math.max(perSection, archetype.items[0]), archetype.items[1]),
@@ -739,56 +728,6 @@ the line specified above — it is what the students read on the day.`
     model: clientFor[provider](model),
   }));
 
-  /** Remember what was asked, so the next paper is a different one.
-   *
-   * Fire-and-forget: a history write must never cost a student their test.
-   * Shared by the clean path and the near miss below, because a paper that
-   * was served is a paper the student has now seen — whether or not it
-   * cleared the bar. Recording only the perfect ones would ask them the same
-   * questions again next week. */
-  function recordHistory(written: Quiz, prints: Fingerprint[]): void {
-    if (!user || prints.length === 0) return;
-    void supabase
-      .from("quiz_items")
-      .insert(
-        written.sections.flatMap((section, sectionIndex) =>
-          section.items.map((item) => {
-            const print = fingerprint(item);
-            return {
-              user_id: user.id,
-              level,
-              kind,
-              topic: contentScope !== null ? `T${contentScope}` : null,
-              archetype: blueprint[sectionIndex]?.id ?? null,
-              question_type: item.type,
-              question: item.question.slice(0, 500),
-              answer: item.answer.slice(0, 200),
-              choices: item.choices ?? [],
-              target: (item.target ?? item.grammar_point ?? "").slice(0, 120),
-              pattern: print.pattern.slice(0, 300),
-              frame: print.frame.slice(0, 500),
-              document_id: documentId,
-            };
-          }),
-        ),
-      )
-      .then(undefined, () => {
-        /* history is best-effort */
-      });
-  }
-
-  /** The best paper produced so far that fell short of the bar.
-   *
-   * The section check above is strict on purpose — a paper missing its
-   * reading section is not the paper the course sets — but strict gates and a
-   * three-tier cascade produce a new way to fail: every tier writes something
-   * usable, each is rejected for the same missing section, and the student
-   * gets "Could not generate a test" instead of a slightly short paper. That
-   * trade is wrong. A paper with three of four sections is worth far more to
-   * someone revising than no paper at all, so the best near-miss is kept and
-   * served if nothing better arrives. */
-  let nearMiss: { paper: Quiz; kept: Fingerprint[]; why: string } | null = null;
-
   for (const tier of tiers) {
     // Same reason as the chat route: a tier that neither accepts nor refuses
     // would otherwise hold the whole request until the route's own ceiling.
@@ -872,9 +811,7 @@ the line specified above — it is what the students read on the day.`
       // Finally: no question the student has already been asked. This is the
       // check that makes "New Test" mean something across sittings rather than
       // only within one page load.
-      const dropped = dropRepeats(checked, history);
-      let paper = dropped.quiz;
-      const { removed: repeats, kept } = dropped;
+      const { quiz: paper, removed: repeats, kept } = dropRepeats(checked, history);
       if (repeats > 0) {
         console.warn(`quiz on ${tier.provider}: dropped ${repeats} item(s) seen before`);
       }
@@ -887,35 +824,8 @@ the line specified above — it is what the students read on the day.`
       // actually is. That is what makes the filters self-healing: a bad
       // generation fails the gate and the next provider writes the paper.
       const produced = paper.sections.reduce((n, s) => n + s.items.length, 0);
-      // A missing SECTION is a different failure from a short one, and the
-      // item count cannot see it. dropRepeats removes a section once its last
-      // item is filtered away, so a paper could lose a whole 問題 — the
-      // reading passage, the word bank — and still clear a 60% item bar. That
-      // is exactly what stopped these looking like the papers they copy:
-      // the format is the sections, not the number of questions.
-      const shortOf =
-        paper.sections.length < blueprint.length
-          ? `missing a section: ${paper.sections.length} of ${blueprint.length} survived`
-          : produced < Math.ceil(planned * 0.6)
-            ? `too short: ${produced} items for a ${planned}-item plan`
-            : null;
-      if (shortOf) {
-        // Keep it in case nothing better comes back. More sections first,
-        // then more items: a paper that covers the format matters more than
-        // one with a couple of extra questions in the sections it kept.
-        const better =
-          !nearMiss ||
-          paper.sections.length > nearMiss.paper.sections.length ||
-          (paper.sections.length === nearMiss.paper.sections.length &&
-            produced >
-              nearMiss.paper.sections.reduce(
-                (n: number, x: { items: unknown[] }) => n + x.items.length,
-                0,
-              ));
-        if (better && paper.sections.length > 0 && produced > 0) {
-          nearMiss = { paper, kept, why: shortOf };
-        }
-        throw new Error(`paper ${shortOf}`);
+      if (produced < Math.ceil(planned * 0.6)) {
+        throw new Error(`paper too short: ${produced} items for a ${planned}-item plan`);
       }
       // A section the plan says carries a passage must have one; without it
       // the ○× items refer to a text the student was never shown.
@@ -927,32 +837,45 @@ the line specified above — it is what the students read on the day.`
       // text, and without it the questions refer to nothing. A dialogue
       // section carries its own context in the items, so seen live it failed
       // this gate for a passage it never needed.
-      // A ○× section without its passage asks about a text the student cannot
-      // see, so those questions have to go. What used to happen is that the
-      // whole paper went with them — and when the prompt is large enough that
-      // Groq is out of range on size, Google is the only tier left, so one
-      // missing passage was the difference between a practice test and
-      // "Could not generate a test".
-      //
-      // Dropping the section instead leaves three usable 問題 and lets the
-      // section-count gate below decide whether that is worth serving. A
-      // student revising tonight is better off with three sections than with
-      // an error, and the gate still prefers a complete paper from the next
-      // tier if one arrives.
       const needsPassage = blueprint.some((a) => a.passage && a.form === "maru_batsu");
-      const unanswerable = (section: Quiz["sections"][number]) =>
-        section.form === "maru_batsu" &&
-        !(section.passage && section.passage.length >= MIN_PASSAGE_CHARS);
-
-      if (needsPassage && paper.sections.some(unanswerable)) {
-        const kept = paper.sections.filter((section) => !unanswerable(section));
-        console.warn(
-          `quiz on ${tier.provider}: dropped ${paper.sections.length - kept.length} section(s) whose passage was missing or too short`,
-        );
-        paper = { ...paper, sections: kept };
+      if (
+        needsPassage &&
+        !paper.sections.some((s) => s.passage && s.passage.length >= MIN_PASSAGE_CHARS)
+      ) {
+        throw new Error("paper's passage is missing or too short to support its questions");
       }
 
-      recordHistory(paper, kept);
+      // Remember what was asked, so the next paper is a different one.
+      // Fire-and-forget: a history write must never cost a student their test.
+      if (user && kept.length > 0) {
+        void supabase
+          .from("quiz_items")
+          .insert(
+            paper.sections.flatMap((section, sectionIndex) =>
+              section.items.map((item) => {
+                const print = fingerprint(item);
+                return {
+                  user_id: user.id,
+                  level,
+                  kind,
+                  topic: contentScope !== null ? `T${contentScope}` : null,
+                  archetype: blueprint[sectionIndex]?.id ?? null,
+                  question_type: item.type,
+                  question: item.question.slice(0, 500),
+                  answer: item.answer.slice(0, 200),
+                  choices: item.choices ?? [],
+                  target: (item.target ?? item.grammar_point ?? "").slice(0, 120),
+                  pattern: print.pattern.slice(0, 300),
+                  frame: print.frame.slice(0, 500),
+                  document_id: documentId,
+                };
+              }),
+            ),
+          )
+          .then(undefined, () => {
+            /* history is best-effort */
+          });
+      }
 
       return Response.json(paper, {
         headers: setCookie ? { "Set-Cookie": setCookie } : undefined,
@@ -982,17 +905,7 @@ the line specified above — it is what the students read on the day.`
       noteProviderFailure(tier.provider, error);
     }
   }
-  // Nothing cleared the bar, but something was written. A slightly short
-  // paper beats no paper for a student revising tonight.
-  if (nearMiss) {
-    console.warn(`quiz served a near miss (${nearMiss.why})`);
-    recordHistory(nearMiss.paper, nearMiss.kept);
-    return Response.json(nearMiss.paper, {
-      headers: setCookie ? { "Set-Cookie": setCookie } : undefined,
-    });
-  }
-
-  // No paper was produced at all, so the trial visitor keeps their free test:
-  // the cookie is only spent on a request that actually returned something.
+  // No paper was produced, so the trial visitor keeps their free test: the
+  // cookie is only spent on a request that actually returned something.
   return Response.json({ error: "all_models_unavailable" }, { status: 502 });
 }

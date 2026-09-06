@@ -205,27 +205,12 @@ const PREFERENCE: Record<ModelTask, TierSpec[]> = {
 export function routeModels(task: ModelTask, options: RouteOptions = {}): Tier[] {
   const { promptTokens = 0, hasDeepSeek = true, models = {} } = options;
 
-  // The size filter is for turns somebody is waiting through. estimateTokens
-  // is deliberately pessimistic — it counts a Japanese character as a whole
-  // token — and on this app's prompts it runs about twice what the providers
-  // actually count: a quiz prompt it calls 6,374 tokens, Groq counted as
-  // 3,234. For an interactive turn that pessimism is the right way to be
-  // wrong, because an oversized request costs the student seconds to be
-  // refused.
-  //
-  // For a paper it is the wrong way. Nobody is listening in silence, a 413
-  // costs one round trip on a request that already takes ten seconds, and
-  // over-filtering left Google as the ONLY tier — so a single bad generation
-  // became "Could not generate a test" with nothing behind it to try. Groq
-  // gets offered the paper and is allowed to refuse it.
-  const sizeMatters = task !== "structured";
-
   return PREFERENCE[task]
     .filter(({ provider }) => {
       if (provider === "google") return true; // never filtered: the last resort
       if (provider === "deepseek" && !hasDeepSeek) return false;
       if (isProviderDead(provider)) return false;
-      return sizeMatters ? canTakePrompt(provider, promptTokens) : true;
+      return canTakePrompt(provider, promptTokens);
     })
     .map(({ provider, slot }) => ({
       provider,
