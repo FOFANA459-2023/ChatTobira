@@ -184,12 +184,19 @@ jobs:
 
       # The test stage runs ruff and pytest inside the image, so a green build
       # means they passed in the pinned environment, not just on the runner.
+      # no-cache-filters: base — the system-package layer is deliberately NOT
+      # replayed from cache. Its contents are whatever Debian ships today, so a
+      # cached copy silently pins the package versions of the day it was first
+      # built and the Trivy step below then fails on security updates that have
+      # been available for weeks. Everything above base stays cached: the pip
+      # layer is pinned by pyproject.toml and does not drift.
       - name: Build and test
         uses: docker/build-push-action@v6
         with:
           context: ingest
           target: test
           push: false
+          no-cache-filters: base
           cache-from: type=gha,scope=ingest
           cache-to: type=gha,mode=max,scope=ingest
 
@@ -201,6 +208,7 @@ jobs:
           push: false
           load: true
           tags: chattobira-ingest:ci
+          no-cache-filters: base
           cache-from: type=gha,scope=ingest
           cache-to: type=gha,mode=max,scope=ingest
 
