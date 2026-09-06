@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
+  ACCEPT_BUDGET_MS,
   isProviderDead,
   noteProviderFailure,
   resetProviderHealth,
+  withDeadline,
 } from "@/lib/providers";
 
 /** An AI SDK APICallError carries the upstream status on `statusCode`. */
@@ -58,5 +60,33 @@ describe("provider health", () => {
     expect(isProviderDead("deepseek")).toBe(true);
     expect(isProviderDead("groq")).toBe(false);
     expect(isProviderDead("google")).toBe(false);
+  });
+});
+
+/** A provider that neither accepts nor refuses. Measured on the live app: an
+ * ordinary typed question sat on deepseek-v4-flash for 97 seconds, on a model
+ * that answered the same prompt in 1.3s a minute either side of it. The route
+ * gets 60, so the student got nothing at all. */
+describe("a tier that never answers", () => {
+  it("gives up so the next tier can be tried", async () => {
+    const stalled = new Promise(() => {});
+    await expect(withDeadline(stalled, 20, "tier_timeout")).rejects.toThrow("tier_timeout");
+  });
+
+  it("lets a tier that answers in time through untouched", async () => {
+    await expect(withDeadline(Promise.resolve("ok"), 1000)).resolves.toBe("ok");
+  });
+
+  it("passes a real refusal through as itself, not as a timeout", async () => {
+    // The distinction matters: a 402 marks the provider dead for the isolate,
+    // a timeout is one slow request.
+    const refused = Promise.reject(Object.assign(new Error("unfunded"), { statusCode: 402 }));
+    await expect(withDeadline(refused, 1000)).rejects.toThrow("unfunded");
+  });
+
+  it("budgets a spoken turn more tightly than a typed one", () => {
+    // Someone is standing there waiting in silence for a spoken reply.
+    expect(ACCEPT_BUDGET_MS.spoken).toBeLessThan(ACCEPT_BUDGET_MS.typed);
+    expect(ACCEPT_BUDGET_MS.typed).toBeLessThan(ACCEPT_BUDGET_MS.structured);
   });
 });

@@ -1,3 +1,4 @@
+import { conversationBrief, type ConversationState } from "./conversation";
 import { languageRule, type LanguageMode } from "./language";
 import type { RetrievedChunk, StudyScope } from "./retrieval";
 import { speakingPrompt, type SpeakingMode } from "./speech";
@@ -32,6 +33,16 @@ export interface PromptOptions {
    * for reading one are omitted otherwise: a model told how to talk about
    * past papers with none in front of it starts referring to them anyway. */
   hasPastPapers?: boolean;
+  /** What the conversation is, as opposed to what this message says: its
+   * language and how firmly it is held, the terms it has been about, whether
+   * this turn continues it or starts something new.
+   *
+   * Stated rather than left to be inferred, because the model re-infers it
+   * from scratch every turn and gets it wrong in one specific way that a
+   * student notices immediately — it reads a quoted Japanese word as a
+   * request to switch language, and reads "Probably listening." as a new
+   * question about listening practice. */
+  conversation?: ConversationState;
 }
 
 /** System prompt: a tutor who answers, grounded in the course material. */
@@ -44,7 +55,14 @@ export function systemPrompt(scope: StudyScope, options: PromptOptions = {}): st
     hasPastPapers = false,
     speaking,
     page,
+    conversation,
   } = options;
+
+  // Placed immediately after the language rule and before the answer-shaping
+  // rules, because it is context for all of them: what counts as a good
+  // answer depends on whether this is a question or the third turn of an
+  // exchange, and a model reads the earlier lines in the light of it.
+  const conversationLine = conversation ? `\n${conversationBrief(conversation)}\n` : "";
 
   const scopeLine = scope.topic
     ? `The student is currently studying ${scope.topic}${scope.level ? ` (${scope.level})` : ""}. Prefer material from that topic when it answers the question.`
@@ -102,7 +120,7 @@ THE STUDENT ASKED FOR PAGE ${page.asked}, AND IT WAS NOT RETRIEVED
   return `You are ChatTobira, a study tutor for university students learning Japanese with the Tobira / Foundation Japanese curriculum. You have read their textbooks and class handouts. You are their tutor, not a search engine.
 
 ${languageRule(language)}
-${followUpLine}
+${conversationLine}${followUpLine}
 
 ANSWER THE QUESTION
 - Lead with the answer. Not a preamble, not a restatement of the question, not "Great question!".
@@ -147,7 +165,16 @@ ${scopeLine}${
     // follows. Nothing above is deleted, because a student mid-conversation
     // still asks real questions, and the grounding and language rules still
     // apply to the answer they get.
-    speaking ? `\n\n${speakingPrompt(speaking.mode, speaking.level, speaking.subject)}` : ""
+    speaking
+      ? `\n\n${speakingPrompt(
+          speaking.mode,
+          speaking.level,
+          speaking.subject,
+          // The conversation's language, not the turn's. A spoken reply comes
+          // back in one language and this is the file that decides which.
+          conversation?.language.language ?? (language === "ja" ? "ja" : "en"),
+        )}`
+      : ""
   }`;
 }
 

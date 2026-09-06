@@ -25,9 +25,24 @@ ENV PYTHONUNBUFFERED=1 \
 
 # --no-install-recommends keeps LibreOffice to the three converters actually
 # used; the full metapackage pulls in ~1 GB of desktop we never start.
+#
+# `upgrade` matters as much as `install` here, and it is the security scan that
+# says so. This layer's contents are "whatever Debian ships today", so once it
+# is cached it stops being that and becomes "whatever Debian shipped the day it
+# was first built" — indefinitely, because nothing above it ever changes. CI
+# caches it (cache-from: type=gha, scope=ingest), and it froze libssh2-1 at
+# 1.10.0-3+b1 while bookworm-security had moved to 1.10.0-3+deb12u1, so the
+# Trivy gate failed on CVE-2026-58050 and CVE-2026-7598 on a commit that had
+# touched nothing but the web app. A --no-cache build of the same file
+# installed the fixed version.
+#
+# So: upgrade pending security updates for what the base image already carries,
+# and pair this with `no-cache-filters: base` in CI so the layer is genuinely
+# rebuilt rather than replayed. The pip layer below stays cached — it is pinned
+# by pyproject.toml and does not drift underneath us.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
+    apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
       libreoffice-writer \
       libreoffice-impress \
       libreoffice-calc \

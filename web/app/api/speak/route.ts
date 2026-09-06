@@ -113,9 +113,20 @@ export async function POST(request: Request) {
   }
 
   const model = process.env.TTS_MODEL ?? "gemini-2.5-flash-preview-tts";
-  // Kore reads Japanese clearly and unhurriedly. The voice is a env-level
-  // choice because "which voice teaches best" is a judgement for the teacher,
-  // not a constant for the code.
+  // ONE voice, for every language, for the life of the deployment.
+  //
+  // Kore reads Japanese clearly and unhurriedly, and reads English in the
+  // same voice — which is the property that matters and the reason nothing
+  // here looks at the language of the text. The tutor is one person: a
+  // student who says "let's speak Japanese" halfway through a conversation
+  // should hear that same person carry on in Japanese, not be handed to a
+  // different speaker, and a bilingual sentence should not change voice at
+  // the word where the script changes.
+  //
+  // So there is deliberately no language parameter on this route and no
+  // per-language voice table. The env var exists because "which voice teaches
+  // best" is a judgement for the teacher rather than a constant for the code;
+  // it selects one voice for everyone, not one voice per language.
   const voice = parsed.data.voice ?? process.env.TTS_VOICE ?? "Kore";
 
   let response: Response;
