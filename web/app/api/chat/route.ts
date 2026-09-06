@@ -510,7 +510,7 @@ export async function POST(request: Request) {
     promptTokens,
     hasDeepSeek: Boolean(process.env.DEEPSEEK_API_KEY),
     models: {
-      groq: process.env.CHAT_MODEL,
+      chat: process.env.CHAT_MODEL,
       deepseek: process.env.DEEPSEEK_MODEL,
       google: process.env.FALLBACK_MODEL,
     },
