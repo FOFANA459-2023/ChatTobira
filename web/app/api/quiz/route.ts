@@ -24,7 +24,6 @@ import {
   rankChunksByFocus,
   selectExemplars,
   type ExemplarChunk,
-  type Quiz,
 } from "@/lib/quiz";
 import {
   blueprint as paperBlueprint,
@@ -54,18 +53,6 @@ const BodySchema = z.object({
   avoid: z.array(z.string().max(300)).max(40).optional(),
 });
 
-/** The shortest reading passage a ○× section can be built on, and what the
- * plan asks for.
- *
- * One pair of constants used by BOTH the prompt and the validity gate, for the
- * same reason `ingest/redact.py` keeps its redactor and its detector in one
- * file: a rule enforced in one place and described in another drifts, and the
- * drift is silent. Here it was not even described — the gate rejected papers
- * for a requirement the model was never given.
- */
-const MIN_PASSAGE_CHARS = 150;
-const PASSAGE_TARGET_CHARS = 220;
-
 const SYSTEM = `You create Japanese practice tests for university students from
 provided course material, in the format of the course's own test papers. Rules:
 - Base every item ONLY on the provided material; test the grammar patterns and
@@ -89,12 +76,6 @@ provided course material, in the format of the course's own test papers. Rules:
   many options each item has, whether it has a word bank or a passage — is
   specified per section below. Follow it exactly; it is read off the papers
   this course sets, not invented.
-- If a section's plan asks for a passage, that section MUST carry a "passage"
-  field of at least ${PASSAGE_TARGET_CHARS} Japanese characters. This is the single
-  commonest way a generated paper is thrown away: ○× statements about a
-  passage that was never written refer to a text the student cannot see, so
-  the app rejects the whole paper below ${MIN_PASSAGE_CHARS} characters. Write the
-  passage first, then write statements about it.
 - "type" is how the app grades the item and must match the section's form:
   form "bracket" and "lettered" are type "multiple_choice", form "written" is
   "fill_blank", form "maru_batsu" is "true_false".
@@ -124,7 +105,6 @@ provided course material, in the format of the course's own test papers. Rules:
   the textbook or lesson area they come from.
 - Never reference "the source", file names, or page numbers in questions or
   explanations; page numbers belong in review only.`;
-
 
 // The paper's shape comes from the format catalogue, not from a template.
 //
@@ -174,15 +154,7 @@ function sectionPlan(
       );
     } else if (archetype.form === "maru_batsu") {
       parts.push(
-        // The length is stated because it is ENFORCED. The validator rejects a
-        // paper whose passage is under MIN_PASSAGE_CHARS, and the plan used to
-        // say only "this section's passage" — never that a passage field was
-        // required, never how long. Every model guessed, and guessed short:
-        // gpt-oss-120b wrote 113 characters and had the whole paper thrown
-        // away for it. Asking for a margin above the floor rather than the
-        // floor itself, because a model told "at least 150" writes 150.
-        `  Set "passage" on this section: a short Japanese text of AT LEAST ${PASSAGE_TARGET_CHARS} characters (the app rejects the paper below ${MIN_PASSAGE_CHARS}), written from the course material, that all of this section's statements are about.`,
-        `  Each item is ONE statement about that passage; "answer" is exactly ○ or ×. Mix them. A × statement must be contradicted by the passage, not merely absent from it, and the explanation must quote the phrase that decides it.`,
+        `  Each item is ONE statement about this section's passage; "answer" is exactly ○ or ×. Mix them. A × statement must be contradicted by the passage, not merely absent from it, and the explanation must quote the phrase that decides it.`,
       );
     } else {
       parts.push(
@@ -609,17 +581,7 @@ material: none was retrieved, so anything you said about it would be invented.`;
   // measures against. Each archetype carries its own range — the papers'
   // word-bank sections run to seven items and their a〜c sections to two — so
   // the total is the plan's, not a division of the requested count.
-  // One more item per section than the paper needs, because everything below
-  // this line takes items AWAY: the duplicate check, the past-paper copy
-  // check, the validity gate, and the history check that stops "New Test"
-  // asking what the student was asked last week. A section planned at exactly
-  // its target loses items to those and comes up short — and a section that
-  // loses ALL of them disappears from the paper entirely, which is how a
-  // four-section paper renders as three.
-  //
-  // The extra is still clamped to the archetype's own maximum in sectionPlan,
-  // so this asks for a longer section only where the real papers have one.
-  const perSection = Math.max(2, Math.round(count / blueprint.length)) + 1;
+  const perSection = Math.max(2, Math.round(count / blueprint.length));
   const planned = blueprint.reduce(
     (total, archetype) =>
       total + Math.min(Math.max(perSection, archetype.items[0]), archetype.items[1]),
@@ -682,24 +644,27 @@ the line specified above — it is what the students read on the day.`
   // the chat route and this one used to keep two hand-written cascades that
   // had already drifted apart.
   //
-  // Groq builds papers, on the gpt-oss models rather than the chat model:
-  // generateObject needs response_format json_schema, which Groq implements
-  // only on those — llama-3.3 rejected it, which silently sent every quiz to
-  // Gemini and its 20-requests-a-day budget.
+  // DeepSeek leads here, which is a change: generateObject against
+  // deepseek-v4-flash was measured returning a schema-valid paper in 3.8s
+  // with correct Japanese and every answer present among its own options.
+  // A paper is high-volume, non-interactive work, and it is validated after
+  // the fact — so a tier that returns something malformed costs a fall-through
+  // and not a bad paper on a student's screen, which is exactly the shape of
+  // job worth moving off a metered free tier. Gemini's structured-output
+  // budget is 20 requests a day; one student pressing "New Test" can spend it
+  // in an afternoon.
   //
-  // DeepSeek was briefly first here and must not be again; lib/router.ts
-  // carries the measurements. Short version: it reasons for over two minutes
-  // on a fifteen-item schema, which is longer than this route is allowed to
-  // run, and that is what "Could not generate a test" was.
-  const promptTokens = estimateTokens(system) + estimateTokens(prompt);
+  // Groq stays in the chain but NOT on the chat model: generateObject needs
+  // response_format json_schema, which Groq implements only on the gpt-oss
+  // models — llama-3.3 rejected it, which silently sent every quiz to Gemini.
   const route = routeModels("structured", {
     // A paper's prompt is a system prompt plus ~10 short excerpts, well
     // inside every tier's ceiling; the size gate is not what decides here.
-    promptTokens,
+    promptTokens: estimateTokens(system) + estimateTokens(prompt),
     hasDeepSeek: Boolean(process.env.DEEPSEEK_API_KEY),
     models: {
-      quiz: process.env.QUIZ_MODEL,
-      quizSmall: process.env.QUIZ_FALLBACK_MODEL,
+      groq: process.env.QUIZ_MODEL ?? "openai/gpt-oss-120b",
+      deepseek: process.env.DEEPSEEK_MODEL,
       google: process.env.FALLBACK_MODEL,
     },
   });
@@ -713,81 +678,10 @@ the line specified above — it is what the students read on the day.`
     google: (model: string) => google(model),
   } as const;
 
-  // One line per paper, so the size that decides everything below is visible.
-  // Groq's free tier meters PROMPT PLUS RESERVED OUTPUT against 8,000 tokens a
-  // minute, so what fits is a property of this number and nothing else.
-  console.info(
-    `quiz ${kind} doc=${documentId} ~${promptTokens}tok → ${route
-      .map((t) => t.model)
-      .join(",")}`,
-  );
-  // Opt-in, because it is the only way to see what the model was actually
-  // asked. Set QUIZ_DEBUG_PROMPT=1 locally: a requirement that lives in the
-  // validator but never reached the prompt is invisible from the outside, and
-  // that was the whole of the "Could not generate a test" bug.
-  if (process.env.QUIZ_DEBUG_PROMPT === "1") {
-    console.info(`---- QUIZ SYSTEM ----`);
-    console.info(system);
-    console.info(`---- END QUIZ SYSTEM ----`);
-  }
-
-  // The label is the model id. Two tiers now share the provider "groq", so a
-  // log line naming only the provider cannot say which of them failed.
   const tiers = route.map(({ provider, model }) => ({
     provider,
-    label: model,
     model: clientFor[provider](model),
   }));
-
-  /** Remember what was asked, so the next paper is a different one.
-   *
-   * Fire-and-forget: a history write must never cost a student their test.
-   * Shared by the clean path and the near miss below, because a paper that
-   * was served is a paper the student has now seen — whether or not it
-   * cleared the bar. Recording only the perfect ones would ask them the same
-   * questions again next week. */
-  function recordHistory(written: Quiz, prints: Fingerprint[]): void {
-    if (!user || prints.length === 0) return;
-    void supabase
-      .from("quiz_items")
-      .insert(
-        written.sections.flatMap((section, sectionIndex) =>
-          section.items.map((item) => {
-            const print = fingerprint(item);
-            return {
-              user_id: user.id,
-              level,
-              kind,
-              topic: contentScope !== null ? `T${contentScope}` : null,
-              archetype: blueprint[sectionIndex]?.id ?? null,
-              question_type: item.type,
-              question: item.question.slice(0, 500),
-              answer: item.answer.slice(0, 200),
-              choices: item.choices ?? [],
-              target: (item.target ?? item.grammar_point ?? "").slice(0, 120),
-              pattern: print.pattern.slice(0, 300),
-              frame: print.frame.slice(0, 500),
-              document_id: documentId,
-            };
-          }),
-        ),
-      )
-      .then(undefined, () => {
-        /* history is best-effort */
-      });
-  }
-
-  /** The best paper produced so far that fell short of the bar.
-   *
-   * The section check above is strict on purpose — a paper missing its
-   * reading section is not the paper the course sets — but strict gates and a
-   * three-tier cascade produce a new way to fail: every tier writes something
-   * usable, each is rejected for the same missing section, and the student
-   * gets "Could not generate a test" instead of a slightly short paper. That
-   * trade is wrong. A paper with three of four sections is worth far more to
-   * someone revising than no paper at all, so the best near-miss is kept and
-   * served if nothing better arrives. */
-  let nearMiss: { paper: Quiz; kept: Fingerprint[]; why: string } | null = null;
 
   for (const tier of tiers) {
     // Same reason as the chat route: a tier that neither accepts nor refuses
@@ -805,31 +699,6 @@ the line specified above — it is what the students read on the day.`
           // Test papers should vary between sittings; greedy decoding regrows
           // the same questions from the same excerpts.
           temperature: 0.8,
-          // The paper is the largest thing this app generates and nothing was
-          // reserving room for it. Left unset, the provider's default output
-          // budget truncates the JSON part way through, and every symptom
-          // students actually saw comes from that one omission:
-          //
-          //   unset            7.2s   11 items for a 17-item plan, 116-char passage
-          //   maxOutputTokens  14.0s  17 items, 4 sections, passage intact
-          //
-          // Truncated JSON does not arrive as short JSON — it arrives as
-          // INVALID JSON, so the validity gates below reported "paper too
-          // short: 4 items for a 17-item plan" and "passage is missing or too
-          // short", and on the gpt-oss reasoning models it came back as no
-          // content at all: Groq answers json_validate_failed with an empty
-          // failed_generation. Three different-looking failures, one cause.
-          //
-          // The size is bounded from BOTH ends, which is why it is a constant
-          // and not simply "large". Groq's free tier meters prompt plus
-          // RESERVED output against 8,000 tokens a minute, and reserving 16,000
-          // put every request over it — "Request too large ... on tokens per
-          // minute (TPM): Limit 8000, Requested 8216" — so a generous ceiling
-          // fails just as surely as a small one, only with a different error.
-          //
-          // 4,800 sits above the 3,852 a full seventeen-item paper actually
-          // used, and leaves a ~3,000-token prompt inside the minute's budget.
-          maxOutputTokens: 4_800,
           abortSignal: controller.signal,
         }),
         ACCEPT_BUDGET_MS.structured,
@@ -872,9 +741,7 @@ the line specified above — it is what the students read on the day.`
       // Finally: no question the student has already been asked. This is the
       // check that makes "New Test" mean something across sittings rather than
       // only within one page load.
-      const dropped = dropRepeats(checked, history);
-      let paper = dropped.quiz;
-      const { removed: repeats, kept } = dropped;
+      const { quiz: paper, removed: repeats, kept } = dropRepeats(checked, history);
       if (repeats > 0) {
         console.warn(`quiz on ${tier.provider}: dropped ${repeats} item(s) seen before`);
       }
@@ -887,35 +754,8 @@ the line specified above — it is what the students read on the day.`
       // actually is. That is what makes the filters self-healing: a bad
       // generation fails the gate and the next provider writes the paper.
       const produced = paper.sections.reduce((n, s) => n + s.items.length, 0);
-      // A missing SECTION is a different failure from a short one, and the
-      // item count cannot see it. dropRepeats removes a section once its last
-      // item is filtered away, so a paper could lose a whole 問題 — the
-      // reading passage, the word bank — and still clear a 60% item bar. That
-      // is exactly what stopped these looking like the papers they copy:
-      // the format is the sections, not the number of questions.
-      const shortOf =
-        paper.sections.length < blueprint.length
-          ? `missing a section: ${paper.sections.length} of ${blueprint.length} survived`
-          : produced < Math.ceil(planned * 0.6)
-            ? `too short: ${produced} items for a ${planned}-item plan`
-            : null;
-      if (shortOf) {
-        // Keep it in case nothing better comes back. More sections first,
-        // then more items: a paper that covers the format matters more than
-        // one with a couple of extra questions in the sections it kept.
-        const better =
-          !nearMiss ||
-          paper.sections.length > nearMiss.paper.sections.length ||
-          (paper.sections.length === nearMiss.paper.sections.length &&
-            produced >
-              nearMiss.paper.sections.reduce(
-                (n: number, x: { items: unknown[] }) => n + x.items.length,
-                0,
-              ));
-        if (better && paper.sections.length > 0 && produced > 0) {
-          nearMiss = { paper, kept, why: shortOf };
-        }
-        throw new Error(`paper ${shortOf}`);
+      if (produced < Math.ceil(planned * 0.6)) {
+        throw new Error(`paper too short: ${produced} items for a ${planned}-item plan`);
       }
       // A section the plan says carries a passage must have one; without it
       // the ○× items refer to a text the student was never shown.
@@ -927,32 +767,42 @@ the line specified above — it is what the students read on the day.`
       // text, and without it the questions refer to nothing. A dialogue
       // section carries its own context in the items, so seen live it failed
       // this gate for a passage it never needed.
-      // A ○× section without its passage asks about a text the student cannot
-      // see, so those questions have to go. What used to happen is that the
-      // whole paper went with them — and when the prompt is large enough that
-      // Groq is out of range on size, Google is the only tier left, so one
-      // missing passage was the difference between a practice test and
-      // "Could not generate a test".
-      //
-      // Dropping the section instead leaves three usable 問題 and lets the
-      // section-count gate below decide whether that is worth serving. A
-      // student revising tonight is better off with three sections than with
-      // an error, and the gate still prefers a complete paper from the next
-      // tier if one arrives.
       const needsPassage = blueprint.some((a) => a.passage && a.form === "maru_batsu");
-      const unanswerable = (section: Quiz["sections"][number]) =>
-        section.form === "maru_batsu" &&
-        !(section.passage && section.passage.length >= MIN_PASSAGE_CHARS);
-
-      if (needsPassage && paper.sections.some(unanswerable)) {
-        const kept = paper.sections.filter((section) => !unanswerable(section));
-        console.warn(
-          `quiz on ${tier.provider}: dropped ${paper.sections.length - kept.length} section(s) whose passage was missing or too short`,
-        );
-        paper = { ...paper, sections: kept };
+      if (needsPassage && !paper.sections.some((s) => s.passage && s.passage.length >= 150)) {
+        throw new Error("paper's passage is missing or too short to support its questions");
       }
 
-      recordHistory(paper, kept);
+      // Remember what was asked, so the next paper is a different one.
+      // Fire-and-forget: a history write must never cost a student their test.
+      if (user && kept.length > 0) {
+        void supabase
+          .from("quiz_items")
+          .insert(
+            paper.sections.flatMap((section, sectionIndex) =>
+              section.items.map((item) => {
+                const print = fingerprint(item);
+                return {
+                  user_id: user.id,
+                  level,
+                  kind,
+                  topic: contentScope !== null ? `T${contentScope}` : null,
+                  archetype: blueprint[sectionIndex]?.id ?? null,
+                  question_type: item.type,
+                  question: item.question.slice(0, 500),
+                  answer: item.answer.slice(0, 200),
+                  choices: item.choices ?? [],
+                  target: (item.target ?? item.grammar_point ?? "").slice(0, 120),
+                  pattern: print.pattern.slice(0, 300),
+                  frame: print.frame.slice(0, 500),
+                  document_id: documentId,
+                };
+              }),
+            ),
+          )
+          .then(undefined, () => {
+            /* history is best-effort */
+          });
+      }
 
       return Response.json(paper, {
         headers: setCookie ? { "Set-Cookie": setCookie } : undefined,
@@ -964,35 +814,14 @@ the line specified above — it is what the students read on the day.`
       // Declined or produced an unusable paper — try the next provider. The
       // reason is logged because a silent cascade turns "every tier failed"
       // into an undiagnosable 502.
-      //
-      // The message alone is not the reason. Groq's structured-output failure
-      // reads "Failed to validate JSON. Please adjust your prompt. See
-      // 'failed_generation' for more details" — and 'failed_generation' is in
-      // the response body, which was being thrown away, so the one line that
-      // says WHICH field the model got wrong never reached the log. That is
-      // the difference between diagnosing this in a minute and guessing at it.
-      const detail =
-        (error as { responseBody?: string; cause?: unknown } | null)?.responseBody ??
-        (error as { cause?: { responseBody?: string } } | null)?.cause?.responseBody;
       console.error(
-        `quiz generation failed on ${tier.provider} (${tier.label}):`,
+        `quiz generation failed on ${tier.provider}:`,
         error instanceof Error ? error.message : error,
-        detail ? `\n  response: ${String(detail).slice(0, 1200)}` : "",
       );
       noteProviderFailure(tier.provider, error);
     }
   }
-  // Nothing cleared the bar, but something was written. A slightly short
-  // paper beats no paper for a student revising tonight.
-  if (nearMiss) {
-    console.warn(`quiz served a near miss (${nearMiss.why})`);
-    recordHistory(nearMiss.paper, nearMiss.kept);
-    return Response.json(nearMiss.paper, {
-      headers: setCookie ? { "Set-Cookie": setCookie } : undefined,
-    });
-  }
-
-  // No paper was produced at all, so the trial visitor keeps their free test:
-  // the cookie is only spent on a request that actually returned something.
+  // No paper was produced, so the trial visitor keeps their free test: the
+  // cookie is only spent on a request that actually returned something.
   return Response.json({ error: "all_models_unavailable" }, { status: 502 });
 }
