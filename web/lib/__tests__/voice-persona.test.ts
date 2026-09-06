@@ -45,15 +45,29 @@ describe("the fallback voice matches the cloud voice", () => {
     expect(fallbackVoice("en")?.name).toMatch(/Aria/);
   });
 
-  it("holds the same voice once chosen, across languages", () => {
-    // Only the spoken LANGUAGE changes when a student switches; the speaker
-    // does not.
+  it("gives Japanese a Japanese voice, or it is not read at all", () => {
+    // The bug this replaces: one voice was pinned for the whole reply, so an
+    // English conversation carrying Japanese examples — the normal shape of
+    // an answer here — handed every Japanese run to an English voice. The
+    // engines do not approximate it, they skip it, and the student heard the
+    // answer with all of its Japanese missing.
     withVoices([
       ["Samantha", "en-US"],
       ["Kyoko", "ja-JP"],
     ]);
-    const first = fallbackVoice("en");
-    expect(fallbackVoice("ja")).toBe(first);
+    expect(fallbackVoice("en")?.name).toBe("Samantha");
+    expect(fallbackVoice("ja")?.name).toBe("Kyoko");
+  });
+
+  it("holds each language's voice steady across replies", () => {
+    withVoices([
+      ["Samantha", "en-US"],
+      ["Kyoko", "ja-JP"],
+    ]);
+    const en = fallbackVoice("en");
+    const ja = fallbackVoice("ja");
+    expect(fallbackVoice("en")).toBe(en);
+    expect(fallbackVoice("ja")).toBe(ja);
   });
 
   it("takes an unknown voice over a known male one", () => {

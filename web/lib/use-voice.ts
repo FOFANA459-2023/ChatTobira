@@ -171,6 +171,7 @@ export function useSpeechToText(
   const chunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
   const frameRef = useRef<number | null>(null);
   const abandonedRef = useRef(false);
   const onTranscriptRef = useRef(onTranscript);
@@ -178,9 +179,32 @@ export function useSpeechToText(
   const onSpeechStartRef = useRef(options.onSpeechStart);
   onSpeechStartRef.current = options.onSpeechStart;
 
-  const teardown = useCallback(() => {
+  /** End of TURN. The microphone stays open.
+   *
+   * This used to be the same function as shutdown below, and that is what made
+   * the conversation feel like a walkie-talkie however little the interface
+   * said so: every turn released the microphone and the next one asked the
+   * browser for it again. getUserMedia is not free — it re-negotiates the
+   * device, re-runs the permission check and re-flashes the recording
+   * indicator — and it sat in the gap between the tutor finishing and the
+   * student being able to speak, which is the one moment a conversation
+   * cannot afford a pause.
+   *
+   * Holding the stream for the session costs nothing while nobody is
+   * recording: the MediaRecorder is stopped, so no audio is captured. It is
+   * released the moment the student leaves voice. */
+  const endTurn = useCallback(() => {
     if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
     frameRef.current = null;
+    setLevel(0);
+    setHearing(false);
+  }, []);
+
+  /** End of SESSION. Gives the microphone back. */
+  const shutdown = useCallback(() => {
+    if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+    frameRef.current = null;
+    analyserRef.current = null;
     void audioContextRef.current?.close().catch(() => {});
     audioContextRef.current = null;
     for (const track of streamRef.current?.getTracks() ?? []) track.stop();
@@ -189,15 +213,17 @@ export function useSpeechToText(
     setHearing(false);
   }, []);
 
-  useEffect(() => teardown, [teardown]);
+  useEffect(() => shutdown, [shutdown]);
 
   const fail = useCallback(
     (reason: VoiceError) => {
-      teardown();
+      // An error hands the microphone back: whatever went wrong, holding an
+      // open device while showing a failure is the wrong side to err on.
+      shutdown();
       setError(reason);
       setState("error");
     },
-    [teardown],
+    [shutdown],
   );
 
   const stop = useCallback(() => {
@@ -215,21 +241,34 @@ export function useSpeechToText(
       return;
     }
 
+    // The stream from the previous turn, if it is still live. A track can end
+    // underneath us — the device is unplugged, another app takes it, the OS
+    // revokes it — so this checks rather than assumes, and falls back to
+    // asking for a new one, which is exactly the old behaviour.
+    const held = streamRef.current;
+    const stillLive =
+      held !== null && held.getAudioTracks().some((track) => track.readyState === "live");
+
     let stream: MediaStream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
-    } catch (cause) {
-      const name = (cause as DOMException | null)?.name;
-      fail(
-        name === "NotAllowedError" || name === "SecurityError"
-          ? "permission"
-          : name === "NotFoundError" || name === "DevicesNotFoundError"
-            ? "no_microphone"
-            : "recording_failed",
-      );
-      return;
+    if (stillLive && held) {
+      stream = held;
+    } else {
+      if (held) shutdown();
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
+      } catch (cause) {
+        const name = (cause as DOMException | null)?.name;
+        fail(
+          name === "NotAllowedError" || name === "SecurityError"
+            ? "permission"
+            : name === "NotFoundError" || name === "DevicesNotFoundError"
+              ? "no_microphone"
+              : "recording_failed",
+        );
+        return;
+      }
     }
     streamRef.current = stream;
 
@@ -238,7 +277,6 @@ export function useSpeechToText(
     try {
       recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
     } catch {
-      teardown();
       fail("recording_failed");
       return;
     }
@@ -249,7 +287,7 @@ export function useSpeechToText(
     };
     recorder.onerror = () => fail("recording_failed");
     recorder.onstop = async () => {
-      teardown();
+      endTurn();
       if (abandonedRef.current) {
         setState("idle");
         return;
@@ -289,11 +327,22 @@ export function useSpeechToText(
     // The endpointer. Runs on the same analyser that draws the meter, so
     // listening costs one audio graph rather than two.
     try {
-      const context = new AudioContext();
-      audioContextRef.current = context;
-      const analyser = context.createAnalyser();
-      analyser.fftSize = 512;
-      context.createMediaStreamSource(stream).connect(analyser);
+      // Built once and kept, like the stream: a new AudioContext per turn is
+      // both a real cost and a resource browsers cap.
+      if (!audioContextRef.current || !analyserRef.current) {
+        const context = new AudioContext();
+        audioContextRef.current = context;
+        const created = context.createAnalyser();
+        created.fftSize = 512;
+        context.createMediaStreamSource(stream).connect(created);
+        analyserRef.current = created;
+      }
+      // Autoplay policies can leave a context suspended; a suspended analyser
+      // reports silence for ever, which reads as "the microphone is dead".
+      if (audioContextRef.current.state === "suspended") {
+        void audioContextRef.current.resume().catch(() => {});
+      }
+      const analyser = analyserRef.current;
       const samples = new Uint8Array(analyser.frequencyBinCount);
 
       const openedAt = Date.now();
@@ -348,16 +397,14 @@ export function useSpeechToText(
     recorder.start();
     beginVoiceTurn();
     setState("listening");
-  }, [fail, state, stop, teardown]);
+  }, [endTurn, fail, shutdown, state, stop]);
 
   const cancel = useCallback(() => {
     abandonedRef.current = true;
     if (recorderRef.current?.state === "recording") recorderRef.current.stop();
-    else {
-      teardown();
-      setState("idle");
-    }
-  }, [teardown]);
+    shutdown();
+    setState("idle");
+  }, [shutdown]);
 
   const clearError = useCallback(() => {
     setError(null);
@@ -374,44 +421,47 @@ export function useSpeechToText(
 export interface TextToSpeech {
   speaking: boolean;
   loading: boolean;
-  speak: (markdown: string, language?: ConversationLanguage) => Promise<void>;
+  /** Speak a finished answer.
+   *
+   * Takes no language: the cloud voice speaks both in one voice, and the
+   * browser fallback picks its voice per run of text inside the answer, which
+   * is the only way a bilingual reply gets read in full. */
+  speak: (markdown: string) => Promise<void>;
   /** Speak a reply that is still streaming: the text so far, and whether the
    * stream has finished. Clauses are spoken as they complete. */
-  speakStreaming: (soFar: string, done: boolean, language?: ConversationLanguage) => void;
+  speakStreaming: (soFar: string, done: boolean) => void;
   stop: () => void;
 }
 
-/* --- One voice, both languages -------------------------------------------
+/* --- The tutor's voice, and the limits of the browser's -------------------
  *
- * The tutor has ONE voice. A student who says "let's speak Japanese" halfway
- * through should hear the same person carry on in Japanese, not be handed to
- * a different speaker — and the app was doing exactly that, twice over: the
- * browser fallback picked a voice per LANGUAGE RUN, so a single bilingual
- * sentence was read by two different people taking turns mid-clause.
+ * The tutor has ONE voice, and on the path students actually hear she really
+ * does: `/api/speak` synthesises every clause with one prebuilt Gemini voice
+ * (Kore, female), which speaks Japanese and English in the same voice, and
+ * nothing in that request varies by language.
  *
- * The cloud path never had this problem and is where the requirement is
- * genuinely met: `/api/speak` synthesises every clause with one prebuilt
- * Gemini voice (Kore by default), which speaks both languages in one voice
- * identity, and nothing in the request varies by language. That is the voice
- * students actually hear.
+ * This is the emergency path — the network failed, or the daily TTS quota is
+ * spent — and here a single voice is not merely hard but wrong. The Web
+ * Speech API hands out voices bound to one language, and a bilingual answer
+ * is the normal case in this app: an English explanation carrying the
+ * Japanese the course teaches. Pinning ONE voice across both, which is what
+ * this file did for a day, means every Japanese run is handed to an English
+ * voice — and the engines do not approximate it, they skip it. The result was
+ * an answer read aloud with all of its Japanese missing, which is the one
+ * part a language student needed to hear.
  *
- * This is the emergency path — the network failed, or the Google key is out
- * of quota — where the browser gives us only whatever voices the student's
- * operating system happens to ship, each pinned to one language. The best
- * available answer, in order:
+ * So: one voice per language, each held for the life of the page so the
+ * speaker never changes between replies, and each chosen female to match Kore
+ * so the two languages sound like the same person rather than two strangers.
+ * That is as close to one identity as the platform allows, and it beats
+ * silence, which is what "one voice" actually bought.
  *
- *   1. A genuinely multilingual system voice if there is one. The Edge and
- *      Windows "Natural"/"Multilingual" voices speak both, which is the same
- *      guarantee the cloud voice gives.
- *   2. Otherwise one voice chosen for the conversation's language and HELD —
- *      remembered for the life of the page, so it is the same speaker on
- *      every reply rather than being re-picked per utterance.
- *
- * A Japanese voice reading an English clause is worse than an English one, so
- * a single-language pick still sets `lang` per run for pronunciation. What it
- * no longer does is change WHO is speaking part way through a sentence.
+ * The Web Speech API does not expose gender, so this is a name list. It is
+ * unavoidably incomplete and deliberately conservative: an unrecognised voice
+ * is preferred over a recognised male one, and a recognised male one is used
+ * only when there is nothing else in that language at all.
  */
-let heldVoice: SpeechSynthesisVoice | null = null;
+const heldVoices = new Map<ConversationLanguage, SpeechSynthesisVoice>();
 
 /** Names that mean "this voice speaks more than one language". */
 const MULTILINGUAL = /multiling|natural/i;
@@ -440,13 +490,15 @@ const MALE_VOICES =
 
 export function fallbackVoice(language: ConversationLanguage): SpeechSynthesisVoice | null {
   if (typeof window === "undefined" || !("speechSynthesis" in window)) return null;
-  // Still the one chosen earlier: identity must not change between replies.
-  if (heldVoice) return heldVoice;
+  // Still the one chosen earlier for this language: identity must not change
+  // between replies.
+  const held = heldVoices.get(language);
+  if (held) return held;
 
   // getVoices() is populated asynchronously and returns [] on the first call
-  // in some browsers. Returning null then is correct — the utterance falls
-  // back to the platform default for its lang, and the next reply, by which
-  // time the list has loaded, pins one properly.
+  // in some browsers. Returning null WITHOUT caching is the point — the
+  // utterance falls back to the platform default for its lang this once, and
+  // the next reply, by which time the list has loaded, pins one properly.
   const voices = window.speechSynthesis.getVoices();
   if (voices.length === 0) return null;
 
@@ -455,26 +507,23 @@ export function fallbackVoice(language: ConversationLanguage): SpeechSynthesisVo
   const female = (voice: SpeechSynthesisVoice) => FEMALE_VOICES.test(voice.name);
   const male = (voice: SpeechSynthesisVoice) => MALE_VOICES.test(voice.name);
 
-  heldVoice =
-    // A known female voice in the conversation's language, multilingual first
-    // so one voice can carry both languages the way Kore does.
+  const chosen =
+    // A known female voice in this language, multilingual first.
     inLanguage.find((v) => female(v) && MULTILINGUAL.test(v.name)) ??
     inLanguage.find(female) ??
-    // A known female voice in the other language beats a male one in this
-    // one: the persona is what the student notices across a conversation.
-    voices.find((v) => female(v) && MULTILINGUAL.test(v.name)) ??
-    voices.find(female) ??
     // Nothing recognised. Prefer an unknown voice over a known male one.
     inLanguage.find((v) => !male(v)) ??
     inLanguage[0] ??
     null;
-  return heldVoice;
+
+  if (chosen) heldVoices.set(language, chosen);
+  return chosen;
 }
 
 /** Test seam, and the one legitimate reason to forget the choice: the voice
  * list changes when the student installs or removes a system voice. */
 export function resetFallbackVoice(): void {
-  heldVoice = null;
+  heldVoices.clear();
 }
 
 /* --- Audio already synthesised -------------------------------------------
@@ -609,7 +658,9 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
    * pronunciation is right, but ONE voice across all of them so the speaker
    * does not change identity mid-sentence. */
   const speakLocally = useCallback(
-    (text: string, turn: number, language: ConversationLanguage) => {
+    // No language parameter: the voice is chosen per RUN of text below, not
+    // per reply, because a bilingual answer needs both.
+    (text: string, turn: number) => {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) {
       setSpeaking(false);
       return;
@@ -620,9 +671,12 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
       setSpeaking(false);
       return;
     }
-    const voice = fallbackVoice(language);
     segments.forEach((segment, index) => {
       const utterance = new SpeechSynthesisUtterance(segment.text);
+      // Per RUN, not per reply. A Japanese run read by an English voice is
+      // not read at all — the engine skips it — and a bilingual answer is the
+      // normal shape of an answer here.
+      const voice = fallbackVoice(segment.lang);
       if (voice) utterance.voice = voice;
       utterance.lang = segment.lang === "ja" ? "ja-JP" : "en-US";
       utterance.rate = segment.lang === "ja" ? 0.95 : 1;
@@ -698,7 +752,7 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
   }, []);
 
   const play = useCallback(
-    async (turn: number, language: ConversationLanguage) => {
+    async (turn: number) => {
       let index = 0;
       let pending: Promise<string | null> | null = null;
 
@@ -730,7 +784,7 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
           // The server voice failed. Say the rest with the local one rather
           // than stopping mid-reply.
           setLoading(false);
-          speakLocally(clausesRef.current.slice(index).join(" "), turn, language);
+          speakLocally(clausesRef.current.slice(index).join(" "), turn);
           return;
         }
 
@@ -752,7 +806,7 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
         });
         if (turnRef.current !== turn) return;
         if (!played) {
-          speakLocally(clausesRef.current.slice(index).join(" "), turn, language);
+          speakLocally(clausesRef.current.slice(index).join(" "), turn);
           return;
         }
         index++;
@@ -819,7 +873,7 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
   /** Speak a finished answer — the Listen button, and any reply that arrived
    * complete rather than streamed. */
   const speak = useCallback(
-    async (markdown: string, language: ConversationLanguage = "ja") => {
+    async (markdown: string) => {
       const text = speakableText(markdown);
       if (!text) return;
       const turn = beginTurn();
@@ -827,7 +881,7 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
       consumedRef.current = text.length;
       streamDoneRef.current = true;
       streamingRef.current = false;
-      await play(turn, language);
+      await play(turn);
     },
     [beginTurn, play],
   );
@@ -838,7 +892,7 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
    * the player; later calls only extend its queue; the final call with `done`
    * lets it finish and hand the microphone back. */
   const speakStreaming = useCallback(
-    (soFar: string, done: boolean, language: ConversationLanguage = "ja") => {
+    (soFar: string, done: boolean) => {
       if (!streamingRef.current) {
         streamingRef.current = true;
         const turn = beginTurn();
@@ -848,7 +902,7 @@ export function useTextToSpeech(options: { onDone?: () => void } = {}): TextToSp
           streamingRef.current = false;
         }
         wake();
-        void play(turn, language);
+        void play(turn);
         return;
       }
       enqueue(soFar, done);
