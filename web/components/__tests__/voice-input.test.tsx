@@ -60,13 +60,11 @@ describe("starting a conversation", () => {
 });
 
 describe("while the conversation is live", () => {
-  it("waits without saying anything at all", () => {
+  it("waits without claiming to hear anything", () => {
     // The microphone is open and the student has not started. Saying
-    // "listening" here would be a lie the meter immediately contradicts, and
-    // the "go ahead" it used to say was worse: a cue to wait for, which turned
-    // every turn into a handover. The pulsing ring carries it instead.
+    // "listening" here would be a lie the meter immediately contradicts.
     setup({ state: "listening", hearing: false }, { live: true });
-    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent("go ahead");
   });
 
   it("says it is listening once the student actually speaks", () => {

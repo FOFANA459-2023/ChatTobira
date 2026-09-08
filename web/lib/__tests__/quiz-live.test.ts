@@ -115,7 +115,11 @@ function tiers() {
   const googleKey = process.env.GOOGLE_API_KEY ?? keys.GOOGLE_API_KEY;
   const route = routeModels("structured", {
     hasDeepSeek: false,
-    models: { quiz: keys.QUIZ_MODEL, quizSmall: keys.QUIZ_FALLBACK_MODEL, google: keys.FALLBACK_MODEL },
+    models: {
+      groq: keys.QUIZ_MODEL ?? "openai/gpt-oss-120b",
+      deepseek: keys.DEEPSEEK_MODEL,
+      google: keys.FALLBACK_MODEL,
+    },
   });
   return route
     .filter((tier) => (tier.provider === "google" ? googleKey : groqKey))

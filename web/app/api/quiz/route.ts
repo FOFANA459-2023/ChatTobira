@@ -492,9 +492,13 @@ export async function POST(request: Request) {
     // inside every tier's ceiling; the size gate is not what decides here.
     promptTokens,
     hasDeepSeek: Boolean(process.env.DEEPSEEK_API_KEY),
+    // Named per provider, which is the shape this router takes. The Groq
+    // entry must be a gpt-oss model and not the chat model: generateObject
+    // needs response_format json_schema, and Groq implements it only on
+    // those — qwen rejects it, which silently sent every paper to Gemini.
     models: {
-      quiz: process.env.QUIZ_MODEL,
-      quizSmall: process.env.QUIZ_FALLBACK_MODEL,
+      groq: process.env.QUIZ_MODEL ?? "openai/gpt-oss-120b",
+      deepseek: process.env.DEEPSEEK_MODEL,
       google: process.env.FALLBACK_MODEL,
     },
   });

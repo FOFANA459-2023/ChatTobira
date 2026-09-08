@@ -123,43 +123,28 @@ export function canTakePrompt(name: string, tokens: number): boolean {
  * tier that was about to answer, too long spends the student's whole turn.
  * Measured acceptance through the AI SDK is ~1.9s for DeepSeek and under a
  * second for Groq, both including the reasoning models' first thinking token.
- *
- * `typed` came down from 12s once Groq led the chain again: 12 seconds of
- * silence was being spent discovering that DeepSeek had stalled, on a turn
- * Groq then answered in under a second. 8s is still three times the healthy
- * DeepSeek acceptance, and it is only ever paid on the large prompts where
- * DeepSeek leads because Groq cannot take them.
- *
- * `structured` is a whole generation rather than an acceptance — generateObject
- * returns a finished paper or nothing — so it is measured against 6.2s for
- * gpt-oss-120b on a real fifteen-item paper. 25s rather than the 45s it was
- * first given, because the budget has to leave room for the REST of the chain:
- * the route's ceiling is 60s, and a first tier allowed to burn 45 of them
- * leaves no time to fall back, which turns one slow provider into a failed
- * request. Three tiers at 25s still fit.
  */
-// `structured` is a paper, and a paper is not a turn somebody is listening
-// through: the app shows a loading state and the student goes and finds their
-// textbook. 25 seconds was inherited from the interactive budgets, and 30 is
-// what the measurements support.
+// `spoken` and `typed` are turns a student is listening through; `structured`
+// is a paper, and nobody listens in silence for one — the app shows a loading
+// state and they go and find their textbook.
 //
-// Measured against the real corpus (scripts/local-db.sh) on the model this
-// app actually runs — gemini-3.5-flash-lite, which wrangler.jsonc sets as
-// FALLBACK_MODEL because gemini-3.6-flash's free tier is twenty requests a
-// day:
+// `typed` stays at 12 seconds, which is main's value. It was 8 on the branch
+// this merges from, and that change belonged to a chat reordering main
+// reverted; re-landing it as a side effect of a quiz merge would change the
+// chat route's failover on no evidence.
 //
-//   gemini-3.5-flash-lite   8.7s   a full 18-item, 4-section Foundation 3 paper
-//   gemini-3.6-flash        38-50s the same paper, most of it reasoning tokens
-//   openai/gpt-oss-120b     9-45s  the free-tier backstop, on a smaller prompt
+// `structured` comes down from 45 seconds to 30, and that IS measured.
+// Against the real corpus (scripts/local-db.sh) on the same prompt:
 //
-// 30 seconds is three times the model's typical run and still leaves 25 of
-// the route's 55-second deadline for a second tier — which is what the budget
-// is for, because the failure that actually happens is a provider returning
-// something unusable rather than a provider hanging.
+//   google  gemini-3.5-flash-lite    10.1s   17 items, 4 sections
+//   groq    openai/gpt-oss-120b      9-45s   on the smaller free-tier prompt
+//   deepseek deepseek-v4-flash      138.5s   returned nothing at all
 //
-// A deployment that switches FALLBACK_MODEL to a thinking model needs this
-// number raised to 50; that is the trade, and it costs the cascade.
-export const ACCEPT_BUDGET_MS = { spoken: 6_000, typed: 8_000, structured: 30_000 } as const;
+// 30 is three times the working model's run and leaves 25 of the route's
+// 55-second deadline for a second tier. 45 left ten, which is not enough to
+// try anything else — and the failure that actually happens is a provider
+// returning something unusable, not a provider hanging.
+export const ACCEPT_BUDGET_MS = { spoken: 6_000, typed: 12_000, structured: 30_000 } as const;
 
 /** Reject if `work` has not settled within `ms`.
  *

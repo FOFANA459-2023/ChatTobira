@@ -20,10 +20,7 @@ function show(phase: VoicePhase, props: Partial<Parameters<typeof VoiceSession>[
 describe("the voice screen says what is happening", () => {
   it("names each state in the conversation's own language", () => {
     show("listening");
-    // Twice: the visible label and the screen-reader announcement, which now
-    // say the same thing because "listening" and "hearing you" are the app's
-    // business rather than a cue for the student.
-    expect(screen.getAllByText("Listening")).toHaveLength(2);
+    expect(screen.getByText("Go ahead")).toBeInTheDocument();
 
     show("speaking", { language: "ja" });
     expect(screen.getByText("話しています")).toBeInTheDocument();
@@ -46,16 +43,6 @@ describe("it is not a transcript", () => {
   it("shows the last thing it heard, so a mishearing is catchable", () => {
     show("thinking", { heard: "I went to Kyoto yesterday." });
     expect(screen.getByText(/I went to Kyoto yesterday/)).toBeInTheDocument();
-  });
-
-  it("never tells the student whose turn it is", () => {
-    // A conversation does not hand over. Labelling the gap — "Go ahead",
-    // 「どうぞ」 — made every turn a cue to wait for rather than a moment to
-    // speak into.
-    show("listening");
-    expect(screen.queryByText(/go ahead/i)).toBeNull();
-    expect(screen.queryByText(/どうぞ/)).toBeNull();
-    expect(screen.queryByText(/reopens/i)).toBeNull();
   });
 
   it("promises the transcript back rather than showing it", () => {

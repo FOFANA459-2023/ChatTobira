@@ -162,18 +162,11 @@ export function Chat({
         .filter((part): part is { type: "text"; text: string } => part.type === "text")
         .map((part) => part.text)
         .join("");
-      // The LAST chunk. Everything before it was already spoken by the effect
-      // below while the answer was still being written, so this call only
-      // closes the stream — it releases the player to finish and hand the
-      // microphone back.
-      //
       // Spoken in the conversation's language, not the reply's script. The
       // server has just told us which one it settled on; the local derivation
       // is the same function over the same turns and covers the first reply
       // of a conversation, before any metadata exists.
-      if (said.trim()) {
-        tts.speakStreaming(said, true);
-      }
+      if (said.trim()) void tts.speak(said, meta.language ?? languageRef.current);
     },
   });
 
@@ -256,30 +249,6 @@ export function Chat({
     // After the transcript has been rendered again, not before it.
     requestAnimationFrame(() => scroll.scrollToBottom());
   }
-
-  /** Speak the reply as it is written, rather than after it is finished.
-   *
-   * This is the single largest saving in a spoken turn. Speaking used to start
-   * in onFinish — after the last token — so the student sat in silence for the
-   * whole generation, and only then waited again for the first clause to be
-   * synthesised. Now the first complete sentence goes to the voice while the
-   * rest of the answer is still arriving, and the two overlap.
-   *
-   * `speakStreaming` only ever appends: a clause already handed to the player
-   * is never revised, so being called on every render of a growing message is
-   * safe and cheap. */
-  const { speakStreaming } = tts;
-  useEffect(() => {
-    if (!replyShouldSpeak.current) return;
-    const latest = messages.at(-1);
-    if (latest?.role !== "assistant") return;
-    const said = latest.parts
-      .filter((part): part is { type: "text"; text: string } => part.type === "text")
-      .map((part) => part.text)
-      .join("");
-    if (!said.trim()) return;
-    speakStreaming(said, false);
-  }, [messages, speakStreaming]);
 
   // The transcript's message id is only knowable once useChat has added it,
   // so the turn is tagged on the render after it appears.
@@ -406,6 +375,7 @@ export function Chat({
                       .map((part) => part.text)
                       .join("")}
                     tts={tts}
+                    language={language}
                   />
                   {message.id === messages.at(-1)?.id && (
                     <FeedbackButtons conversationId={meta.conversationId} />
@@ -604,8 +574,13 @@ function MicGlyph() {
 function SpeakButton({
   text,
   tts,
+  language,
 }: {
   text: string;
+  /** The conversation's language, so a student who presses Listen in an
+   * English conversation gets the same voice they would have heard if they
+   * had spoken the turn instead. */
+  language: ConversationLanguage;
   tts: ReturnType<typeof useTextToSpeech>;
 }) {
   if (!text.trim()) return null;
@@ -613,7 +588,7 @@ function SpeakButton({
   return (
     <button
       type="button"
-      onClick={() => (busy ? tts.stop() : void tts.speak(text))}
+      onClick={() => (busy ? tts.stop() : void tts.speak(text, language))}
       className="flex items-center gap-1 rounded-lg px-1.5 py-1 text-xs text-stone-400 hover:bg-stone-100 hover:text-stone-700"
       aria-label={busy ? "Stop reading this answer" : "Read this answer aloud"}
       title={busy ? "Stop" : "Read aloud"}

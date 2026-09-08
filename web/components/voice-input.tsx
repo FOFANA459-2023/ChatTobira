@@ -59,11 +59,7 @@ export function VoiceInput({
   ) : !live ? null : hearing ? (
     <span lang="ja">聞いています…</span>
   ) : listening ? (
-    // Nothing at all. The microphone is open and the student has not started:
-    // "listening" would be a lie the meter contradicts, and "go ahead" was a
-    // cue to wait for, which is what made every turn feel like a handover.
-    // The pulsing ring already says the microphone is open.
-    null
+    <span className="text-stone-400">どうぞ — go ahead</span>
   ) : transcribing ? (
     "Transcribing…"
   ) : speaking ? (
