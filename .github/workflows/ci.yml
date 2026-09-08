@@ -281,6 +281,19 @@ jobs:
           cache-from: type=gha,scope=web
           cache-to: type=gha,mode=max,scope=web
 
+      # Checked on the image rather than through the app, because the smoke
+      # test cannot see it. workerd verifies TLS against the system trust
+      # store and node:*-slim ships without one; with no CA bundle every
+      # outbound call fails identically — Supabase, Groq, Google — while every
+      # page still renders, so a container with no credentials (which is how
+      # this job runs it) never makes a call and never notices. That is how it
+      # shipped, and the only symptom a student saw was "No material is loaded
+      # for that selection yet".
+      - name: The image can verify TLS
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh chattobira-web:ci -c 'test -s /etc/ssl/certs/ca-certificates.crt'
+
       # The real gate: boot the production bundle under workerd and talk to it.
       - name: Smoke test the worker
         run: |

@@ -36,27 +36,49 @@ function request(path, init = {}) {
 /** Each check names what would be broken in production if it failed. */
 const CHECKS = [
   {
-    name: "the worker can reach the outside world over HTTPS",
+    name: "the worker's outbound calls do not fail at the transport",
     why:
       "everything this app does off-box is HTTPS — Supabase, Groq, Google — " +
-      "and an image with no CA bundle fails all of it identically while " +
-      "every page still renders. That shipped: node:*-slim carries no trust " +
-      "store, workerd verifies against one, and the only symptom a student " +
-      "saw was 'No material is loaded for that selection yet'",
+      "and an image with no CA bundle fails all of it identically while every " +
+      "page still renders. That shipped: node:*-slim carries no trust store, " +
+      "workerd verifies against one, and the only symptom a student saw was " +
+      "'No material is loaded for that selection yet'",
     async run() {
-      // The textbook picker: the cheapest route in the app that has to make
-      // an outbound call to answer. It is public (a trial visitor needs it),
-      // it costs no model quota, and a deployment with no database or no
-      // trust store cannot fake it.
+      // The textbook picker: the cheapest public route that has to make an
+      // outbound call to answer, and it costs no model quota.
+      //
+      // What is asserted is the FAILURE mode, not the presence of a corpus,
+      // because this script runs against two very different deployments and
+      // only one of them has credentials. Reading the route's contract:
+      //
+      //   no service key      {"books":[]}              200, no network call
+      //   key, broken TLS     {"error":"lookup_failed"} 500
+      //   key, working        {"books":[...]}           200
+      //
+      // So an empty list is a deployment that was never configured, which is
+      // a supported state and the one CI runs the image in — asserting a
+      // non-empty list there failed the build for a database CI deliberately
+      // does not give it. An ERROR is a deployment that tried to reach
+      // something and could not, which is the bug this check exists for.
       const response = await request("/api/quiz");
-      assert(response.status === 200, `expected 200, got ${response.status}`);
-      const body = await response.json();
-      assert(Array.isArray(body.books), `expected a book list, got ${JSON.stringify(body)}`);
+      const body = await response.json().catch(() => ({}));
       assert(
-        body.books.length > 0,
-        "the picker came back empty — the worker reached nothing, or the " +
-          "deployment has no corpus",
+        response.status === 200 && !body.error,
+        `the picker failed with ${response.status} ${JSON.stringify(body)} — ` +
+          "the worker could not reach Supabase. If this is a configured " +
+          "deployment, suspect the transport before the query: a missing CA " +
+          "bundle fails exactly like this",
       );
+      assert(Array.isArray(body.books), `expected a book list, got ${JSON.stringify(body)}`);
+      // Say which of the two things was actually proved, so a green tick here
+      // is not mistaken for a working database when there was never one.
+      if (body.books.length === 0) {
+        console.log(
+          "        (no credentials configured — the route answered without " +
+            "making a call, so TLS is untested here. The image's trust store " +
+            "is checked directly in CI.)",
+        );
+      }
     },
   },
   {
