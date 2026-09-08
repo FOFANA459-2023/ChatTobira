@@ -16,30 +16,81 @@ import {
   chunksForLesson,
   dedupeQuiz,
   dropCopiedItems,
-  exemplarProvenance,
   focusTokens,
   lessonByPage,
-  paperIdentity,
   QuizSchema,
   rankChunksByFocus,
   selectExemplars,
   type ExemplarChunk,
   type Quiz,
 } from "@/lib/quiz";
-import {
-  blueprint as paperBlueprint,
-  instructionLanguage,
-  markLine,
-  type Level,
-  type SectionArchetype,
-} from "@/lib/paper-format";
-import { dropRepeats, fingerprint, type Fingerprint } from "@/lib/quiz-signature";
-import { tidyQuiz, validateQuiz } from "@/lib/quiz-validate";
+import { planPaper, type Level } from "@/lib/paper-format";
+import { buildQuizPrompt, itemsForPlan, MIN_PASSAGE_CHARS } from "@/lib/quiz-prompt";
+import { dropDuplicates, dropRepeats, fingerprint, type Fingerprint } from "@/lib/quiz-signature";
+import { tidyQuiz, validateQuiz, type MaterialContext } from "@/lib/quiz-validate";
+import { attestedKanji, houseStyle } from "@/lib/textbook-usage";
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/server";
 import { serviceClient } from "@/lib/supabase/service";
 import { trialCookie, trialUsed, TRIALS } from "@/lib/trial";
 
 export const maxDuration = 60;
+
+/** How much room a paper is given to be written in, and on which prompt.
+ *
+ * Both numbers below are measurements taken against the local copy of the
+ * corpus (scripts/local-db.sh), not estimates, because every previous version
+ * of this constant was an estimate and every one of them was wrong in a way
+ * that surfaced as a different error.
+ *
+ * Google is first for a structured job (lib/router.ts) and gets the whole
+ * budget, because it meters nothing of the sort and because how much of that
+ * budget it spends depends entirely on which Gemini a deployment names.
+ * Measured on the corpus copy with the same prompt:
+ *
+ *   gemini-3.5-flash-lite   8.7s   18 items, 4 sections   what this app runs
+ *   gemini-3.6-flash        38-50s 17 items, 4 sections   input 6,239,
+ *                                                         output 2,352,
+ *                                                         REASONING 5,735
+ *
+ * The paper itself is 2,400 tokens of JSON either way. What made the previous
+ * 4,800 too small was the second row: a thinking model bills its reasoning to
+ * the same allowance, so the symptom was never a short paper, it was invalid
+ * JSON — "could not parse the response" — from a tier that looked like it had
+ * failed for no reason. 16,000 covers both.
+ *
+ * Groq's free tier meters PROMPT PLUS RESERVED OUTPUT against 8,000 tokens a
+ * minute, and the full prompt is ~6,300 tokens by the provider's own count.
+ * There is no output budget that fits beside it: 6,300 + 3,000 is over the
+ * ceiling before the model writes a character, and Groq answers 413 —
+ *
+ *   "Request too large ... on tokens per minute (TPM): Limit 8000"
+ *
+ * So the free tier gets a SHORTER PROMPT rather than a smaller allowance:
+ * fewer excerpts, capped tighter, no past-paper pages, and the plan without
+ * the prose that coaches it (see buildQuizPrompt's `compact`). It is a worse
+ * prompt and it writes a worse paper, and that is the right trade for a
+ * backstop — the alternative is a tier that can only ever be refused, which
+ * is what the cascade had become.
+ *
+ * What it buys, measured on the corpus copy: a Foundation 2 paper of two
+ * sections where the plan asked for four. Usable, and the route treats it as
+ * the failed generation it is — a near miss, served only if nothing better
+ * arrives.
+ *
+ * What it does NOT buy is a Foundation 3 paper. Those carry two passages and
+ * their items are worth two marks each, so the JSON is half as long again,
+ * and 3,800 output tokens truncates it however small the prompt gets. The
+ * free tier is a Foundation 2 backstop and nothing more; a Foundation 3
+ * student's paper is written by Gemini or not at all. That is a property of
+ * an 8,000-token-a-minute ceiling, not something a prompt can be tuned
+ * around, and it is written down here so the next person does not spend an
+ * afternoon rediscovering it.
+ */
+const OUTPUT_BUDGET = { groq: 3_800, deepseek: 8_000, google: 16_000 } as const;
+
+/** Excerpts for the free tier's prompt: fewer, shorter. */
+const COMPACT_EXCERPTS = 4;
+const COMPACT_EXCERPT_CHARS = 320;
 
 const BodySchema = z.object({
   // The student picks a specific textbook: quizzes from "everything" produced
@@ -53,198 +104,6 @@ const BodySchema = z.object({
   // actually produces new questions instead of shuffling the same ones.
   avoid: z.array(z.string().max(300)).max(40).optional(),
 });
-
-/** The shortest reading passage a ○× section can be built on, and what the
- * plan asks for.
- *
- * One pair of constants used by BOTH the prompt and the validity gate, for the
- * same reason `ingest/redact.py` keeps its redactor and its detector in one
- * file: a rule enforced in one place and described in another drifts, and the
- * drift is silent. Here it was not even described — the gate rejected papers
- * for a requirement the model was never given.
- */
-const MIN_PASSAGE_CHARS = 150;
-const PASSAGE_TARGET_CHARS = 220;
-
-const SYSTEM = `You create Japanese practice tests for university students from
-provided course material, in the format of the course's own test papers. Rules:
-- Base every item ONLY on the provided material; test the grammar patterns and
-  vocabulary that actually appear in it.
-- The test is divided into numbered sections. Each section has instruction_ja —
-  the polite Japanese instruction line exactly as it would appear on the paper,
-  e.g. 「（　）に入る適切なことばを選んでください。」 — and instruction_en, a
-  short English translation of that instruction.
-- Japanese in Japanese script. Furigana (written 漢字（かんじ）) follows the
-  scope rule in the request: students are expected to READ the kanji they have
-  already been taught, so kanji taught at or before the tested scope carry NO
-  furigana; only kanji from beyond the scope get furigana. Never put furigana
-  on a word whose reading or writing is itself being tested.
-- A reading is attached to the WHOLE word, once — 持ち物（もちもの）, 急ぐ（いそぐ）
-  — never one reading per character (持《も》ち物《もの》 is wrong), and never on
-  a word already written in kana.
-- Write plain text everywhere: no Markdown, no asterisks for emphasis, no
-  headings, no bullet characters. The app sets the paper; question,
-  explanation, review and scope_description are prose and nothing else.
-- Every section's shape — its instruction line, how many items it carries, how
-  many options each item has, whether it has a word bank or a passage — is
-  specified per section below. Follow it exactly; it is read off the papers
-  this course sets, not invented.
-- If a section's plan asks for a passage, that section MUST carry a "passage"
-  field of at least ${PASSAGE_TARGET_CHARS} Japanese characters. This is the single
-  commonest way a generated paper is thrown away: ○× statements about a
-  passage that was never written refer to a text the student cannot see, so
-  the app rejects the whole paper below ${MIN_PASSAGE_CHARS} characters. Write the
-  passage first, then write statements about it.
-- "type" is how the app grades the item and must match the section's form:
-  form "bracket" and "lettered" are type "multiple_choice", form "written" is
-  "fill_blank", form "maru_batsu" is "true_false".
-- The answer of a choice item must be one of its own choices, character for
-  character. An answer that is not on the list is the single commonest way a
-  generated paper becomes unusable.
-- Spread the questions across as many different grammar points and words from
-  the material as possible; never drill the same point twice in one paper.
-- explanation: one or two sentences on WHY, in simple English with the
-  Japanese pattern or word named.
-- review: for EVERY item, where in the TEXTBOOK the student should go to study
-  this point. Students own the textbook and nothing else, so a review must be
-  findable from the book alone: the division as the textbook prints it, the
-  concept, and the page number from the excerpt header when one is shown.
-  NEVER write "Material", "excerpt", "source", "handout", "past paper", or a
-  numbered reference to the prompt. Identical points must use the identical
-  review string so results aggregate.
-- Variety: every item must drill a different point with a different sentence.
-  Never underline the same word in two items, and never reuse a sentence the
-  paper (or the avoid-list, when one is given) already used.
-- When an item asks about ONE specific word in a sentence (the word to
-  conjugate, the word to read, the word to write in kanji), wrap exactly that
-  word in 【 】 where it occurs — the app renders it underlined, matching the
-  printed papers. Use ＿＿ only for a blank the student fills.
-- scope_description: 1–2 sentences in English telling the student what this
-  test covers — name the specific grammar points or vocabulary drilled, and
-  the textbook or lesson area they come from.
-- Never reference "the source", file names, or page numbers in questions or
-  explanations; page numbers belong in review only.`;
-
-
-// The paper's shape comes from the format catalogue, not from a template.
-//
-// It used to be two hardcoded four-section strings written by reading the
-// course's papers by hand. lib/paper-format.ts holds that reading as data
-// instead — every section archetype the sat papers actually use, with the
-// instruction line as printed, the marks it carries, how many items it runs
-// to and how many options it prints — and a paper is planned from it.
-//
-// Which matters because the hand-written template was wrong about the thing
-// it most needed to be right about. It asked for four lettered options on
-// every choice question; across 40 sat papers the course never once does
-// that. It prints two or three options INSIDE the sentence, or lists three
-// under a〜c.
-function sectionPlan(
-  blueprint: SectionArchetype[],
-  language: "en" | "ja+en" | "ja",
-  perSection: number,
-): string {
-  const numerals = ["I", "II", "III", "IV", "V"];
-  const lines = blueprint.map((archetype, index) => {
-    const items = Math.min(
-      Math.max(perSection, archetype.items[0]),
-      archetype.items[1],
-    );
-    const parts = [
-      `Section ${numerals[index]} — ${archetype.objective}.`,
-      `  instruction_ja: exactly 「${archetype.instructionJa}」`,
-      `  instruction_en: ${
-        language === "ja"
-          ? "a short English translation of that line"
-          : `exactly "${archetype.instructionEn}"`
-      }`,
-      `  form: "${archetype.form}", marks: ${archetype.marks}, ${items} items ${markLine(
-        archetype.marks,
-        items,
-      )}`,
-    ];
-
-    if (archetype.form === "bracket") {
-      parts.push(
-        `  Write ${archetype.choices} choices per item. The app prints them inside the sentence as ( A / B / C ) for the student to circle, so the question text must NOT already contain the options — write the sentence with the gap where they go, and put the candidates in "choices" with the right one in "answer".`,
-      );
-    } else if (archetype.form === "lettered") {
-      parts.push(
-        `  Exactly ${archetype.choices} choices, listed under the question and labelled a. b. c. by the app. "answer" must be one of them, written identically.`,
-      );
-    } else if (archetype.form === "maru_batsu") {
-      parts.push(
-        // The length is stated because it is ENFORCED. The validator rejects a
-        // paper whose passage is under MIN_PASSAGE_CHARS, and the plan used to
-        // say only "this section's passage" — never that a passage field was
-        // required, never how long. Every model guessed, and guessed short:
-        // gpt-oss-120b wrote 113 characters and had the whole paper thrown
-        // away for it. Asking for a margin above the floor rather than the
-        // floor itself, because a model told "at least 150" writes 150.
-        `  Set "passage" on this section: a short Japanese text of AT LEAST ${PASSAGE_TARGET_CHARS} characters (the app rejects the paper below ${MIN_PASSAGE_CHARS}), written from the course material, that all of this section's statements are about.`,
-        `  Each item is ONE statement about that passage; "answer" is exactly ○ or ×. Mix them. A × statement must be contradicted by the passage, not merely absent from it, and the explanation must quote the phrase that decides it.`,
-      );
-    } else {
-      parts.push(
-        `  The student writes the answer. Put the gap in the sentence as （　）. "answer" is exactly the text that fills it; add "answer_kana" when the answer contains kanji.`,
-      );
-    }
-
-    if (archetype.wordBank) {
-      parts.push(
-        `  Set "word_bank" on this section: ${items + 1}–${items + 2} dictionary-form words, printed in a box under the items. Every answer must be one of them, conjugated to fit its sentence, and NO word may answer two items — the paper says ことばは1回しか使えません and means it. Include one or two bank words that fit nothing, as the real papers do.`,
-      );
-    }
-    if (archetype.passage) {
-      parts.push(
-        `  Set "passage" on this section: the text the items are about, written by you from the excerpts. ${
-          archetype.form === "written"
-            ? "The gaps live inside the passage; each item names which gap it is."
-            : "300–400 characters."
-        }`,
-      );
-    }
-    if (archetype.example) {
-      parts.push(
-        `  Open instruction_ja with the paper's own 例 convention: the first item's question may show the worked example inline as 例) …, which is how the printed section teaches its answer format.`,
-      );
-    }
-    parts.push(`  Set "target" on every item to the exact point it tests.`);
-    return parts.join("\n");
-  });
-
-  return `Structure the paper as exactly ${blueprint.length} sections, in this order:\n\n${lines.join("\n\n")}`;
-}
-
-// How the course writes wrong answers, read off the sat papers.
-//
-// Distractors are the whole difficulty of a multiple-choice paper: four
-// options a student can eliminate at a glance is a question that tests
-// nothing. The papers build them from the mistakes their students actually
-// make, and the two subjects do it differently.
-const DISTRACTORS: Record<"grammar" | "kanji", string> = {
-  grammar: `DISTRACTORS (how this course writes wrong grammar options)
-Every wrong option must be a mistake a real student of this topic would make,
-and must be wrong for a reason you could name:
-- the wrong particle in a frame where several are plausible — に against で
-  against を, は against が;
-- the right pattern in the wrong form — dictionary form where the て-form is
-  needed, past where present is needed, plain where polite is needed;
-- a neighbouring pattern the topic teaches alongside this one — 〜ながら
-  against 〜あとで, 〜そうです against 〜ようです, 〜ておく against 〜てある;
-- a form that is grammatical Japanese but wrong for THIS sentence's meaning.
-Never a nonsense string, never a word from a different part of speech, and
-never an option a student could rule out without knowing the point.`,
-  kanji: `DISTRACTORS (how this course writes wrong kanji options)
-- readings that differ by one feature a learner confuses: voicing (かい/がい),
-  long against short vowel (こうこく/こくこく), small kana (きゅ/きゆ),
-  gemination (がっこう/がこう);
-- the on-reading where the kun-reading is correct, and the reverse;
-- kanji that look alike — 待/持, essential/末, 券/巻, 話/語;
-- a real word of the right shape that means something else.
-Never a made-up reading, and never a character the course has not taught.`,
-};
-
 
 async function requireUser() {
   const supabase = await createClient();
@@ -398,7 +257,12 @@ export async function POST(request: Request) {
       .select("content, metadata, book_page, pdf_page")
       .eq("document_id", documentId)
       .order("pdf_page")
-      .limit(500);
+      // The whole book, not most of it. 500 was a round number and the
+      // Foundation 1 & 2 book is 516 chunks, so the last sixteen pages were
+      // outside the pool — invisible to the excerpt sample, and (worse)
+      // outside the attested-kanji set, where a missing page turns into a
+      // rejected question about a character the book does print.
+      .limit(800);
     if (error) {
       return Response.json({ error: "retrieval_failed" }, { status: 502 });
     }
@@ -440,23 +304,24 @@ export async function POST(request: Request) {
   // headed by the textbook name, its lesson, and printed page — never
   // "Material N", which the model would echo into review references students
   // cannot follow.
-  const sample = picked
-    .map((c) => {
-      const lesson = lessons.get(c.pdf_page) ?? 0;
-      const grammarPoints = Array.isArray(c.metadata?.["grammar_points"])
-        ? (c.metadata["grammar_points"] as string[]).filter(Boolean).join("、")
-        : "";
-      const header = [
-        `"${doc.title}"`,
-        lesson > 0 ? `${/intermediate/i.test(doc.title) ? "Lesson" : "Topic"} ${lesson}` : null,
-        c.book_page ? `page ${c.book_page}` : null,
-        grammarPoints ? `teaches: ${grammarPoints}` : null,
-      ]
-        .filter(Boolean)
-        .join(", ");
-      return `--- From ${header} ---\n${c.content.slice(0, 700)}`;
-    })
-    .join("\n\n");
+  const excerptBlock = (chunks: QuizChunk[], chars: number) =>
+    chunks
+      .map((c) => {
+        const lesson = lessons.get(c.pdf_page) ?? 0;
+        const grammarPoints = Array.isArray(c.metadata?.["grammar_points"])
+          ? (c.metadata["grammar_points"] as string[]).filter(Boolean).join("、")
+          : "";
+        const header = [
+          `"${doc.title}"`,
+          lesson > 0 ? `${/intermediate/i.test(doc.title) ? "Lesson" : "Topic"} ${lesson}` : null,
+          c.book_page ? `page ${c.book_page}` : null,
+          grammarPoints ? `teaches: ${grammarPoints}` : null,
+        ]
+          .filter(Boolean)
+          .join(", ");
+        return [`--- From ${header} ---`, c.content.slice(0, chars)].join("\n");
+      })
+      .join("\n\n");
 
   // ---------------------------------------------------------------------
   // Exam-style reference: the course's own sat papers, at this book's level.
@@ -474,29 +339,53 @@ export async function POST(request: Request) {
   // papers in the corpus, so it falls back to the Foundation 3 shapes —
   // closest in level, and better than a template nobody's course uses.
   const formatLevel: Level = level === "F2" ? "F2" : "F3";
-  const blueprint = paperBlueprint(formatLevel, kind);
-  const language = instructionLanguage(formatLevel, contentScope);
 
   // What this student has already been asked at this level. The paper they
   // just sat still rides in on `avoid`, but that dies with the page; this is
   // what makes the third test of the week different from the first.
   let history: Fingerprint[] = [];
+  let sat = 0;
   if (user) {
     const { data: prior } = await supabase
       .from("quiz_items")
-      .select("question, answer, target, pattern, frame")
+      .select("question, answer, target, pattern, frame, archetype")
       .eq("kind", kind)
       .eq("level", level ?? "")
       .order("created_at", { ascending: false })
       .limit(120);
-    history = ((prior ?? []) as { pattern: string | null; frame: string | null; question: string }[])
+    const rows = (prior ?? []) as {
+      pattern: string | null;
+      frame: string | null;
+      question: string;
+      archetype: string | null;
+    }[];
+    history = rows
       .map((row) => ({
         exact: row.question ?? "",
         pattern: row.pattern ?? "",
         frame: row.frame ?? "",
+        skill: "",
+        comprehension: false,
       }))
       .filter((print) => print.pattern || print.frame);
+    // Distinct section types this student has already met, which is what
+    // moves the plan on. Counting PAPERS would need a paper id the history
+    // table does not carry; counting the archetypes they have seen does the
+    // same job — a student who has met four section types gets the fifth.
+    sat = new Set(rows.map((row) => row.archetype).filter(Boolean)).size;
   }
+
+  // The paper's plan, from the format catalogue. Intermediate has no sat
+  // papers in the corpus, so it falls back to the Foundation 3 shapes —
+  // closest in level, and better than a template nobody's course uses.
+  //
+  // `variant` is what stops a student meeting the same four 問題 every time.
+  // The catalogue holds fifteen section types across the two levels and the
+  // old fixed blueprint used four of them; rotating on what this student has
+  // already been shown means their second Topic 8 paper has a section their
+  // first did not. A trial visitor has no history and always gets variant 0,
+  // which is the most typical paper — the right one to be shown first.
+  const plan = planPaper(formatLevel, kind, { topic: contentScope, variant: sat });
 
   let exemplars: ExemplarChunk[] = [];
   if (level) {
@@ -514,167 +403,73 @@ export async function POST(request: Request) {
       // one query per TTL, not one per generated test.
       rememberPool(paperKey, papers);
     }
-    // Three pages, capped at roughly one page of text each. The ceiling here
+    // Two pages, capped at roughly one page of text each. The ceiling here
     // is Groq's free tier at 12k tokens/minute, and Japanese spends close to
     // a token per character — the textbook sample already costs ~9,000
-    // characters, so this block has to buy its place. Three pages from three
+    // characters, so this block has to buy its place. Two pages from two
     // sittings is enough to show the section order, the instruction wording
-    // and the distractor style; a fourth mostly repeats them.
-    exemplars = selectExemplars(papers, kind, contentScope, 2);
+    // and the distractor style; a third mostly repeats them.
+    //
+    // One page per paper, which is the whole reason the cap exists and was
+    // not being reached: with two of two allowed from one sitting, both
+    // retrieved pages came off the same 文法・読解クイズ, and two pages of one
+    // paper teach that paper's habits where two pages of two teach the
+    // course's.
+    exemplars = selectExemplars(papers, kind, contentScope, 2, 1);
   }
 
-  const styleBlock = exemplars
-    .map((chunk) => {
-      const { topic, examTerm, paperTitle } = paperIdentity(chunk);
-      const header = [examTerm, paperTitle, topic ? `Topic ${topic.slice(1)}` : null]
-        .filter(Boolean)
-        .join(" ");
-      return `--- Past paper${header ? `: ${header}` : ""} ---\n${chunk.content.slice(0, 800)}`;
-    })
-    .join("\n\n");
-
-  const provenance = exemplarProvenance(exemplars);
-
-  // The books name their divisions differently: the Foundation volumes are
-  // split into "Topic 1, 2, …", the Intermediate Tobira volumes into
-  // "Lesson 1, 2, …". Review references must use the word printed in the
-  // student's own book or they cannot follow them.
-  const division = /intermediate/i.test(doc.title) ? "Lesson" : "Topic";
-
-  // Furigana boundary: the tested lesson's own kanji are still being learned,
-  // so THEY carry readings too — only lessons strictly below the scope go
-  // bare. Scoped to Lesson 3: no furigana for Lessons 1–2, furigana on
-  // everything from Lesson 3 up. A whole-book test annotates every kanji
-  // word, the same rule with the whole book as the current material.
-  const scopeDivision = contentScope;
-  const furiganaRule = `${
-    scopeDivision
-      ? `Furigana rule: this test is scoped to ${division} ${scopeDivision}.${
-          scopeDivision > 1
-            ? ` Write NO furigana
-for kanji taught in ${division} 1 through ${division} ${scopeDivision - 1} —
-students already read them.`
-            : ""
-        } EVERY kanji word from ${division} ${scopeDivision} itself
-or beyond MUST carry its reading, written 漢字（かんじ） immediately after the
-word — the app displays it as small hiragana above the kanji. This is
-required, not optional: a test with no furigana anywhere is wrong.`
-      : `Furigana rule: EVERY kanji word MUST carry its reading, written
-漢字（かんじ） immediately after the word — the app displays it as small
-hiragana above the kanji. This is required, not optional.`
+  // What this book's own Japanese looks like, measured rather than assumed:
+  // which of several correct spellings it uses, and which characters it
+  // contains at all. Counted over the excerpts the paper is drawn from, with
+  // the whole book behind them for the alternations the excerpts are too thin
+  // to settle. See lib/textbook-usage.ts.
+  //
+  // Cached with the pool, because both are pure functions of the book and
+  // "New Test" should not re-scan half a megabyte of Japanese to ask the same
+  // question of it twice.
+  let material = cachedPool<MaterialContext>(`material:${documentId}`);
+  if (!material) {
+    material = {
+      style: houseStyle(
+        picked.map((c) => c.content),
+        allChunks.map((c) => c.content),
+      ),
+      attestedKanji: attestedKanji(allChunks.map((c) => c.content)),
+    };
+    rememberPool(`material:${documentId}`, material);
   }
-Exception: never annotate a word whose reading or writing is itself being
-tested (it would give the answer away). The excerpts show the textbook's own
-readings as 漢字《かんじ》 — rewrite them in the （ ） style, subject to the
-rule above.`;
-
-  // The two sources do different jobs and the prompt has to say so, or the
-  // model treats the papers as a question bank: it lifts a sentence off a
-  // past paper, and the student sits a test they have already seen with the
-  // answers already marked on it. Content comes from the book; only the SHAPE
-  // comes from the papers.
-  const styleRules = styleBlock
-    ? `
-=== HOW THIS COURSE'S PAPERS LOOK (form only) ===
-Pages from papers students at this level actually sat, shown for the shape of
-the sentences and the pitch of the difficulty. They are deliberately from a
-DIFFERENT topic than the one you are writing about — the format does not vary
-by topic, so there is nothing here for you to reuse.
-- NEVER reuse a sentence, question, word bank or passage from them. Every item
-  you write is new, built from the textbook excerpts below.
-- They are not a source of grammar or facts. Where a paper and the excerpts
-  disagree, the excerpts are right.
-- Their blanks are unfilled; yours carry the answer in the answer field.
-
-${styleBlock}
-`
-    : "";
-
-  // Only what was actually retrieved may be described. Without this the model
-  // narrates an exam history it inferred — "as in previous final exams" — and
-  // a student has no way to tell that from something the course said.
-  const provenanceRule = styleBlock
-    ? `\nIn scope_description you MAY note in one short clause that the paper follows
-the style of the course's past papers${
-        provenance.terms.length > 0 ? ` (${provenance.terms.join(", ")})` : ""
-      }. Do not claim anything else about the exams: not that a point is
-"commonly tested" or "frequently appears", not a date, not an exam name, not a
-question number, not a mark scheme, unless it is printed in the reference
-pages above. Never mention past papers in a question, a choice, an explanation
-or a review reference.`
-    : `\nSay nothing about past papers, previous exams or how the course tests this
-material: none was retrieved, so anything you said about it would be invented.`;
 
   // How many items the plan asks for, which is what the length gate below
   // measures against. Each archetype carries its own range — the papers'
-  // word-bank sections run to seven items and their a〜c sections to two — so
-  // the total is the plan's, not a division of the requested count.
-  // One more item per section than the paper needs, because everything below
-  // this line takes items AWAY: the duplicate check, the past-paper copy
-  // check, the validity gate, and the history check that stops "New Test"
-  // asking what the student was asked last week. A section planned at exactly
-  // its target loses items to those and comes up short — and a section that
-  // loses ALL of them disappears from the paper entirely, which is how a
-  // four-section paper renders as three.
-  //
-  // The extra is still clamped to the archetype's own maximum in sectionPlan,
-  // so this asks for a longer section only where the real papers have one.
-  const perSection = Math.max(2, Math.round(count / blueprint.length)) + 1;
-  const planned = blueprint.reduce(
-    (total, archetype) =>
-      total + Math.min(Math.max(perSection, archetype.items[0]), archetype.items[1]),
-    0,
-  );
-  const prompt = `Create a practice test from the textbook excerpts below, all
-from "${doc.title}" — the book the student owns. Every question must be drawn
-from these excerpts. This textbook divides its content into ${division}s: write
-every review reference as "${division} N — concept (p. NN)", using the
-${division} numbers and page numbers as printed in the excerpts.
-${
-  level && level !== "INT"
-    ? `\nThis is a ${
-        level === "F2" ? "Foundation 2" : "Foundation 3"
-      } paper. Stay inside that level: test only grammar and vocabulary present
-in the excerpts below, and never reach for a pattern from a later course
-because it would fit the sentence better.`
-    : ""
-}
-${furiganaRule}
-Around ${planned} questions in total, distributed across the sections exactly as
-the plan above specifies — each section has its own item count because each
-carries its own marks. Focus on ${
-    kind === "kanji"
-      ? "the kanji and vocabulary that appear in these excerpts"
-      : "the grammar patterns drilled in these excerpts"
-  }.${
-    focus
-      ? `\nThe student asked the test to focus on: "${focus}". Keep every question
-inside that scope, and say so in scope_description.`
-      : ""
-  }${
-    avoid && avoid.length > 0
-      ? `\nThe student just sat a paper with the questions below. Write COMPLETELY
-different questions — different sentences, different target words, different
-vocabulary — while staying inside the same material:\n${avoid
-          .map((q) => `- ${q.slice(0, 200)}`)
-          .join("\n")}`
-      : ""
-  }${provenanceRule}
-${styleRules}
-=== TEXTBOOK EXCERPTS — THE ONLY SOURCE OF CONTENT ===
-${sample}`;
-  // The plan and the distractor rules are both read off the sat papers. The
-  // retrieved pages below then show the model what that looks like in print:
-  // the plan says "three options labelled a〜c", the exemplar shows one.
-  const system = `${SYSTEM}\n\n${sectionPlan(blueprint, language, perSection)}\n\n${
-    DISTRACTORS[kind]
-  }${
-    styleBlock
-      ? `\n\nThe request below includes real past-paper pages. Where one prints
-the instruction line for a section you are writing, prefer that wording over
-the line specified above — it is what the students read on the day.`
-      : ""
-  }`;
+  // word-bank sections run to seven items and their a~c sections to two — so
+  // the total is the plan's, not a division of the requested count, and it is
+  // capped at what a provider will actually finish writing. See
+  // lib/quiz-prompt.ts: asking for a paper that does not fit does not get a
+  // shorter paper back, it gets a truncated one.
+  const perSection = itemsForPlan(plan, count);
+
+  const promptFor = (chunks: typeof picked, withExemplars: boolean, chars: number) =>
+    buildQuizPrompt({
+      compact: !withExemplars,
+      bookTitle: doc.title,
+      documentLevel: level,
+      formatLevel,
+      kind,
+      plan,
+      topic: contentScope,
+      excerpts: excerptBlock(chunks, chars),
+      exemplars: withExemplars ? exemplars : [],
+      style: material.style ?? [],
+      focus,
+      avoid,
+      perSection,
+    });
+
+  const { system, prompt, planned } = promptFor(picked, true, 700);
+  // The free tier's version of the same request — see OUTPUT_BUDGET.
+  const compact = promptFor(picked.slice(0, COMPACT_EXCERPTS), false, COMPACT_EXCERPT_CHARS);
+
+
   const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
   const google = createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY });
 
@@ -737,6 +532,10 @@ the line specified above — it is what the students read on the day.`
     provider,
     label: model,
     model: clientFor[provider](model),
+    outputBudget: OUTPUT_BUDGET[provider],
+    // Groq is metered on prompt plus reserved output together, so it gets the
+    // compact prompt or it gets a 413. Everything else gets the real one.
+    ask: provider === "groq" ? compact : { system, prompt },
   }));
 
   /** Remember what was asked, so the next paper is a different one.
@@ -759,7 +558,7 @@ the line specified above — it is what the students read on the day.`
               level,
               kind,
               topic: contentScope !== null ? `T${contentScope}` : null,
-              archetype: blueprint[sectionIndex]?.id ?? null,
+              archetype: plan[sectionIndex]?.id ?? null,
               question_type: item.type,
               question: item.question.slice(0, 500),
               answer: item.answer.slice(0, 200),
@@ -789,19 +588,33 @@ the line specified above — it is what the students read on the day.`
    * served if nothing better arrives. */
   let nearMiss: { paper: Quiz; kept: Fingerprint[]; why: string } | null = null;
 
+  // The route may run for `maxDuration`; a tier may have whatever is left of
+  // it. A fixed per-tier budget cannot be right for both the first tier and
+  // the third — 45 seconds each is 135 seconds of a 60-second request — and
+  // the failure it produces is the worst kind: the request dies mid-generation
+  // and the student is told nothing at all.
+  const deadline = Date.now() + (maxDuration - 5) * 1_000;
+
   for (const tier of tiers) {
     // Same reason as the chat route: a tier that neither accepts nor refuses
     // would otherwise hold the whole request until the route's own ceiling.
     // The budget is far longer here because a paper is a big structured
     // generation and nobody is listening in silence for it.
+    const remaining = deadline - Date.now();
+    // Below this there is not enough time left to write a paper, and starting
+    // one guarantees a timeout instead of the near miss already in hand.
+    if (remaining < 10_000) {
+      console.warn(`quiz: skipping ${tier.label}, ${Math.round(remaining / 1000)}s left`);
+      break;
+    }
     const controller = new AbortController();
     try {
       const { object } = await withDeadline(
         generateObject({
           model: tier.model,
           schema: QuizSchema,
-          system,
-          prompt,
+          system: tier.ask.system,
+          prompt: tier.ask.prompt,
           // Test papers should vary between sittings; greedy decoding regrows
           // the same questions from the same excerpts.
           temperature: 0.8,
@@ -829,10 +642,10 @@ the line specified above — it is what the students read on the day.`
           //
           // 4,800 sits above the 3,852 a full seventeen-item paper actually
           // used, and leaves a ~3,000-token prompt inside the minute's budget.
-          maxOutputTokens: 4_800,
+          maxOutputTokens: tier.outputBudget,
           abortSignal: controller.signal,
         }),
-        ACCEPT_BUDGET_MS.structured,
+        Math.min(ACCEPT_BUDGET_MS.structured, remaining),
         "tier_timeout",
       );
       // No question may repeat inside one paper. Dropping the repeat is
@@ -862,17 +675,34 @@ the line specified above — it is what the students read on the day.`
       if (fixes > 0) {
         console.warn(`quiz on ${tier.provider}: tidied ${fixes} layout artefact(s)`);
       }
-      const { quiz: checked, rejected } = validateQuiz(tidied, blueprint);
+      // Judged against the plan AND against the book: an item can be perfectly
+      // answerable and still be one this course could not have set, because
+      // it spells a word a way the book never spells it or uses a character
+      // the book does not contain. Both are measurements of the student's own
+      // textbook — see lib/textbook-usage.ts.
+      const { quiz: checked, rejected } = validateQuiz(tidied, plan, material);
       if (rejected.length > 0) {
         console.warn(
           `quiz on ${tier.provider}: rejected ${rejected.length} invalid item(s): ` +
             rejected.map((r) => `[${r.section}.${r.item}] ${r.reason}`).join("; "),
         );
       }
+      // Then: no two questions on this paper may be the same question. This
+      // runs ACROSS sections, which is where the repeats actually hide — the
+      // generator drills 〜まえに in section I and again in section III with
+      // the shop changed to a station, and calls them different because it
+      // wrote a different label on each.
+      const near = dropDuplicates(checked);
+      if (near.removed > 0) {
+        console.warn(
+          `quiz on ${tier.provider}: dropped ${near.removed} duplicate item(s): ` +
+            near.reasons.join("; "),
+        );
+      }
       // Finally: no question the student has already been asked. This is the
       // check that makes "New Test" mean something across sittings rather than
       // only within one page load.
-      const dropped = dropRepeats(checked, history);
+      const dropped = dropRepeats(near.quiz, history);
       let paper = dropped.quiz;
       const { removed: repeats, kept } = dropped;
       if (repeats > 0) {
@@ -894,8 +724,8 @@ the line specified above — it is what the students read on the day.`
       // is exactly what stopped these looking like the papers they copy:
       // the format is the sections, not the number of questions.
       const shortOf =
-        paper.sections.length < blueprint.length
-          ? `missing a section: ${paper.sections.length} of ${blueprint.length} survived`
+        paper.sections.length < plan.length
+          ? `missing a section: ${paper.sections.length} of ${plan.length} survived`
           : produced < Math.ceil(planned * 0.6)
             ? `too short: ${produced} items for a ${planned}-item plan`
             : null;
@@ -939,7 +769,7 @@ the line specified above — it is what the students read on the day.`
       // student revising tonight is better off with three sections than with
       // an error, and the gate still prefers a complete paper from the next
       // tier if one arrives.
-      const needsPassage = blueprint.some((a) => a.passage && a.form === "maru_batsu");
+      const needsPassage = plan.some((a) => a.passage && a.form === "maru_batsu");
       const unanswerable = (section: Quiz["sections"][number]) =>
         section.form === "maru_batsu" &&
         !(section.passage && section.passage.length >= MIN_PASSAGE_CHARS);

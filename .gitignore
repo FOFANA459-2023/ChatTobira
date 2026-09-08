@@ -31,6 +31,25 @@
 .wrangler/
 
 # ---------------------------------------------------------------------------
+# The local copy of the production database
+# ---------------------------------------------------------------------------
+# scripts/local-db.sh dumps production (read-only) into a container so that
+# development never touches the database a hundred students are reading. The
+# dump and the fixture exported from it are COURSE MATERIAL — the textbooks and
+# the sat papers, page by page — and the textbooks are commercial. They belong
+# on a laptop and in a container and nowhere else, least of all in a
+# repository.
+#
+# Named explicitly rather than left to /.work/ above. That rule covers them
+# today because that is where they happen to be written; this one says why
+# they must never be committed, so moving the work directory cannot quietly
+# take the protection with it.
+*.dump
+*.sql.gz
+/.work/prod-*.dump
+/.work/quiz-fixture.json
+
+# ---------------------------------------------------------------------------
 # Python (ingest/)
 # ---------------------------------------------------------------------------
 __pycache__/

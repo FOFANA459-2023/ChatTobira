@@ -36,6 +36,30 @@ function request(path, init = {}) {
 /** Each check names what would be broken in production if it failed. */
 const CHECKS = [
   {
+    name: "the worker can reach the outside world over HTTPS",
+    why:
+      "everything this app does off-box is HTTPS — Supabase, Groq, Google — " +
+      "and an image with no CA bundle fails all of it identically while " +
+      "every page still renders. That shipped: node:*-slim carries no trust " +
+      "store, workerd verifies against one, and the only symptom a student " +
+      "saw was 'No material is loaded for that selection yet'",
+    async run() {
+      // The textbook picker: the cheapest route in the app that has to make
+      // an outbound call to answer. It is public (a trial visitor needs it),
+      // it costs no model quota, and a deployment with no database or no
+      // trust store cannot fake it.
+      const response = await request("/api/quiz");
+      assert(response.status === 200, `expected 200, got ${response.status}`);
+      const body = await response.json();
+      assert(Array.isArray(body.books), `expected a book list, got ${JSON.stringify(body)}`);
+      assert(
+        body.books.length > 0,
+        "the picker came back empty — the worker reached nothing, or the " +
+          "deployment has no corpus",
+      );
+    },
+  },
+  {
     name: "login page renders",
     why: "students who are signed out land here; a 500 locks everyone out",
     async run() {

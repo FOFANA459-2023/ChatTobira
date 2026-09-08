@@ -138,7 +138,28 @@ export function canTakePrompt(name: string, tokens: number): boolean {
  * leaves no time to fall back, which turns one slow provider into a failed
  * request. Three tiers at 25s still fit.
  */
-export const ACCEPT_BUDGET_MS = { spoken: 6_000, typed: 8_000, structured: 25_000 } as const;
+// `structured` is a paper, and a paper is not a turn somebody is listening
+// through: the app shows a loading state and the student goes and finds their
+// textbook. 25 seconds was inherited from the interactive budgets, and 30 is
+// what the measurements support.
+//
+// Measured against the real corpus (scripts/local-db.sh) on the model this
+// app actually runs — gemini-3.5-flash-lite, which wrangler.jsonc sets as
+// FALLBACK_MODEL because gemini-3.6-flash's free tier is twenty requests a
+// day:
+//
+//   gemini-3.5-flash-lite   8.7s   a full 18-item, 4-section Foundation 3 paper
+//   gemini-3.6-flash        38-50s the same paper, most of it reasoning tokens
+//   openai/gpt-oss-120b     9-45s  the free-tier backstop, on a smaller prompt
+//
+// 30 seconds is three times the model's typical run and still leaves 25 of
+// the route's 55-second deadline for a second tier — which is what the budget
+// is for, because the failure that actually happens is a provider returning
+// something unusable rather than a provider hanging.
+//
+// A deployment that switches FALLBACK_MODEL to a thinking model needs this
+// number raised to 50; that is the trade, and it costs the cascade.
+export const ACCEPT_BUDGET_MS = { spoken: 6_000, typed: 8_000, structured: 30_000 } as const;
 
 /** Reject if `work` has not settled within `ms`.
  *

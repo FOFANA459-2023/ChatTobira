@@ -21,11 +21,20 @@ pipeline, retrieval, model serving, auth, admin tooling, CI/CD.
   course's real test sheets, scoped to a topic ("test me on Topic 6"), graded
   instantly, with a study plan pointing at the pages to review. Furigana
   appears only on kanji the student hasn't been taught yet. The format is not
-  guesswork: 40 sat papers are in the corpus, and their section order,
-  instruction lines, option counts and mark allocations were tabulated into a
-  format spec the generator is planned from — while every question itself is
-  new and drawn from the textbook. A paper the student has already been asked
-  is not asked again.
+  guesswork: 40 sat papers are in the corpus, and every section type they use
+  — fourteen of them, from the in-place particle bracket to the plain-form
+  conversion to the English→katakana run — was tabulated with its instruction
+  line, mark allocation, option count and item range into a spec the generator
+  is planned from. Which sections a paper carries depends on the topic (a
+  Topic 3 paper cannot ask for the plain form; the course teaches it in Topic
+  10) and rotates between sittings, so a student's second paper is not their
+  first with the nouns moved.
+  Every question itself is new and drawn from the textbook, and the *wording*
+  is too: the book's own preferences are counted before the paper is written,
+  so a Foundation 2 paper says じゃありません and never ではありません, which
+  its book contains once in 253,000 characters. Nothing may be asked twice —
+  across sections, not just within one — and a paper the student has already
+  been asked is not asked again.
 - **Invite-only access** — the admin invites students by email; they sign in
   with a magic link. No passwords for students, no public signup.
 
@@ -140,6 +149,20 @@ cd web && npm install && npm run dev
 A new machine needs no re-transcription: `ingest restore` pulls sources and
 transcripts back from the backup bucket and `ingest push` rebuilds the
 database from there.
+
+Development never points at the production database. There is a copy:
+
+```bash
+scripts/local-db.sh up               # pg_dump prod (read-only) into a container
+node web/scripts/export-fixture.mjs  # the corpus the quiz harness reads
+cd web && npx vitest run quiz-corpus # retrieval, grounding, duplicates
+QUIZ_LIVE=1 npx vitest run quiz-live # and a real paper from a real model
+```
+
+The copy carries the books and the past papers and none of the students: the
+dump excludes every per-student table, so a hundred classmates' email
+addresses and coursework stay where they are. `quiz-corpus` and `quiz-live`
+skip themselves when the fixture is absent, which is how CI runs them.
 
 ---
 

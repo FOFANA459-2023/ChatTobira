@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { blueprint } from "@/lib/paper-format";
+import { archetypes, blueprint } from "@/lib/paper-format";
 import type { Quiz, QuizItem, QuizSection } from "@/lib/quiz";
 import { itemFault, tidyQuiz, validateQuiz } from "@/lib/quiz-validate";
 
@@ -64,24 +64,92 @@ describe("content validity", () => {
       expect(itemFault(item({ review }), section()), review).toMatch(/machinery/);
     }
   });
+
+  it("does not mistake a real topic for a reference to the machinery", () => {
+    // "resources" contains "source". Seen on a live paper: a good item
+    // rejected for a review reading 「Topic 8 — library resources and
+    // location」, which is precisely what Topic 8 is about.
+    // Note the standalone word still fails, and should: "the source" is what
+    // the rule is for. What must not fail is a word that merely contains it.
+    for (const review of [
+      "Topic 8 — library resources and location (p. 112)",
+      "Topic 3 — course materials 12 (p. 30)",
+      "Topic 6 — resourceful vocabulary (p. 70)",
+    ]) {
+      expect(itemFault(item({ review }), section()), review).toBeNull();
+    }
+  });
 });
 
 describe("format validity", () => {
   it("rejects an option count the paper does not print", () => {
-    // The a〜c sections print three. Four options is a different section of a
-    // different paper.
-    const archetype = blueprint("F2", "grammar").find((a) => a.choices === 3)!;
+    // The a〜c sections print three. Four options is a different section of
+    // a different paper.
+    const archetype = blueprint("F2", "grammar").find((a) => a.id === "f2g_bracket")!;
     const fault = itemFault(
       item({ choices: ["に", "を", "が", "で"], answer: "に" }),
       section(),
       archetype,
     );
-    expect(fault).toMatch(/4 options where the paper prints 3/);
+    expect(fault).toMatch(/4 options where the paper prints 2 or 3/);
   });
 
   it("accepts the count the paper does print", () => {
-    const archetype = blueprint("F2", "grammar").find((a) => a.choices === 3)!;
+    const archetype = blueprint("F2", "grammar").find((a) => a.id === "f2g_bracket")!;
     expect(itemFault(item(), section(), archetype)).toBeNull();
+  });
+
+  it("accepts either count where the papers print both", () => {
+    // The in-place bracket runs to two options on the Topic 9 paper and three
+    // on the Topic 11 one. Insisting on the plan's count rejected an item for
+    // a fault the course itself commits, and those were good questions.
+    const archetype = blueprint("F2", "grammar").find((a) => a.id === "f2g_bracket")!;
+    expect(archetype.choiceCounts).toEqual([2, 3]);
+    const two = item({ choices: ["まで", "までに"], answer: "までに" });
+    expect(itemFault(two, section(), archetype)).toBeNull();
+  });
+
+  it("requires a question word in the question-word section", () => {
+    // Seen on a paper generated in development: a 〜てもいいですか item filed
+    // under 「正しい疑問詞をひらがなで書いてください」. It is a good question and
+    // it is not this section's question, so the instruction above it asks the
+    // student for something the sentence does not want.
+    const archetype = archetypes("F2", "grammar").find((a) => a.id === "f2g_question_word")!;
+    const written = section({ form: "written" });
+    const wrong = item({
+      type: "fill_blank",
+      choices: undefined,
+      question: "Q：部屋でたばこを（　）てもいいですか。 A：はい、いいですよ。",
+      answer: "すっ",
+    });
+    expect(itemFault(wrong, written, archetype)).toMatch(/question-word item answered/);
+    expect(itemFault({ ...wrong, answer: "どこ" }, written, archetype)).toBeNull();
+  });
+
+  it("requires kanji in the write-it-in-kanji section", () => {
+    // Seen on a paper generated in the Docker image: 「このまちはとても
+    // （ しずか ）です。」 answered しずか, under an instruction that says to
+    // write the hiragana in kanji. It gives the answer away AND marks 静か —
+    // the answer the section asked for — wrong.
+    const archetype = archetypes("F2", "kanji").find((a) => a.id === "f2k_word_bank")!;
+    const written = section({ form: "written", word_bank: ["しずか", "ノート"] });
+    const base = item({ type: "fill_blank", choices: undefined });
+    expect(itemFault({ ...base, answer: "しずか" }, written, archetype)).toMatch(/answered in kana/);
+    // With the reading supplied, the answer can be matched to its bank entry
+    // across the script change the section is built on.
+    expect(
+      itemFault({ ...base, answer: "静か", answer_kana: "しずか" }, written, archetype),
+    ).toBeNull();
+    // Without one there is nothing to compare, so the bank rule stands down
+    // and the kanji rule carries the section.
+    expect(itemFault({ ...base, answer: "静か" }, written, archetype)).toBeNull();
+    // The instruction says katakana is written as it is, so a loanword answer
+    // is correct exactly as the bank prints it.
+    expect(itemFault({ ...base, answer: "ノート" }, written, archetype)).toBeNull();
+    // And so does a Latin acronym: the course writes DVD, CD and ATM the way
+    // everyone else does, and a live paper's bank held DVD.
+    const latin = section({ form: "written", word_bank: ["DVD", "しずか"] });
+    expect(itemFault({ ...base, answer: "DVD" }, latin, archetype)).toBeNull();
   });
 
   it("requires ○ or × for a mark-the-statement item", () => {
