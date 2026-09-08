@@ -40,14 +40,26 @@ describe("who answers a typed question", () => {
 });
 
 describe("who builds a practice paper", () => {
-  it("keeps the metered free tiers for work that needs them", () => {
-    // Gemini's structured-output budget is 20 requests a day; one student
-    // pressing "New Test" can spend it in an afternoon.
-    expect(providers("structured", { promptTokens: 3000 })).toEqual([
-      "deepseek",
-      "groq",
-      "google",
-    ]);
+  it("asks only the tiers that can finish one", () => {
+    // Not a preference between providers — a measurement of whether they
+    // return a paper at all. On the real corpus, on the real schema:
+    //
+    //   google   gemini-3.5-flash-lite    10.1s   17 items, 4 sections
+    //   groq     openai/gpt-oss-120b      9-45s   on the free tier's prompt
+    //   deepseek deepseek-v4-flash       138.5s   returned nothing
+    //
+    // generateObject returns a whole object or nothing, and this route's
+    // ceiling is 60 seconds, so a 138-second tier in front is not a slow
+    // first choice — it is a guaranteed timeout for every student.
+    expect(providers("structured", { promptTokens: 3000 })).toEqual(["google", "groq"]);
+  });
+
+  it("still gives DeepSeek the jobs it is good at", () => {
+    // The point of paying for it: uncapped, and the only tier that can hold a
+    // prompt above Groq's input ceiling. Keeping it out of paper generation
+    // costs none of that.
+    expect(providers("chat_answer", { promptTokens: 3000 })).toContain("deepseek");
+    expect(providers("voice_turn", { promptTokens: 500 })).toContain("deepseek");
   });
 });
 

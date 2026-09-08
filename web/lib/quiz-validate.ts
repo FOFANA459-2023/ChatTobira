@@ -17,8 +17,9 @@
  * but a silent filter is one nobody can tune.
  */
 
-import type { SectionArchetype } from "./paper-format";
+import { allowedChoiceCounts, type SectionArchetype } from "./paper-format";
 import { normalizeAnswer, type Quiz, type QuizItem, type QuizSection } from "./quiz";
+import { offStyleForms, unattestedKanji, type HouseStyle } from "./textbook-usage";
 
 export interface Rejection {
   section: number;
@@ -26,7 +27,32 @@ export interface Rejection {
   reason: string;
 }
 
+/** What the material the paper was drawn from allows.
+ *
+ * Both fields are measurements of the student's own book — see
+ * lib/textbook-usage.ts — and both are optional, because the checks they
+ * enable are about grounding rather than about whether an item can be
+ * answered. A caller that has no corpus (a unit test, the admin preview) gets
+ * the answerability checks and nothing else.
+ */
+export interface MaterialContext {
+  /** Forms this book does not use, with the ones it does. */
+  style?: HouseStyle;
+  /** Every kanji character the book contains. */
+  attestedKanji?: Set<string>;
+}
+
 const MARKS = /^[○◯〇⭕×✕✖❌]$/;
+
+/** The question words the Foundation books teach, which is the whole set a
+ * 疑問詞 section can be answered with. Written in kana because the section
+ * asks for kana — 「正しい疑問詞をひらがなで書いてください」. */
+const QUESTION_WORDS = new Set([
+  "なに", "なん", "どこ", "いつ", "だれ", "どなた", "どう", "どうして", "なぜ",
+  "いくら", "いくつ", "なんじ", "なんにち", "なんようび", "なんさい", "なんにん",
+  "どの", "どんな", "どちら", "どっち", "どれ", "どのぐらい", "どのくらい",
+  "なんの", "なにが", "なにを", "なんで",
+]);
 
 /** Strip readings and markers so two spellings of one answer compare equal. */
 function bare(text: string): string {
@@ -43,9 +69,9 @@ function bare(text: string): string {
  * correct answer in the most common section on the paper; requiring a shared
  * opening character catches the answer that came from nowhere.
  */
-function fromBank(answer: string, bank: string[]): boolean {
-  const target = bare(answer);
-  if (!target) return false;
+function fromBank(answer: string, bank: string[], reading?: string): boolean {
+  const forms = [answer, reading ?? ""].map(bare).filter(Boolean);
+  if (forms.length === 0) return false;
   // The leading character, and only that.
   //
   // A Japanese verb conjugates after its stem: 行きます, 行った and 行こう all
@@ -53,11 +79,18 @@ function fromBank(answer: string, bank: string[]): boolean {
   // too strict — measured live, a two-character anchor rejected したら against
   // します and 行き against 行きます, which are the correct answers. This check
   // is here to catch an answer that came from nowhere, not to conjugate.
+  //
+  // Both the answer and its reading are tried, because the bank and the
+  // answer are not always in the same script. The Foundation papers print
+  // their banks in hiragana (かります) and a model writes the answer in kanji
+  // (借りて); anchored on the first character those share nothing, and a live
+  // run lost all five items of the paper's biggest section to it. The prompt
+  // now asks for the bank's own script, and this is the belt to that brace.
   const anchor = (word: string) => bare(word).slice(0, 1);
-  const targetAnchor = anchor(target);
+  const anchors = new Set(forms.map(anchor));
   return bank.some((word) => {
     const candidate = anchor(word);
-    return Boolean(candidate) && candidate === targetAnchor;
+    return Boolean(candidate) && anchors.has(candidate);
   });
 }
 
@@ -145,6 +178,7 @@ export function itemFault(
   item: QuizItem,
   section: QuizSection,
   archetype?: SectionArchetype,
+  material: MaterialContext = {},
 ): string | null {
   const form = section.form ?? archetype?.form;
 
@@ -154,8 +188,48 @@ export function itemFault(
   if (!item.review.trim()) return "empty review";
   // The review is the one line a student is meant to act on, and it has to be
   // findable in a book they own.
-  if (/past paper|excerpt|source|material \d|handout/i.test(item.review)) {
+  // Word boundaries, because without them this rejected a perfectly good
+  // review: 「Topic 8 — library resources and location」 contains "source"
+  // inside "resources", and the item was thrown away for naming the thing the
+  // topic is actually about.
+  if (/\bpast papers?\b|\bexcerpts?\b|\bsources?\b|\bmaterial \d|\bhandouts?\b/i.test(item.review)) {
     return `review points at the machinery: ${item.review.slice(0, 40)}`;
+  }
+
+  // Everything the student reads on this item, which is what the two
+  // grounding checks below are about — the passage belongs to the section and
+  // is checked once, there.
+  const shown = [item.question, item.sentence ?? "", ...(item.choices ?? []), item.answer].join(
+    " ",
+  );
+
+  // A form the book does not use. Correct Japanese, wrong course: a student
+  // handed ではありません on a Foundation 2 paper cannot check it against the
+  // book they own, because their book says it once in 253,000 characters.
+  if (material.style?.length) {
+    // Enforced sets only: a grammatical construction the course has not
+    // taught costs the item its place, a spelling does not. See
+    // VariantSet.enforce — the Foundation book writes 友達 in its kanji lists
+    // and the course's own early papers write 友だち, and dropping questions
+    // over that would be stricter than the course.
+    const strays = offStyleForms(shown, material.style, { enforcedOnly: true });
+    if (strays.length > 0) {
+      const preferred = material.style
+        .filter((entry) => entry.avoid.some((form) => strays.includes(form)))
+        .flatMap((entry) => entry.prefer);
+      return `uses ${strays.join(", ")}, which this book does not (it writes ${preferred.join(", ")})`;
+    }
+  }
+
+  // A character the book never prints. The rule has been in the prompt from
+  // the start — "never a character the course has not taught" — and a prompt
+  // is a request. This is the check: not a judgement about difficulty, just
+  // whether the character is in the student's book at all.
+  if (material.attestedKanji?.size) {
+    const missing = unattestedKanji(shown, material.attestedKanji);
+    if (missing.length > 0) {
+      return `uses kanji this book never prints: ${missing.join("")}`;
+    }
   }
 
   if (form === "maru_batsu" || item.type === "true_false") {
@@ -167,10 +241,15 @@ export function itemFault(
   if (form === "bracket" || form === "lettered" || item.type === "multiple_choice") {
     const choices = item.choices ?? [];
     if (choices.length < 2) return "choice item with fewer than two options";
-    // The count the paper actually prints for this section. A three-option
-    // a〜c section with four options is not the section the student sat.
-    if (archetype?.choices && choices.length !== archetype.choices) {
-      return `${choices.length} options where the paper prints ${archetype.choices}`;
+    // The counts the paper actually prints for this section. A three-option
+    // a〜c section with four options is not the section the student sat — but
+    // several sections print two counts across the corpus (the Topic 9
+    // bracket two options, the Topic 11 bracket three), and rejecting the
+    // other attested one threw away good questions for a fault the papers
+    // themselves commit.
+    const counts = archetype ? allowedChoiceCounts(archetype) : [];
+    if (counts.length > 0 && !counts.includes(choices.length)) {
+      return `${choices.length} options where the paper prints ${counts.join(" or ")}`;
     }
     const seen = new Set(choices.map(bare));
     if (seen.size !== choices.length) return "duplicate options";
@@ -184,7 +263,55 @@ export function itemFault(
 
   // Written answers.
   if (item.choices?.length) return "written item carries choices";
-  if (section.word_bank?.length && !fromBank(item.answer, section.word_bank)) {
+
+  // A question-word section must be answered with a question word.
+  //
+  // Seen on a paper generated in development: 「Q：部屋の中でたばこを（　）て
+  // もいいですか。 A：はい、いいですよ。」 filed under 「＿＿に正しい疑問詞を
+  // ひらがなで書いてください」. It is a perfectly good 〜てもいいですか item and
+  // it is not a question-word item, so the instruction above it tells the
+  // student to write something the sentence does not want — and the answer
+  // they would naturally give is marked wrong.
+  //
+  // The list is closed because the set is: these are the question words the
+  // Foundation books teach, and the section exists to drill exactly them.
+  if (archetype?.skill === "question-word" && !QUESTION_WORDS.has(bare(item.answer))) {
+    return `question-word item answered ${item.answer.slice(0, 12)}`;
+  }
+
+  // A "write it in kanji" section must be answered in kanji.
+  //
+  // Seen on a paper generated in the Docker image: 「このまちはとても（ しずか ）
+  // です。」 answered しずか, under an instruction that says
+  // 「ひらがなは漢字にしますが、カタカナはそのまま書いてください」. The item both
+  // gives the answer away and marks the right answer wrong — a student who
+  // writes 静か, which is what the section asked for, is told they are
+  // incorrect.
+  //
+  // Katakana passes, because the instruction says so in as many words: the
+  // loanwords in the bank are answered unchanged, and knowing which words
+  // those are is part of what the section tests. Latin passes for the same
+  // reason and was learned the same way — the bank on a live Topic 8 paper
+  // held DVD, which the course writes in Latin letters exactly as everyone
+  // else does, and the item was rejected for answering it correctly.
+  if (archetype?.skill === "kanji-writing" && !/[一-鿿ァ-ヶA-Za-z]/u.test(item.answer)) {
+    return `kanji-writing item answered in kana: ${item.answer.slice(0, 12)}`;
+  }
+  // The bank check, where the bank and the answer can be compared at all.
+  //
+  // On a "write it in kanji" section they are in different scripts BY DESIGN:
+  // the box prints しずか and the answer is 静か, which share no leading
+  // character and never will. The reading is what bridges them, so it is used
+  // when the generator supplied one — and when it did not, this check is
+  // simply not applicable. The kanji rule above already enforces what that
+  // section is actually for.
+  const bankComparable =
+    archetype?.skill !== "kanji-writing" || Boolean(item.answer_kana);
+  if (
+    section.word_bank?.length &&
+    bankComparable &&
+    !fromBank(item.answer, section.word_bank, item.answer_kana)
+  ) {
     return `answer ${item.answer.slice(0, 16)} is not a form of any word in the bank`;
   }
   return null;
@@ -199,6 +326,7 @@ export function itemFault(
 export function validateQuiz(
   quiz: Quiz,
   blueprint: SectionArchetype[] = [],
+  material: MaterialContext = {},
 ): { quiz: Quiz; rejected: Rejection[] } {
   const rejected: Rejection[] = [];
 
@@ -208,7 +336,7 @@ export function validateQuiz(
       const usedBankWords = new Set<string>();
 
       const items = section.items.filter((item, itemIndex) => {
-        const fault = itemFault(item, section, archetype);
+        const fault = itemFault(item, section, archetype, material);
         if (fault) {
           rejected.push({ section: sectionIndex, item: itemIndex, reason: fault });
           return false;

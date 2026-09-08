@@ -114,17 +114,100 @@ export function similarity(a: string, b: string): number {
  */
 export const SAME_FRAME = 0.45;
 
+/** Above this, two items are the same question however they are labelled.
+ *
+ * A second, higher bar than SAME_FRAME, and consulted without asking whether
+ * the two items agree on anything else. That is the point: SAME_FRAME only
+ * fires once the point tested and the expected answer already match, so it
+ * cannot see the repeat where the generator relabels what it thinks it is
+ * testing. Section I calls an item's target 「〜ながら」 and section III calls
+ * the same item 「simultaneous actions」, and two questions that were the same
+ * sentence with the noun swapped survive as different questions.
+ *
+ * Measured on loose skeletons of real item shapes:
+ *
+ *   noun swapped only     「私は学校へ（　）」/「私は大学へ（　）」     0.83
+ *   name and number only  「リーさんは7時に…」/「山田さんは9時に…」   0.90
+ *   same point, new frame 「まえに」on a shop / on a station            0.38
+ *
+ * 0.72 sits above what a genuinely rewritten sentence scores and below the
+ * name-and-number swap the requirement names by hand. The cost of a false
+ * positive is one item; the cost of a false negative is a student meeting
+ * question 3 again as question 14.
+ */
+export const SAME_QUESTION = 0.72;
+
 export interface Fingerprint {
   exact: string;
   /** The point tested and the answer expected, without the sentence. */
   pattern: string;
   /** The frame the point is tested on, for similarity comparison. */
   frame: string;
+  /** What the item says it tests, reduced to a comparable key. Two items with
+   * the same skill key drill the same knowledge point and only one of them
+   * belongs on the paper — whatever section each of them is in. */
+  skill: string;
+  /** ○× statements about one passage are SUPPOSED to look alike, and are
+   * exempted from the frame-similarity test for that reason. */
+  comprehension: boolean;
 }
 
 const normalise = (text: string) => text.replace(FURIGANA, "").replace(NOISE, "").toLowerCase();
 
-/** What an item tests, in the three layers described above. */
+/** The wording a generator wraps around a grammar point when it is naming it
+ * rather than writing it: 「〜ながら form」, 「the て-form of 行く」, 「particle
+ * usage: に」. Two items whose targets differ only by this are two items
+ * testing the same thing. */
+const TARGET_NOISE =
+  /\b(the|a|an|of|in|for|with|and|or|to|use|usage|using|used|form|forms|pattern|patterns|grammar|point|structure|conjugation|particle|particles|expression|expressions|verb|adjective|noun|counter|reading|writing|kanji|word|vocabulary|meaning|plain|polite|past|present|negative|affirmative)\b/g;
+
+/** What an item claims to test, reduced so two labels for one point collide.
+ *
+ * The target is free text written by the model, and it writes it differently
+ * every time — 「〜てから」, 「te-form + kara」, 「sequence: 〜てから」 are the
+ * same point three ways. Stripping the scaffolding words and everything that
+ * is not a Japanese character or a letter leaves the point itself, which is
+ * what two items may not share.
+ */
+export function skillKey(item: QuizItem): string {
+  const body = `${item.question ?? ""} ${item.sentence ?? ""}`;
+  const marked = /【([^】]+)】/.exec(body)?.[1] ?? "";
+  const raw = (item.target ?? item.grammar_point ?? marked ?? "").replace(FURIGANA, "");
+  // Where the target names the point in Japanese, the Japanese IS the point
+  // and every English word around it is commentary — 「grammar point: 〜てから
+  // (sequence)」 and 「〜てから」 are one target with a gloss on it. Stripping a
+  // fixed list of scaffolding words could never keep up with the glosses a
+  // model invents; keeping only the Japanese does not have to.
+  const stripped = raw.toLowerCase().replace(TARGET_NOISE, "");
+  const japanese = stripped.replace(
+    /[^\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu,
+    "",
+  );
+  const mixed = stripped.replace(
+    /[^\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}a-z0-9]/gu,
+    "",
+  );
+  // Below three characters the Japanese is not a grammar point, it is a
+  // PARTICLE — and 「に with a time」 and 「に with a person」 are two genuinely
+  // different questions that both reduce to 「に」. There the English gloss is
+  // the only thing telling them apart, so it is kept.
+  const key = japanese.length >= 3 ? japanese : mixed;
+  // A key with no Japanese in it at all is a CATEGORY, not a point: the model
+  // wrote 「kanji discrimination」 on three items and the noise filter left
+  // 「discrimination」 on all three. Seen live — three good 待/持-style items
+  // dropped as one question because the paper labelled them lazily. Where the
+  // label says only what KIND of question this is, the answer says which
+  // question, so it joins the key.
+  if (key && !/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(key)) {
+    return `${key}|${normalise(item.answer_kana || item.answer)}`;
+  }
+  // A target that reduced to nothing (an English label made entirely of
+  // scaffolding words) falls back to the answer, so the item still has an
+  // identity to be compared on rather than colliding with every other empty.
+  return key || normalise(item.answer_kana || item.answer);
+}
+
+/** What an item tests, in the layers described above. */
 export function fingerprint(item: QuizItem): Fingerprint {
   const body = `${item.question ?? ""} ${item.sentence ?? ""}`;
   // The target the generator declared, falling back to the marked word and
@@ -136,6 +219,8 @@ export function fingerprint(item: QuizItem): Fingerprint {
     exact: normalise(body),
     pattern: `${target}|${answer}`,
     frame: looseSkeleton(body),
+    skill: skillKey(item),
+    comprehension: item.type === "true_false",
   };
 }
 
@@ -151,6 +236,98 @@ export function isRepeat(item: Fingerprint, seen: Fingerprint[]): boolean {
       prior.exact === item.exact ||
       (prior.pattern === item.pattern && similarity(prior.frame, item.frame) >= SAME_FRAME),
   );
+}
+
+/** Two items on the same paper that are the same question.
+ *
+ * Deliberately stricter than `isRepeat`, and deliberately blind to which
+ * section each item came from. Both of those are the requirement: a paper may
+ * not ask one thing twice, and section boundaries are exactly where a
+ * generator hides a repeat — it writes 「毎日、学校へ行きます」 for the
+ * particle section and 「毎日、大学へ行きます」 for the word-bank section, and
+ * calls them different questions because it wrote a different label on each.
+ *
+ * Three ways to be the same question:
+ *
+ *   the same knowledge point, whatever each item called it (skill);
+ *   the same sentence with the names and numbers changed (frame ≥
+ *     SAME_QUESTION), which is a repeat even when the two items are testing
+ *     genuinely different points, because the student is reading the same
+ *     line twice;
+ *   the pattern-and-frame test `isRepeat` already applies.
+ *
+ * ○× items are exempt from the frame test and from the skill test: four
+ * statements about one passage share a subject, a vocabulary and often a
+ * clause, and they are supposed to.
+ */
+function sameQuestion(item: Fingerprint, prior: Fingerprint): boolean {
+  if (prior.exact === item.exact) return true;
+  if (item.comprehension || prior.comprehension) return false;
+  if (item.skill && prior.skill && item.skill === prior.skill) return true;
+  if (!comparableFrames(item, prior)) return false;
+  if (similarity(prior.frame, item.frame) >= SAME_QUESTION) return true;
+  return prior.pattern === item.pattern && similarity(prior.frame, item.frame) >= SAME_FRAME;
+}
+
+/** Placeholders: what the skeleton put in place of a name, a loanword or a
+ * number, none of which say anything about what a question tests. */
+const PLACEHOLDERS = /[＊＃・]/g;
+
+/** Is there enough sentence here for "these two look alike" to mean anything?
+ *
+ * There is not, on a section whose items ARE one word. The katakana
+ * transcription section asks 「report （　）」, 「computer （　）」, 「coffee
+ * （　）」 — every loanword is a Latin run, every Latin run collapses to ＊, and
+ * every frame is the single character ＊, which is identical to every other.
+ * Measured on a live paper: three of the four items in that section were
+ * dropped as "the same sentence as an earlier item", and they were three
+ * different words.
+ *
+ * Four characters of actual content is the bar. The repeat this check exists
+ * for — 「リーさんは7時に起きます」 against 「山田さんは9時に起きます」 — keeps
+ * five (時おきます) after the name and the number collapse, and a one-word
+ * prompt keeps none.
+ */
+function comparableFrames(item: Fingerprint, prior: Fingerprint): boolean {
+  const content = (frame: string) => frame.replace(PLACEHOLDERS, "").length;
+  return content(item.frame) >= 4 && content(prior.frame) >= 4;
+}
+
+/** Drop every item that repeats something already asked on THIS paper.
+ *
+ * Runs across the whole paper rather than within a section, which is the
+ * whole point — see `sameQuestion`. Sections emptied by it are removed, so
+ * the route's length gate sees a paper that only reached its length by
+ * repeating itself as the short paper it is and lets the next provider write
+ * a better one.
+ */
+export function dropDuplicates<T extends { sections: { items: QuizItem[] }[] }>(
+  quiz: T,
+): { quiz: T; removed: number; reasons: string[] } {
+  const seen: Fingerprint[] = [];
+  const reasons: string[] = [];
+
+  const sections = quiz.sections
+    .map((section) => ({
+      ...section,
+      items: section.items.filter((item) => {
+        const print = fingerprint(item);
+        const clash = seen.find((prior) => sameQuestion(print, prior));
+        if (clash) {
+          reasons.push(
+            clash.skill && clash.skill === print.skill
+              ? `already drilled ${print.skill.slice(0, 24)}`
+              : `same sentence as an earlier item (${item.question.slice(0, 24)})`,
+          );
+          return false;
+        }
+        seen.push(print);
+        return true;
+      }),
+    }))
+    .filter((section) => section.items.length > 0);
+
+  return { quiz: { ...quiz, sections }, removed: reasons.length, reasons };
 }
 
 /** Drop repeats from a paper, against the paper itself and against history.

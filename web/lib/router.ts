@@ -114,11 +114,37 @@ const PREFERENCE: Record<ModelTask, Provider[]> = {
   // answering. Groq stays in the chain below it for the short typed turns
   // that do fit, where it is still three times faster and free.
   chat_answer: ["deepseek", "groq", "google"],
-  // DeepSeek first because a paper is high-volume, non-interactive and
+  // DeepSeek led this list because a paper is high-volume, non-interactive and
   // validated after the fact — exactly the shape of work worth moving off a
-  // metered free tier. Gemini's own budget here is 20 requests a day, which
-  // one student pressing "New Test" can spend in an afternoon.
-  structured: ["deepseek", "groq", "google"],
+  // metered free tier. The reasoning was right and both of its premises turned
+  // out to be wrong.
+  //
+  // It cannot finish a paper. generateObject returns a whole object or
+  // nothing, and a real paper is a 17-item schema with an explanation and a
+  // review reference on every item. Measured twice, on two days, against the
+  // real corpus (scripts/local-db.sh):
+  //
+  //   google   gemini-3.5-flash-lite    10.1s   17 items, 4 sections
+  //   groq     openai/gpt-oss-120b      9-45s   on the free tier's smaller prompt
+  //   deepseek deepseek-v4-flash       138.5s   returned nothing at all
+  //
+  // This route's ceiling is 60 seconds. A tier that needs 138 of them is not
+  // a slow first choice, it is a guaranteed timeout in front of every student
+  // — which is exactly what "Could not generate a test" was. A reasoning model
+  // is the wrong tool for filling a large schema: it spent 15,490 of its
+  // 17,493 output tokens thinking.
+  //
+  // And the free tier it was moving work off is not the one this app uses.
+  // "20 requests a day" is gemini-3.6-flash's budget; wrangler.jsonc sets
+  // FALLBACK_MODEL to gemini-3.5-flash-lite for that exact reason, and its
+  // budget is a real one. Groq behind it is free too and answers in nine
+  // seconds when the prompt fits its 8,000-token-a-minute ceiling.
+  //
+  // So DeepSeek is not here. It keeps every job it is genuinely good at —
+  // chat_answer and voice_turn above, where it is paid, uncapped, and the only
+  // tier that can hold a prompt over Groq's input limit. It is not asked to do
+  // the one thing it cannot.
+  structured: ["google", "groq"],
 };
 
 /** The models to try, in order, for this task right now.

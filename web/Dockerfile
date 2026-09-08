@@ -105,6 +105,21 @@ LABEL org.opencontainers.image.title="chattobira-web" \
       org.opencontainers.image.source="https://github.com/FOFANA459-2023/ChatTobira" \
       org.opencontainers.image.licenses="UNLICENSED"
 
+# ca-certificates, because workerd verifies TLS against the system trust store
+# and node:*-slim ships without one. Everything this worker does off-box is
+# HTTPS — Supabase, Groq, Google, DeepSeek — and with no CA bundle every one of
+# them fails identically:
+#
+#   kj/compat/tls.c++:269: failed: TLS peer's certificate is not trusted;
+#   reason = unable to get local issuer certificate
+#
+# which arrives in the app as an ordinary query error and reaches the student
+# as "No material is loaded for that selection yet." The smoke test never saw
+# it because every check it makes is answered before the worker needs the
+# network — a page that renders, a route that refuses an anonymous caller — so
+# the image passed CI for as long as nobody asked it to fetch anything. See
+# scripts/smoke.mjs, which now asks.
+#
 # tini reaps the workerd child process wrangler spawns; without an init a
 # stopped container leaves it behind.
 #
@@ -114,7 +129,7 @@ LABEL org.opencontainers.image.title="chattobira-web" \
 # image came from npm's OWN bundled dependencies (tar, pacote, sigstore,
 # brace-expansion, ip-address, picomatch), none of them from anything this
 # project wrote or chose. Deleting it is more honest than suppressing them.
-RUN apt-get update && apt-get install -y --no-install-recommends tini \
+RUN apt-get update && apt-get install -y --no-install-recommends tini ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
  && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 

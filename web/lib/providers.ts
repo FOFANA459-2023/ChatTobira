@@ -124,7 +124,27 @@ export function canTakePrompt(name: string, tokens: number): boolean {
  * Measured acceptance through the AI SDK is ~1.9s for DeepSeek and under a
  * second for Groq, both including the reasoning models' first thinking token.
  */
-export const ACCEPT_BUDGET_MS = { spoken: 6_000, typed: 12_000, structured: 45_000 } as const;
+// `spoken` and `typed` are turns a student is listening through; `structured`
+// is a paper, and nobody listens in silence for one — the app shows a loading
+// state and they go and find their textbook.
+//
+// `typed` stays at 12 seconds, which is main's value. It was 8 on the branch
+// this merges from, and that change belonged to a chat reordering main
+// reverted; re-landing it as a side effect of a quiz merge would change the
+// chat route's failover on no evidence.
+//
+// `structured` comes down from 45 seconds to 30, and that IS measured.
+// Against the real corpus (scripts/local-db.sh) on the same prompt:
+//
+//   google  gemini-3.5-flash-lite    10.1s   17 items, 4 sections
+//   groq    openai/gpt-oss-120b      9-45s   on the smaller free-tier prompt
+//   deepseek deepseek-v4-flash      138.5s   returned nothing at all
+//
+// 30 is three times the working model's run and leaves 25 of the route's
+// 55-second deadline for a second tier. 45 left ten, which is not enough to
+// try anything else — and the failure that actually happens is a provider
+// returning something unusable, not a provider hanging.
+export const ACCEPT_BUDGET_MS = { spoken: 6_000, typed: 12_000, structured: 30_000 } as const;
 
 /** Reject if `work` has not settled within `ms`.
  *

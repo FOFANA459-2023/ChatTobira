@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   archetypes,
   blueprint,
+  fitsTopic,
+  planPaper,
   instructionLanguage,
   markLine,
   type Level,
@@ -109,11 +111,143 @@ describe("blueprints", () => {
     expect(blueprint("F2", "grammar")[0].id).toBe("f2g_bracket");
   });
 
-  it("never plans two sections that both own a passage it cannot show twice", () => {
+  it("never plans more than two sections that write their own passage", () => {
+    // Two texts is what a paper — and the model's output budget — can carry.
+    // A section that says 「上の文について」 does not count: it repeats the
+    // text above it, which is how the Foundation 3 papers print their ○×
+    // block under the cloze it is about.
     for (const level of LEVELS) {
       for (const kind of KINDS) {
-        const withPassage = blueprint(level, kind).filter((a) => a.passage);
-        expect(withPassage.length, `${level}/${kind}`).toBeLessThanOrEqual(2);
+        for (let variant = 0; variant < 6; variant++) {
+          const owners = planPaper(level, kind, { variant }).filter(
+            (a) => a.passage && !a.sharesPassage,
+          );
+          expect(owners.length, `${level}/${kind} v${variant}`).toBeLessThanOrEqual(2);
+        }
+      }
+    }
+  });
+
+  it("never plans a 「上の文について」 section with no passage above it", () => {
+    // Planned alone it asks about a text nobody printed, which is the exact
+    // fault the route throws whole papers away for.
+    for (const level of LEVELS) {
+      for (const kind of KINDS) {
+        for (let variant = 0; variant < 6; variant++) {
+          const plan = planPaper(level, kind, { variant });
+          plan.forEach((section, index) => {
+            if (!section.sharesPassage) return;
+            const above = plan
+              .slice(0, index)
+              .some((earlier) => earlier.passage && !earlier.sharesPassage);
+            expect(above, `${level}/${kind} v${variant}: ${section.id}`).toBe(true);
+          });
+        }
+      }
+    }
+  });
+});
+
+describe("coverage of the real papers", () => {
+  it("can reach every section type the corpus contains", () => {
+    // The failure this guards against is silent and was live: the catalogue
+    // held fifteen section archetypes and the fixed blueprint used four, so
+    // eleven real question types — the question-word fill, the plain-form
+    // conversion, the kanji-radical composition, the English→katakana
+    // transcription — could not appear on any generated paper however many a
+    // student sat. Rotation is only worth having if it reaches all of them.
+    for (const level of LEVELS) {
+      for (const kind of KINDS) {
+        const reachable = new Set<string>();
+        for (let variant = 0; variant < 20; variant++) {
+          for (const section of planPaper(level, kind, { variant })) reachable.add(section.id);
+        }
+        for (const archetype of archetypes(level, kind)) {
+          expect(reachable.has(archetype.id), `${level}/${kind}: ${archetype.id}`).toBe(true);
+        }
+      }
+    }
+  });
+
+  it("moves the paper on between sittings", () => {
+    // Two students' second papers should not be their first papers. The spine
+    // is shared by design — every Foundation 2 grammar paper opens with the
+    // bracket section, because every sat one does — so what has to change is
+    // the rotating slot.
+    for (const level of LEVELS) {
+      for (const kind of KINDS) {
+        const first = planPaper(level, kind, { variant: 0 }).map((a) => a.id);
+        const second = planPaper(level, kind, { variant: 1 }).map((a) => a.id);
+        expect(second, `${level}/${kind}`).not.toEqual(first);
+      }
+    }
+  });
+
+  it("is deterministic for a given variant", () => {
+    // A paper has to be reproducible from the row in quiz_items, or a bad
+    // section cannot be traced back to the plan that asked for it.
+    expect(planPaper("F3", "kanji", { variant: 3 })).toEqual(
+      planPaper("F3", "kanji", { variant: 3 }),
+    );
+  });
+
+  it("never plans a section the topic has not reached", () => {
+    // A Topic 3 paper cannot ask for the plain form: the course teaches it in
+    // Topic 10. Getting this wrong does not produce a broken paper, it
+    // produces a paper the student is entitled to get wrong.
+    const early = planPaper("F2", "grammar", { topic: 3, variant: 0 }).map((a) => a.id);
+    expect(early).not.toContain("f2g_plain_form");
+    expect(early).not.toContain("f2g_form_table");
+    expect(early).toContain("f2g_bracket");
+
+    const late = planPaper("F2", "grammar", { topic: 10, variant: 3 });
+    expect(late.every((a) => fitsTopic(a, 10))).toBe(true);
+  });
+
+  it("drops the question-word section once the course moves past it", () => {
+    // Seen on Topics 1, 3, 4, 5 and 6 and on no paper after Topic 8.
+    const early = planPaper("F2", "grammar", { topic: 4, variant: 0 }).map((a) => a.id);
+    expect(early).toContain("f2g_question_word");
+    for (let variant = 0; variant < 8; variant++) {
+      const late = planPaper("F2", "grammar", { topic: 11, variant }).map((a) => a.id);
+      expect(late, `v${variant}`).not.toContain("f2g_question_word");
+    }
+  });
+
+  it("still plans a paper when the topic rules most of the catalogue out", () => {
+    // Topic 1 predates the word bank, the reading passage and everything
+    // else with a fromTopic. A paper of two sections is still a paper; no
+    // paper at all is an error message.
+    const plan = planPaper("F2", "grammar", { topic: 1, variant: 0 });
+    expect(plan.length).toBeGreaterThanOrEqual(2);
+    expect(plan.every((a) => fitsTopic(a, 1))).toBe(true);
+  });
+
+  it("gives every archetype a skill, a weight and distractor guidance", () => {
+    // The three fields the prompt is built from. An archetype missing any of
+    // them produces a section the model has to guess the shape of.
+    for (const level of LEVELS) {
+      for (const kind of KINDS) {
+        for (const a of archetypes(level, kind)) {
+          expect(a.skill, a.id).toMatch(/^[a-z-]+$/);
+          expect(a.weight, a.id).toBeGreaterThan(0);
+          expect(a.guidance.length, a.id).toBeGreaterThan(40);
+        }
+      }
+    }
+  });
+
+  it("keeps the sections a paper opens with at the front", () => {
+    // The order is the papers': quick in-place items, then the word bank
+    // carrying the marks, then the passage. A plan that closes with the
+    // bracket section is a plan for a paper nobody sat.
+    for (const level of LEVELS) {
+      for (const kind of KINDS) {
+        for (let variant = 0; variant < 6; variant++) {
+          const plan = planPaper(level, kind, { variant });
+          const orders = plan.map((a) => a.order);
+          expect([...orders].sort((x, y) => x - y), `${level}/${kind} v${variant}`).toEqual(orders);
+        }
       }
     }
   });

@@ -11,7 +11,8 @@
     "e2e": "playwright test",
     "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
     "smoke": "node scripts/smoke.mjs",
-    "preview": "opennextjs-cloudflare build && wrangler dev --ip 0.0.0.0 --port 8787"
+    "preview": "opennextjs-cloudflare build && wrangler dev --ip 0.0.0.0 --port 8787",
+    "preview:worker": "wrangler dev --ip 127.0.0.1 --port 8787"
   },
   "dependencies": {
     "@ai-sdk/deepseek": "1.0.49",
