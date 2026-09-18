@@ -4,7 +4,7 @@ import { createGroq } from "@ai-sdk/groq";
 import { generateText } from "ai";
 import { z } from "zod";
 
-import { isProviderDead, noteProviderFailure } from "@/lib/providers";
+import { isProviderDead, noteProviderFailure, noteProviderSuccess } from "@/lib/providers";
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/server";
 import { trialCookie, trialUsed, TRIALS } from "@/lib/trial";
 
@@ -110,22 +110,39 @@ ${lines.join("\n")}`;
   const google = createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY });
 
   // Plain text, so the chat model works here — no structured-output caveat.
+  //
+  // Keyed per TIER and not per provider, for the reason set out against
+  // Tier.key in lib/router.ts. These are not the chat route's tiers: coaching
+  // is a different job on a different model, and recording its failures under
+  // the bare names "groq"/"deepseek"/"google" wrote them into the very slots
+  // the chat route tracks its own health in. Three failures here and chat
+  // stopped offering gemini-3.5-flash-lite — its primary model, and the
+  // largest latency win in the stack — because an optional paragraph of
+  // post-test encouragement could not be written.
   const tiers = [
-    { provider: "groq", model: groq(process.env.CHAT_MODEL ?? "openai/gpt-oss-120b") },
+    { key: "feedback-groq", model: groq(process.env.CHAT_MODEL ?? "openai/gpt-oss-120b") },
   ];
-  if (process.env.DEEPSEEK_API_KEY && !isProviderDead("deepseek")) {
+  if (process.env.DEEPSEEK_API_KEY) {
     const deepseek = createDeepSeek({ apiKey: process.env.DEEPSEEK_API_KEY });
     tiers.push({
-      provider: "deepseek",
+      key: "feedback-deepseek",
       model: deepseek(process.env.DEEPSEEK_MODEL ?? "deepseek-v4-flash"),
     });
   }
   tiers.push({
-    provider: "google",
+    key: "feedback-google",
     model: google(process.env.FALLBACK_MODEL ?? "gemini-3.6-flash"),
   });
 
-  for (const tier of tiers) {
+  // Skip what has proven dead this isolate — all three tiers, where only
+  // DeepSeek used to be checked — but never skip every one of them. An empty
+  // cascade is a guaranteed 502 for the rest of the isolate's life, and one
+  // more attempt costs a single round trip on a request nobody is waiting on.
+  // Same guard, same reasoning, as routeModels().
+  const live = tiers.filter((tier) => !isProviderDead(tier.key));
+  const cascade = live.length > 0 ? live : tiers.slice(-1);
+
+  for (const tier of cascade) {
     try {
       const { text } = await generateText({
         model: tier.model,
@@ -134,16 +151,20 @@ ${lines.join("\n")}`;
         temperature: 0.5,
       });
       if (!text.trim()) throw new Error("empty feedback");
+      // Clears whatever this tier had accumulated. Without it the count only
+      // ever rises and a tier that works is retired on three failures spread
+      // across the isolate's entire life.
+      noteProviderSuccess(tier.key);
       return Response.json(
         { feedback: text.trim() },
         { headers: setCookie ? { "Set-Cookie": setCookie } : undefined },
       );
     } catch (error) {
       console.error(
-        `quiz feedback failed on ${tier.provider}:`,
+        `quiz feedback failed on ${tier.key}:`,
         error instanceof Error ? error.message : error,
       );
-      noteProviderFailure(tier.provider, error);
+      noteProviderFailure(tier.key, error);
     }
   }
   // The client falls back to the deterministic study plan alone — feedback is
