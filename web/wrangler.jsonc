@@ -13,6 +13,19 @@
   "observability": {
     "enabled": true
   },
+  // The domain students actually type. Declared here rather than clicked into
+  // the dashboard so it is version-controlled and reapplied on every deploy:
+  // a custom domain added by hand is invisible to this repository and is lost
+  // the first time someone recreates the Worker.
+  //
+  // custom_domain provisions the DNS record and the TLS certificate itself,
+  // apex included. It requires the zone to be in the same Cloudflare account
+  // as the Worker, which is why chattobira.com was added to that account
+  // before this landed.
+  "routes": [
+    { "pattern": "chattobira.com", "custom_domain": true },
+    { "pattern": "www.chattobira.com", "custom_domain": true }
+  ],
   // Non-secret configuration. API keys are Worker SECRETS, never vars —
   // anything here is readable by anyone with dashboard access.
   "vars": {
