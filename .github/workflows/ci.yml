@@ -305,6 +305,11 @@ jobs:
           push: false
           load: true
           tags: chattobira-web:ci
+          # The runtime stage upgrades the base image's Debian packages; a
+          # cached copy of that layer would pin them to the day it was first
+          # built and fail the Trivy step below on fixes already published.
+          # Same reasoning as `no-cache-filters: base` on the ingest image.
+          no-cache-filters: runtime
           # Public anon keys, inlined into the client bundle at build time.
           # Runtime secrets (service role, model keys) are NOT passed here —
           # a build arg is readable in the image layers forever.
