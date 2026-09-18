@@ -9,6 +9,7 @@ import {
   ACCEPT_BUDGET_MS,
   estimateTokens,
   noteProviderFailure,
+  noteProviderSuccess,
   withDeadline,
 } from "@/lib/providers";
 import { routeModels } from "@/lib/router";
@@ -684,6 +685,10 @@ export async function POST(request: Request) {
       break;
     }
     const controller = new AbortController();
+    // Whether the PROVIDER did its job — a different question from whether the
+    // paper it wrote is any good, and the catch below depends on the
+    // difference. Set the moment generateObject returns.
+    let answered = false;
     try {
       const { object } = await withDeadline(
         generateObject({
@@ -741,6 +746,12 @@ export async function POST(request: Request) {
         Math.min(ACCEPT_BUDGET_MS.structured, remaining),
         "tier_timeout",
       );
+      // The tier accepted the request and returned a paper that parsed, which
+      // is the whole of what its health means. Recorded here rather than after
+      // the gates below, because everything below judges the paper's CONTENT
+      // and a tier is not unreachable for having written a short one.
+      answered = true;
+      noteProviderSuccess(tier.key);
       // No question may repeat inside one paper. Dropping the repeat is
       // better than re-asking the model: it costs no second call, and a
       // 19-question paper with nothing duplicated beats a 20-question paper
@@ -927,7 +938,21 @@ export async function POST(request: Request) {
         error instanceof Error ? error.message : error,
         detail ? `\n  response: ${String(detail).slice(0, 1200)}` : "",
       );
-      noteProviderFailure(tier.key, error);
+      // Only a failure of the PROVIDER counts against its health. Past the
+      // flag the tier has already answered, and what threw was one of the
+      // content gates — a short paper, a missing passage, too many rejected
+      // items — which says nothing about whether the tier can be reached.
+      //
+      // That distinction is the only reason the flag exists, and it is not
+      // hypothetical. Papers vary run to run (lib/router.ts: the same prompt
+      // returned six sections, then four, then six), so counting a short paper
+      // as a provider failure retired a working tier after three of them —
+      // non-consecutive, spread across an isolate's whole life, because
+      // nothing here ever recorded the successes in between to clear the
+      // count. Every paper after that fell to Pro at a measured 22-48s against
+      // this route's own deadline, which is precisely what putting the fast
+      // tier in front was meant to prevent.
+      if (!answered) noteProviderFailure(tier.key, error);
     }
   }
   // Nothing cleared the bar, but something was written. A slightly short
