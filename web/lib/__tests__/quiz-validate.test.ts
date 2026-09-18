@@ -420,3 +420,32 @@ describe("tidyQuiz: numbering the app already prints", () => {
     );
   });
 });
+
+describe("tidyQuiz: ○× items that restate their own marks", () => {
+  const maru = (choices: string[]) =>
+    ({
+      scope_description: "x",
+      sections: [
+        section({
+          form: "maru_batsu",
+          passage: "リーさんは毎朝七時に起きます。",
+          items: [item({ type: "true_false", question: "リーさんは七時に起きます。", choices, answer: "○" })],
+        }),
+      ],
+    }) as Quiz;
+
+  it("strips choices that are only ○ and ×, which the paper prints itself", () => {
+    // Seen live on a Foundation 3 reading section: every item carried
+    // ["○","×"], the validator rejected all five, and the paper fell below its
+    // section floor for a layout habit rather than a wrong answer.
+    const { quiz, tidied } = tidyQuiz(maru(["○", "×"]));
+    expect(quiz.sections[0].items[0].choices).toBeUndefined();
+    expect(tidied).toBeGreaterThan(0);
+    expect(itemFault(quiz.sections[0].items[0], quiz.sections[0])).toBeNull();
+  });
+
+  it("leaves real options alone, so the validator still names the fault", () => {
+    const { quiz } = tidyQuiz(maru(["はい", "いいえ"]));
+    expect(quiz.sections[0].items[0].choices).toEqual(["はい", "いいえ"]);
+  });
+});

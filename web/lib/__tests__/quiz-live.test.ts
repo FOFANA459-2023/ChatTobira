@@ -24,7 +24,7 @@ import { createGroq } from "@ai-sdk/groq";
 import { generateObject } from "ai";
 import { describe, expect, it } from "vitest";
 
-import { planPaper, type Level } from "@/lib/paper-format";
+import { matchSections, planPaper, type Level } from "@/lib/paper-format";
 import { estimateTokens } from "@/lib/providers";
 import { routeModels } from "@/lib/router";
 import {
@@ -77,6 +77,19 @@ function env(): Record<string, string> {
   return out;
 }
 
+/** Mirrors the route's table, keyed by tier for the same reason: the two
+ * Google tiers need different allowances and sharing one is what made Pro look
+ * broken. */
+const OUTPUT_BUDGET: Record<string, number> = {
+  groq: 3_800,
+  google: 16_000,
+  // The fast paper tier. 3.8-flash with a capped budget spends little on
+  // reasoning, but a six-section paper is ~27 items of JSON and a truncated
+  // one arrives as a parse failure, not a short paper.
+  "google-fast": 32_000,
+  "google-pro": 32_000,
+};
+
 const FIXTURE = resolve(ROOT, ".work", "quiz-fixture.json");
 const keys = env();
 const live =
@@ -102,13 +115,16 @@ const fixture: Fixture | null = existsSync(FIXTURE)
 
 /** The same cascade the route runs, built from the same policy.
  *
-
- * Not a single pinned provider: which tier actually writes the paper is part
- * of what this check is for. Google is first for a structured job and writes
- * one in 6–9 seconds on the model this app runs; when it refuses — a day's
- * free quota spent, a 429 — the paper falls to Groq off the compact prompt,
- * and a check pinned to Google would never exercise the tier that serves a
- * student on a bad day.
+ * Not a single pinned model: which tier actually writes the paper is part of
+ * what this check is for. Pro is first for a structured job and writes one in
+ * 17–33 seconds; behind it is the flash tier at 6–11, and behind that Groq on
+ * the compact prompt. A check pinned to one of them would never exercise the
+ * tier that serves a student on a bad day.
+ *
+ * The budgets below are the route's own, read off the tier the router handed
+ * back rather than restated here. They were restated here once, and the copy
+ * went stale the moment the route learned to give Pro a bigger allowance than
+ * flash — which is exactly the failure this file exists to catch.
  */
 function tiers() {
   const groqKey = process.env.GROQ_API_KEY ?? keys.GROQ_API_KEY;
@@ -118,6 +134,8 @@ function tiers() {
     models: {
       groq: keys.QUIZ_MODEL ?? "openai/gpt-oss-120b",
       deepseek: keys.DEEPSEEK_MODEL,
+      "google-fast": keys.PAPER_FAST_MODEL,
+      "google-pro": keys.PAPER_MODEL,
       google: keys.FALLBACK_MODEL,
     },
   });
@@ -148,11 +166,26 @@ async function generate(
         system: tier.provider === "groq" ? compact.system : system,
         prompt: tier.provider === "groq" ? compact.prompt : prompt,
         temperature: 0.8,
-        // The route's measured budgets. Groq's is small because its free tier
-        // meters prompt and reserved output against one ceiling; Google's is
-        // large because a thinking model bills its reasoning to the same
-        // allowance and the paper itself is only ~2,400 tokens of JSON.
-        maxOutputTokens: tier.provider === "groq" ? 3_800 : 16_000,
+        // The route's measured budgets, per TIER. Groq's is small because its
+        // free tier meters prompt and reserved output against one ceiling;
+        // Pro's is the largest because a thinking model bills its reasoning to
+        // the same allowance, and a paper that runs out of allowance arrives
+        // as invalid JSON rather than as a short paper.
+        maxOutputTokens: OUTPUT_BUDGET[tier.config] ?? 16_000,
+        // The cap that makes Pro usable here at all: uncapped it takes 95-111s
+        // a paper and finishes one in four. See lib/router.ts.
+        ...(tier.provider === "google" && tier.thinkingBudget !== undefined
+          ? {
+              providerOptions: {
+                google: {
+                  thinkingConfig: {
+                    thinkingBudget: tier.thinkingBudget,
+                    includeThoughts: false,
+                  },
+                },
+              },
+            }
+          : {}),
       });
       return { paper: object as Quiz, tier: tier.model, ms: Date.now() - started, failures };
     } catch (error) {
@@ -193,11 +226,22 @@ class TiersRefused extends Error {
 
 /** Generate one paper the way the route does, and report on every stage. */
 async function sit(level: Level, kind: QuizKind, topic: number, variant = 0) {
-  const book = fixture!.documents.find((d) => d.doc_type === "textbook" && d.level === level)!;
+  // Intermediate is two books: the Tobira reader for grammar and the Tobira
+  // Kanji and Vocabulary book for kanji. The Foundation levels are one each.
+  const books = fixture!.documents.filter((d) => d.doc_type === "textbook" && d.level === level);
+  const book =
+    level === "INT"
+      ? books.find((d) => /kanji/i.test(d.title) === (kind === "kanji")) ?? books[0]
+      : books[0];
   const pool = fixture!.pools[String(book.id)];
   const lessons = lessonByPage(pool);
-  const picked = chunksForLesson(pool, lessons, topic, 8);
-  const papers = fixture!.papers.filter((p) => p.level === level);
+  // Mirrors the route: kanji papers get more vocabulary to spread across sections.
+  const picked = chunksForLesson(pool, lessons, topic, kind === "kanji" ? 12 : 8);
+  // Intermediate has no papers of its own yet and reads the collective
+  // Foundation set, exactly as the route does.
+  const papers = fixture!.papers.filter((p) =>
+    level === "INT" ? p.level === "F3" || p.level === "F2" : p.level === level,
+  );
   const exemplars = selectExemplars(papers, kind, topic, 2, 1);
   const plan = planPaper(level, kind, { topic, variant });
 
@@ -206,7 +250,15 @@ async function sit(level: Level, kind: QuizKind, topic: number, variant = 0) {
       picked.map((c) => c.content),
       pool.map((c) => c.content),
     ),
-    attestedKanji: attestedKanji(pool.map((c) => c.content)),
+    // Mirrors the route: an Intermediate student owns both Tobira books.
+    attestedKanji: attestedKanji(
+      (level === "INT"
+        ? fixture!.documents
+            .filter((d) => d.doc_type === "textbook" && d.level === "INT")
+            .flatMap((d) => fixture!.pools[String(d.id)] ?? [])
+        : pool
+      ).map((c) => c.content),
+    ),
   };
 
   const block = (chunks: typeof picked, chars: number) =>
@@ -288,7 +340,7 @@ async function sit(level: Level, kind: QuizKind, topic: number, variant = 0) {
       }`,
       ``,
       ...paper.sections.flatMap((section, i) => [
-        `${["I", "II", "III", "IV", "V"][i]}. ${section.instruction_ja}  (${section.marks ?? 1}×${section.items.length})`,
+        `${["I", "II", "III", "IV", "V", "VI", "VII"][i]}. ${section.instruction_ja}  (${section.marks ?? 1}×${section.items.length})`,
         `   ${section.instruction_en}`,
         ...(section.passage ? [`   [passage ${section.passage.length} chars] ${section.passage.slice(0, 90)}…`] : []),
         ...(section.word_bank ? [`   [bank] ${section.word_bank.join(" ・ ")}`] : []),
@@ -312,6 +364,8 @@ suite("a paper generated from the local corpus", () => {
     ["F2", "kanji", 8],
     ["F3", "grammar", 13],
     ["F3", "kanji", 13],
+    ["INT", "grammar", 5],
+    ["INT", "kanji", 5],
   ];
 
   for (const [level, kind, topic] of cases) {
@@ -353,13 +407,18 @@ suite("a paper generated from the local corpus", () => {
           expect(paper.sections.length).toBeGreaterThanOrEqual(1);
           expect(items.length).toBeGreaterThanOrEqual(3);
         } else {
-          expect(paper.sections.length).toBeGreaterThanOrEqual(plan.length - 1);
+          // The route's own floor: four sections, or the whole plan when the
+          // plan is shorter. The sat papers run to three to seven.
+          expect(paper.sections.length).toBeGreaterThanOrEqual(Math.min(4, plan.length));
           expect(items.length).toBeGreaterThanOrEqual(9);
         }
 
         // Every section is one the papers print, in the papers' order.
+        // Matched by instruction, as the route and validator do: a paper that
+        // kept five of six sections has no section at the missing index.
+        const matched = matchSections(paper.sections, plan);
         paper.sections.forEach((section, index) => {
-          const archetype = plan[index];
+          const archetype = matched[index];
           if (!archetype) return;
           expect(section.items.length, archetype.id).toBeGreaterThan(0);
           if (archetype.form === "maru_batsu") {

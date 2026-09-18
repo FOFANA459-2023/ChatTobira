@@ -59,7 +59,13 @@ export const QuizSchema = z.object({
   // 1–2 sentences telling the student what the test covers — the grammar
   // points or vocabulary drilled and where they sit in the course.
   scope_description: z.string().min(1),
-  sections: z.array(QuizSectionSchema).min(1).max(5),
+  // Seven, because the sat papers run to seven and the catalogue holds eight
+  // or nine machine-markable archetypes per level. Five was a cap on the
+  // SCHEMA that silently became a cap on the FORMAT: paper-format.ts planned
+  // four sections and the two were quietly consistent, so eleven attested
+  // section types could never appear on a generated paper no matter what the
+  // plan asked for.
+  sections: z.array(QuizSectionSchema).min(1).max(7),
 });
 
 export type QuizItem = z.infer<typeof QuizItemSchema>;

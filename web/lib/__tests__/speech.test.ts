@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   levelGuidance,
+  listenChunks,
+  LISTEN_LIMIT,
+  readyClauses,
   SPEAKABLE_LIMIT,
   SPEAKING_MODES,
   speakableText,
@@ -249,3 +252,104 @@ describe("sentences", () => {
     expect(sentences("あ")).toEqual(["あ"]);
   });
 });
+
+describe("readyClauses", () => {
+  // The rule that lets the voice start talking before the answer is finished.
+  const reply = "いいですね！京都はきれいな町ですね。京都では何をしましたか？";
+
+  it("holds back the clause that is still being written", () => {
+    // Mid-stream the tail is not a sentence yet, it is the beginning of one.
+    // Synthesising it would have the tutor say half a sentence and then say
+    // the whole of it.
+    expect(readyClauses("いいですね！京都はきれ", false, 0)).toEqual([]);
+  });
+
+  it("releases a clause as soon as something is written after it", () => {
+    expect(readyClauses("いいですね！京都はきれいな町ですね。京都で", false, 0)).toEqual([
+      "いいですね！ 京都はきれいな町ですね。",
+    ]);
+  });
+
+  it("releases the last clause only when the stream says it is over", () => {
+    const streaming = readyClauses(reply, false, 0);
+    const finished = readyClauses(reply, true, 0);
+    expect(finished.length).toBe(streaming.length + 1);
+    expect(finished.at(-1)).toBe("京都では何をしましたか？");
+  });
+
+  it("never returns a clause twice, so nothing is paid for or heard twice", () => {
+    const first = readyClauses(reply, false, 0);
+    // Fed the same answer again with the same count consumed: nothing new.
+    expect(readyClauses(reply, false, first.length)).toEqual([]);
+    // And the end of the stream yields only what was actually held back.
+    expect(readyClauses(reply, true, first.length)).toEqual(["京都では何をしましたか？"]);
+  });
+
+  it("says nothing for an answer with nothing speakable in it", () => {
+    // A page reference exists only for the eye — a listener cannot act on
+    // "see p. 112" — so speakableText leaves nothing behind and there is no
+    // clause to send. The caller must not be left waiting for audio that is
+    // never coming.
+    expect(readyClauses("（see p. 112）", true, 0)).toEqual([]);
+  });
+
+  it("strips what is for the eye before deciding where a clause ends", () => {
+    // Furigana is removed first, so the clause handed to the voice is the
+    // clause it should say — 漢字 read once, not "kanji (kanji)".
+    const [clause] = readyClauses(
+      "漢字（かんじ）はむずかしいですが、おもしろいですよ。京都",
+      false,
+      0,
+    );
+    expect(clause).toBe("漢字はむずかしいですが、おもしろいですよ。");
+  });
+});
+
+describe("listenChunks", () => {
+  // A long bilingual answer of the shape the tutor writes: two dozen sentences.
+  const long = Array.from(
+    { length: 24 },
+    (_, i) => `これは例文${i + 1}番です、とても大切なポイントです。This is note ${i + 1} about it.`,
+  ).join(" ");
+
+  it("opens with a short prefetchable piece, then a single sentence", () => {
+    // The opening is prefetched while the student reads, and must play long
+    // enough to hide the second, which is requested at the click and so is
+    // kept to one sentence.
+    const pieces = listenChunks(long);
+    const all = sentencesOf(long);
+    expect(pieces[0].startsWith(all[0])).toBe(true);
+    expect(pieces[0].length).toBeLessThanOrEqual(60);
+    expect(all).toContain(pieces[1]);
+  });
+
+  it("reads a long answer in a handful of requests, not one per sentence", () => {
+    // The speech model allows ten requests a minute for the whole project.
+    // One per sentence ran a long answer straight into that limit.
+    const pieces = listenChunks(long);
+    expect(sentencesOf(long).length).toBeGreaterThan(20);
+    expect(pieces.length).toBeLessThanOrEqual(8);
+  });
+
+  it("never sends a piece the speech route would trim", () => {
+    for (const piece of listenChunks(long)) expect(piece.length).toBeLessThanOrEqual(600);
+  });
+
+  it("loses no text between the pieces", () => {
+    const joined = listenChunks(long).join(" ").replace(/\s+/g, "");
+    expect(joined).toBe(sentencesOf(long).join(" ").replace(/\s+/g, ""));
+  });
+
+  it("reads well past the 600 characters a spoken reply is capped at", () => {
+    // Pressing Listen asks for the answer; stopping at 600 was the voice that
+    // "stops playing altogether" part way through.
+    const total = listenChunks(long).join("").length;
+    expect(long.length).toBeGreaterThan(600);
+    expect(total).toBeGreaterThan(600);
+    expect(total).toBeLessThanOrEqual(LISTEN_LIMIT);
+  });
+});
+
+function sentencesOf(text: string): string[] {
+  return sentences(speakableText(text, LISTEN_LIMIT));
+}

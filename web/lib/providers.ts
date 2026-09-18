@@ -133,18 +133,25 @@ export function canTakePrompt(name: string, tokens: number): boolean {
 // reverted; re-landing it as a side effect of a quiz merge would change the
 // chat route's failover on no evidence.
 //
-// `structured` comes down from 45 seconds to 30, and that IS measured.
-// Against the real corpus (scripts/local-db.sh) on the same prompt:
+// `structured` went 45 → 30 when flash-lite was the tier writing papers, and
+// is now 40 because a different model writes them. Both numbers are measured;
+// they measure different models, which is the only reason this moved back up.
 //
-//   google  gemini-3.5-flash-lite    10.1s   17 items, 4 sections
+// Against the real corpus (scripts/local-db.sh), four papers per model through
+// the full pipeline:
+//
+//   google  gemini-pro-latest +128  17-33s   4 papers of 4, nothing rejected
+//   google  gemini-3.5-flash-lite    6-11s   3 papers of 4
 //   groq    openai/gpt-oss-120b      9-45s   on the smaller free-tier prompt
 //   deepseek deepseek-v4-flash      138.5s   returned nothing at all
 //
-// 30 is three times the working model's run and leaves 25 of the route's
-// 55-second deadline for a second tier. 45 left ten, which is not enough to
-// try anything else — and the failure that actually happens is a provider
-// returning something unusable, not a provider hanging.
-export const ACCEPT_BUDGET_MS = { spoken: 6_000, typed: 12_000, structured: 30_000 } as const;
+// 40 covers Pro's measured worst case of 32.8s with room for a slower day,
+// and still leaves 15 of the route's 55-second deadline — enough for
+// flash-lite behind it, which needs 6-11. Set at 30 this would have cut Pro
+// off mid-paper on the two runs that took longer than that and fallen back to
+// a worse paper for no reason, which is the failure this constant exists to
+// prevent rather than cause.
+export const ACCEPT_BUDGET_MS = { spoken: 6_000, typed: 12_000, structured: 40_000 } as const;
 
 /** Reject if `work` has not settled within `ms`.
  *

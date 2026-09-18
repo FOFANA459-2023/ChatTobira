@@ -115,6 +115,146 @@ export function sentences(text: string, minLength = 12): string[] {
   return clauses.length > 0 ? clauses : [text];
 }
 
+/** The clauses of a partial answer that are safe to synthesise NOW.
+ *
+ * The voice used to wait for the whole answer before it said a word, because
+ * `speak` was called from the chat transport's onFinish — the one callback
+ * that by definition does not run until generation is over. So a spoken turn
+ * spent the model's entire generation in silence and THEN spent three more
+ * seconds in silence while the first clause was synthesised, and the two costs
+ * were paid one after the other for no reason. They overlap perfectly well:
+ * the first sentence of an answer is final long before the last one is
+ * written, and synthesising it is the slowest thing left in the turn.
+ *
+ * What makes this safe is the `done` flag rather than any cleverness about
+ * sentence boundaries. While an answer is still streaming the LAST clause is
+ * still growing, and synthesising a clause that is about to get longer makes
+ * the voice say half a sentence and then say the whole of it. So the last
+ * clause is held back until the stream says there is no more coming; every
+ * clause before it is finished by definition, because something was written
+ * after it.
+ *
+ * `taken` is how many clauses the caller has already sent, so this returns
+ * only what is new. Callers must not re-send: a clause synthesised twice is
+ * paid for twice and, worse, heard twice.
+ */
+export function readyClauses(
+  textSoFar: string,
+  done: boolean,
+  taken: number,
+  minLength = 12,
+): string[] {
+  const spoken = speakableText(textSoFar);
+  if (!spoken) return [];
+  const clauses = sentences(spoken, minLength);
+  // Mid-stream the tail is still being written. At the end it is the answer.
+  const settled = done ? clauses : clauses.slice(0, -1);
+  return settled.slice(taken);
+}
+
+/** How much of an answer the Listen button reads.
+ *
+ * Far more than SPEAKABLE_LIMIT, which is the budget for a reply spoken
+ * UNASKED in a conversation. A student who presses Listen under an answer has
+ * asked to hear that answer, and cutting it off at 600 characters is a voice
+ * that stops half way through for no reason they can see. 2,400 is roughly
+ * four minutes of speech: longer than anyone listens, shorter than a reply
+ * the tutor would ever write.
+ */
+export const LISTEN_LIMIT = 2400;
+
+/** Largest piece sent to the voice in one request — the /api/speak route
+ * trims anything past SPEAKABLE_LIMIT, so a piece must fit inside it. */
+const LISTEN_PIECE_MAX = SPEAKABLE_LIMIT;
+
+/** The measured speed of the voice, at the slow end of what was seen. */
+const AUDIO_MS_PER_CHAR = 125;
+const SYNTH_BASE_MS = 4000;
+const SYNTH_MS_PER_CHAR = 50;
+/** The smallest each piece may be, by position: a doubling floor that keeps
+ * requests under the project's ten-a-minute quota whatever the sentences. */
+const MIN_PIECE = [0, 0, 60, 120, 240, 480, 600];
+/** How long the prefetched opening piece may run. */
+const OPENING_MAX = 60;
+
+/** A finished answer, cut into the pieces the Listen button synthesises.
+ *
+ * One request per SENTENCE was the old unit, and it is why long answers
+ * broke. The speech model allows ten requests a minute for the whole project
+ * — measured, on every TTS model the key can see — so a long answer ran past
+ * the limit part way through, the service answered 429, and the player handed
+ * the rest of the reply to the browser's own voice: a different person
+ * finishing the sentence, or, when that failed too, silence.
+ *
+ * So the pieces GROW, each sized to the audio already queued ahead of it.
+ * Each piece is sized so that the two pieces playing ahead of it can hide its
+ * synthesis — and the player actually keeps FOUR in flight, so in practice it
+ * has three pieces of lead, one more than its size assumes. That spare piece
+ * is deliberate: the live voice varies. Measured on it:
+ *
+ *   31 chars   synth  4.8s   audio  5.4s
+ *   116 chars  synth 11.2s   audio 15.5s
+ *   197 chars  synth 12.6s   audio 24.2s   (14.3s on a later run)
+ *   314 chars  synth 16.5s   audio 38.1s
+ *
+ * — about 125ms of audio per character against 4s + 50ms per character of
+ * synthesis. Long pieces run nearer 105ms of audio per character, which is
+ * what the spare piece of lead is for. A fixed schedule
+ * ("then 200, then 600") was tried first and left 6.2 seconds of silence
+ * before its third piece, because two short opening sentences are only eight
+ * seconds of audio. Sized this way, with a doubling floor under it for the
+ * quota, a 700-character answer is six requests (27, 24, 52, 99, 293, 202
+ * characters) and a 1,200-character one seven, instead of twenty to fifty.
+ *
+ * The opening piece is up to ~60 characters — usually two sentences — because
+ * it is prefetched while the student reads and so costs no wait, and it has to
+ * play long enough to hide the second piece, which is requested at the click
+ * and kept to one sentence because nothing is playing yet to hide more.
+ *
+ * Pieces are whole sentences, never cut mid-clause. The prefetch in
+ * useTextToSpeech synthesises `listenChunks(answer)[0]` — the same function,
+ * so the prefetched audio is exactly the audio the click asks for.
+ */
+export function listenChunks(markdown: string): string[] {
+  const spoken = speakableText(markdown, LISTEN_LIMIT);
+  if (!spoken) return [];
+  const clauses = sentences(spoken);
+
+  const pieces: string[] = [];
+  const budget = (index: number): number => {
+    // The opening is prefetched while the student reads, so its synthesis
+    // is free; what matters is that it plays long enough to hide the next
+    // piece, which is requested at the click. One short sentence did not:
+    // measured, 4.0s of audio against 5.5s to synthesise the sentence after
+    // it. Up to ~60 characters (usually two sentences) is ~7s of audio.
+    if (index === 0) return OPENING_MAX;
+    if (index === 1) return 0; // a single sentence: nothing is playing yet to hide more
+    // As long as the audio ahead can hide...
+    const lead = AUDIO_MS_PER_CHAR * (pieces[index - 2].length + pieces[index - 1].length);
+    const hidden = Math.floor((lead - SYNTH_BASE_MS) / SYNTH_MS_PER_CHAR);
+    // ...but never smaller than the quota allows. Sized by lead alone, an
+    // answer of short sentences never grows at all — each ~24-character
+    // sentence is too little audio to hide two of them behind — and stays at
+    // one request per sentence: 48 for a 1,200-character answer, against a
+    // limit of ten a minute. The floor doubles regardless, which costs at most
+    // a second's pause early on and keeps a long answer to about seven
+    // requests.
+    const floor = MIN_PIECE[Math.min(index, MIN_PIECE.length - 1)];
+    return Math.min(LISTEN_PIECE_MAX, Math.max(hidden, floor));
+  };
+
+  for (const clause of clauses) {
+    const index = pieces.length - 1;
+    const current = pieces[index];
+    if (current !== undefined && current.length + 1 + clause.length <= budget(index)) {
+      pieces[index] = `${current} ${clause}`;
+    } else {
+      pieces.push(clause);
+    }
+  }
+  return pieces;
+}
+
 /** One run of text in one language. */
 export interface SpeechSegment {
   text: string;

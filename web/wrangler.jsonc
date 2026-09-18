@@ -20,9 +20,27 @@
     // demoted every chat answer to the Gemini tier. gpt-oss-120b is what the
     // free tier actually serves today.
     "CHAT_MODEL": "openai/gpt-oss-120b",
-    // 3.6-flash free tier allows only 20 requests/day — useless as a fallback.
-    // 3.5-flash-lite has a real daily budget and is plenty for fallback duty.
+    // The Gemini that answers chat and voice, and the flash tier behind the
+    // paper model below. 3.6-flash was ruled out here when the key was free —
+    // 20 requests a day — and stays ruled out on the paid key for a better
+    // reason: measured on this app's own prompts it takes 4.2s to a first
+    // token where 3.5-flash-lite takes 0.94s.
     "FALLBACK_MODEL": "gemini-3.5-flash-lite",
+    // The model that writes a practice paper, separate from the chat model
+    // since 2026-09-18. These were one variable, which is what kept papers on
+    // flash-lite after the key could afford Pro.
+    //
+    // Pro is here for quality, not speed, and a paper is the one job in this
+    // app worth waiting for. Measured on the real corpus, four papers each:
+    // Pro keeps every item the validator looks at, where flash-lite loses 1-8
+    // off each paper. Its reasoning is capped in lib/router.ts — uncapped it
+    // takes 95-111s and finishes one paper in four.
+    "PAPER_MODEL": "gemini-pro-latest",
+    // The model that writes a paper FIRST, with Pro above now its backstop.
+    // Measured on six-section papers: 8-12s against Pro's 22-48s, and zero
+    // failures in eight runs at a 128-token thinking budget. Pro stays behind
+    // it for the papers this one returns short.
+    "PAPER_FAST_MODEL": "gemini-3.8-flash",
     "EMBED_MODEL": "gemini-embedding-001",
     "STT_MODEL": "whisper-large-v3-turbo",
     "CITATION_QUOTE_CHARS": "200"

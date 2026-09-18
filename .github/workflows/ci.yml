@@ -1,10 +1,15 @@
 name: CI
 
+# main and dev both. Development happens on dev (see the branch layout in the
+# README): gating only on main meant a regression sat undiscovered until the
+# release pull request, with a whole branch of changes stacked on top of it.
+# Nothing DEPLOYS from dev — the deploy job below is still main-only — so this
+# buys earlier signal at no risk to production.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -69,6 +74,34 @@ jobs:
       - run: pip install -e ingest pip-audit
       # Vulnerabilities in transitive deps fail the build; fix or pin.
       - run: pip-audit
+
+  web-audit:
+    name: Security / npm audit
+    needs: web-detect
+    if: needs.web-detect.outputs.exists == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run: { working-directory: web }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      # The Python side has had pip-audit since the pipeline was written and
+      # the JavaScript side never had its counterpart, which is the larger
+      # dependency tree of the two by an order of magnitude.
+      #
+      # Not `npm audit` directly: it has no ignore file, so gating on its exit
+      # code goes red on transitive advisories that need a framework major
+      # upgrade to clear, and a permanently red gate is one people stop
+      # reading. scripts/audit.mjs checks SHIPPED dependencies for high and
+      # critical, against an accepted list where every entry carries a reason
+      # and a review date — the same bargain .trivyignore.yaml already makes
+      # for container CVEs.
+      - run: node scripts/audit.mjs
 
   # -------------------------------------------------------------------------
   # Web app (Next.js on Cloudflare Workers). These jobs detect whether web/
@@ -294,8 +327,34 @@ jobs:
           set -euo pipefail
           docker run --rm --entrypoint sh chattobira-web:ci -c 'test -s /etc/ssl/certs/ca-certificates.crt'
 
+      # Playwright needs the workspace's own dependencies, and this job has
+      # not installed them — it builds an image rather than running the app
+      # from source. Done before the container starts so a dependency problem
+      # fails fast instead of after a boot.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npx playwright install --with-deps chromium
+        working-directory: web
+
       # The real gate: boot the production bundle under workerd and talk to it.
-      - name: Smoke test the worker
+      #
+      # Two passes over the same running container, because they see different
+      # things. The smoke script asks it questions over HTTP — does it boot,
+      # does it serve, does every stylesheet it references actually exist. The
+      # regression spec then drives it in a REAL BROWSER, which is the only
+      # way to see whether the CSS that loaded actually applied.
+      #
+      # Both are pointed at the artefact being deployed rather than at `next
+      # dev`. The web-e2e job above runs the same specs against the dev server,
+      # and the two builds emit CSS by different paths — on 2026-09-18 the app
+      # served completely unstyled while every gate in this pipeline stayed
+      # green, because nothing had ever looked at an asset or a computed style.
+      - name: Smoke test the worker, then drive it in a browser
         run: |
           set -euo pipefail
           docker run -d --name smoke -p 8787:8787 chattobira-web:ci
@@ -303,6 +362,15 @@ jobs:
           # and nowhere else.
           trap 'echo "--- worker logs ---"; docker logs smoke || true; docker rm -f smoke >/dev/null 2>&1 || true' EXIT
           node web/scripts/smoke.mjs http://127.0.0.1:8787
+          echo "--- regression suite against the production bundle ---"
+          cd web && PLAYWRIGHT_BASE_URL=http://127.0.0.1:8787 npx playwright test regression
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-production
+          path: web/playwright-report
+          retention-days: 7
 
       # Accepted findings live in web/.trivyignore.yaml, each with a reason
       # and an expiry date so it comes back for review rather than being
@@ -332,6 +400,7 @@ jobs:
         web-lint-typecheck,
         web-unit,
         web-e2e,
+        web-audit,
         docker-ingest,
         docker-web,
       ]

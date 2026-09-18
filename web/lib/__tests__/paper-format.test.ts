@@ -7,11 +7,12 @@ import {
   planPaper,
   instructionLanguage,
   markLine,
+  matchSections,
   type Level,
 } from "@/lib/paper-format";
 import type { QuizKind } from "@/lib/quiz";
 
-const LEVELS: Level[] = ["F2", "F3"];
+const LEVELS: Level[] = ["F2", "F3", "INT"];
 const KINDS: QuizKind[] = ["grammar", "kanji"];
 
 describe("the assessment-format catalogue", () => {
@@ -78,8 +79,10 @@ describe("blueprints", () => {
       for (const kind of KINDS) {
         const plan = blueprint(level, kind);
         expect(plan.length, `${level}/${kind}`).toBeGreaterThanOrEqual(3);
-        // The schema caps a paper at five sections.
-        expect(plan.length, `${level}/${kind}`).toBeLessThanOrEqual(5);
+        // The sat papers run to seven and the schema caps a paper there; the
+        // plan stops at six because the seventh is always a section this app
+        // cannot mark.
+        expect(plan.length, `${level}/${kind}`).toBeLessThanOrEqual(6);
       }
     }
   });
@@ -281,5 +284,93 @@ describe("mark lines", () => {
     expect(markLine(1, 5)).toBe("(1×5)");
     expect(markLine(2, 5)).toBe("(2点×5)");
     expect(markLine(3, 3)).toBe("(3点×3)");
+  });
+});
+
+describe("the full format, not a sample of it", () => {
+  it("plans six sections wherever the catalogue can fill them", () => {
+    // Four of nine was the old cap, and it left most of the attested section
+    // types unreachable on any single paper.
+    expect(planPaper("F2", "grammar", { topic: 8 })).toHaveLength(6);
+    expect(planPaper("F2", "kanji", { topic: 8 })).toHaveLength(6);
+    expect(planPaper("F3", "kanji", { topic: 13 })).toHaveLength(6);
+    expect(planPaper("INT", "grammar", { topic: 5 })).toHaveLength(6);
+    expect(planPaper("INT", "kanji", { topic: 5 })).toHaveLength(6);
+  });
+
+  it("never plans two sections that test the same skill", () => {
+    for (const level of ["F2", "F3", "INT"] as const) {
+      for (const kind of ["grammar", "kanji"] as const) {
+        for (let variant = 0; variant < 6; variant++) {
+          const skills = planPaper(level, kind, { topic: level === "F2" ? 8 : 13, variant }).map(
+            (a) => a.skill,
+          );
+          expect(new Set(skills).size, `${level}/${kind} v${variant}: ${skills.join(",")}`).toBe(
+            skills.length,
+          );
+        }
+      }
+    }
+  });
+});
+
+describe("the Intermediate books, until their own papers exist", () => {
+  it("draw on the collective Foundation format rather than Foundation 3 alone", () => {
+    const ids = archetypes("INT", "grammar").map((a) => a.id);
+    expect(ids.some((id) => id.startsWith("int_f3g_"))).toBe(true);
+    expect(ids.some((id) => id.startsWith("int_f2g_"))).toBe(true);
+  });
+
+  it("are not gated by Foundation topic numbers", () => {
+    // Tobira counts Lessons 1-15; "not before Topic 10" means nothing there.
+    for (const a of [...archetypes("INT", "grammar"), ...archetypes("INT", "kanji")]) {
+      expect(a.fromTopic, a.id).toBeUndefined();
+      expect(a.toTopic, a.id).toBeUndefined();
+    }
+  });
+
+  it("print their instructions in Japanese", () => {
+    expect(instructionLanguage("INT", 1)).toBe("ja");
+  });
+});
+
+describe("matching a returned paper back to its plan", () => {
+  const plan = planPaper("F2", "kanji", { topic: 8 });
+  const asReturned = (ids: string[]) =>
+    ids.map((id) => {
+      const a = plan.find((p) => p.id === id)!;
+      return { instruction_ja: a.instructionJa, form: a.form };
+    });
+
+  it("matches by instruction when a section is missing", () => {
+    // Five of six back, the second one gone. By position every section after
+    // the gap was judged by its neighbour's rules.
+    const returned = asReturned(plan.filter((_, i) => i !== 1).map((a) => a.id));
+    const matched = matchSections(returned, plan);
+    expect(matched.map((a) => a?.id)).toEqual(plan.filter((_, i) => i !== 1).map((a) => a.id));
+  });
+
+  it("matches by instruction when sections come back reordered", () => {
+    const reversed = [...plan].reverse();
+    const matched = matchSections(asReturned(reversed.map((a) => a.id)), plan);
+    expect(matched.map((a) => a?.id)).toEqual(reversed.map((a) => a.id));
+  });
+
+  it("tolerates the furigana the model adds to an instruction it was told to copy", () => {
+    const target = plan.find((a) => a.instructionJa.includes("選"))!;
+    const withReadings = target.instructionJa.replace("選", "選《えら》");
+    const [match] = matchSections([{ instruction_ja: withReadings, form: target.form }], plan);
+    expect(match?.id).toBe(target.id);
+  });
+
+  it("never assigns one archetype to two sections", () => {
+    const first = plan[0];
+    const twice = [
+      { instruction_ja: first.instructionJa, form: first.form },
+      { instruction_ja: first.instructionJa, form: first.form },
+    ];
+    const [a, b] = matchSections(twice, plan);
+    expect(a?.id).toBe(first.id);
+    expect(b?.id).not.toBe(first.id);
   });
 });

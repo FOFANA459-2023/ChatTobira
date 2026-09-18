@@ -6,10 +6,18 @@
  * things that decide: how big the prompt is, and whether anybody is waiting.
  *
  * The order below is measured, not assumed. Every number here came from
- * calling the three providers with this app's own prompts and keys on
- * 2026-09-06, streaming, timing the first CONTENT token rather than the first
- * byte (a reasoning model streams thought before it streams an answer, and
- * the student hears nothing during the thinking):
+ * calling the three providers with this app's own prompts and keys, streaming,
+ * timing the first CONTENT token rather than the first byte (a reasoning model
+ * streams thought before it streams an answer, and the student hears nothing
+ * during the thinking).
+ *
+ * THIS BLOCK IS THE 2026-09-06 READING, KEPT FOR ITS SHAPE AND NOT FOR ITS
+ * ORDER. It was taken against a FREE Google key rationed to twenty requests a
+ * day, which is why every conclusion in it puts Gemini last. The key is paid
+ * now and the order has been re-measured — see the block above PREFERENCE,
+ * which is the one that decides. What survives from this reading is the method
+ * and the two facts that did not change: Groq's ceiling is shared across the
+ * deployment, and deepseek-v4-pro is not a chat model for this app.
  *
  *   Short conversational turn (~120 prompt tokens, 「昨日、友達と京都に行きました。」)
  *     groq qwen/qwen3.8-27b     0.42s total          free tier
@@ -40,8 +48,11 @@
  * 2. deepseek-v4-flash has no daily cap, holds an 8,300-token prompt without
  *    complaint, gets FASTER on the large prompt than the small one (prompt
  *    caching: 2,048 tokens hit on the second call), and costs a fraction of a
- *    cent a turn against a topped-up balance. It is the right primary for
- *    grounded text answers — which is most of what this app does.
+ *    cent a turn against a topped-up balance. It was the right primary for
+ *    grounded text answers while Gemini was rationed. It is no longer the
+ *    primary and it is still all of those things, which is exactly why it is
+ *    still in the cascade: it is the tier that absorbs a prompt nothing else
+ *    will take, on a day when the paid key is rate-limited.
  *
  * 3. deepseek-v4-pro is not a chat model for this app at any prompt size.
  *    Eleven seconds to a first word is not a conversation. It is listed
@@ -78,6 +89,36 @@ export interface Tier {
   provider: Provider;
   /** The model id to ask that provider for. */
   model: string;
+  /** What health and logging are tracked against, and what `models` overrides
+   * are keyed by.
+   *
+   * Distinct from `provider` because one provider can appear twice in one
+   * cascade: the structured task asks Google for Pro and then, if that fails,
+   * for the flash model behind it. Keying health on the provider would let a
+   * Pro timeout take the flash tier down with it, which is the opposite of
+   * what a fallback is for.
+   *
+   * The cost of the split is one wasted call per isolate on a bad KEY rather
+   * than a bad model — a 401 marks `google-pro` dead, the flash tier is tried,
+   * it 401s too, and both are dead from then on. One round trip, once, in
+   * exchange for the two tiers failing independently the rest of the time.
+   */
+  key: string;
+  /** How many tokens a Gemini model may spend thinking before it answers.
+   *
+   * Undefined means "whatever the model does by default", which is the right
+   * answer for the flash tiers: measured on this app's own prompts they spend
+   * 0–97 tokens reasoning and setting a budget changes nothing.
+   *
+   * It is not the right answer for Pro, and that is the whole reason this
+   * field exists — see the structured slot below.
+   */
+  thinkingBudget?: number;
+  /** Whose configuration this tier uses — its model override and its output
+   * budget. The same as `key` except for a retry, which is a second attempt
+   * at another tier and must be configured exactly as that tier is, while
+   * still failing and recovering on its own. */
+  config: string;
 }
 
 export interface RouteOptions {
@@ -87,95 +128,213 @@ export interface RouteOptions {
   /** Providers whose keys this deployment actually has. Google is assumed:
    * it is the last resort and the route checks for its key before calling. */
   hasDeepSeek?: boolean;
-  /** Model ids, so a deploy can move a tier without a code change. */
-  models?: Partial<Record<Provider, string>>;
+  /** Model ids by tier KEY, so a deploy can move a tier without a code
+   * change. Keys are the ones in PREFERENCE below — "google-pro" is its own
+   * key, so the paper model and the chat model are set separately. */
+  models?: Partial<Record<string, string>>;
 }
 
-/** Defaults matching the environment variables the routes already read. */
-const DEFAULT_MODELS: Record<Provider, string> = {
-  groq: "qwen/qwen3.8-27b",
-  deepseek: "deepseek-v4-flash",
-  google: "gemini-3.6-flash",
-};
+/** One position in a cascade. */
+interface Slot {
+  key: string;
+  provider: Provider;
+  model: string;
+  thinkingBudget?: number;
+  /** For a retry: the tier it repeats. See Tier.config. */
+  retries?: string;
+}
+
+/* ---------------------------------------------------------------------- *
+ * The 2026-09-18 re-measurement, after the Google key moved to a paid plan
+ *
+ * Everything below this line changed for one reason: Gemini stopped being the
+ * rationed last resort. The old order was built around a Google key metered
+ * at twenty requests a day, which made Gemini the tier you reached for when
+ * the others had failed and never the tier you asked first. On a paid key it
+ * is simply the fastest thing in the stack that can also hold a full prompt,
+ * and the order that was right under rationing is now wrong on every axis.
+ *
+ * Re-measured with this app's own prompts and keys, streaming, timing the
+ * first CONTENT token:
+ *
+ *   Spoken turn (~80 prompt tokens)
+ *     groq qwen/qwen3.8-27b          0.62s
+ *     google gemini-3.5-flash-lite   0.77s
+ *     deepseek-v4-flash              1.33s
+ *     google gemini-3.8-flash        3.81s
+ *     google gemini-pro-latest       7.46s
+ *
+ *   Typed RAG answer (~4,600 prompt tokens, six passages of textbook)
+ *     google gemini-3.5-flash-lite   0.94s
+ *     google gemini-3.8-flash        4.19s   (1.37s with thinking off)
+ *     deepseek-v4-flash              5.22s
+ *     google gemini-pro-latest      10.12s
+ *     groq qwen/qwen3.8-27b          HTTP 429: over the shared ITPM ceiling
+ *
+ * The typed row is the one that matters, because it is most of what this app
+ * does: flash-lite answers it five and a half times faster than the tier that
+ * was leading the cascade. That is the single largest latency change in this
+ * commit and it costs nothing — the prompt is the same prompt.
+ * ---------------------------------------------------------------------- */
 
 /** The preference order per task, before health and size are considered.
  *
- * Google is last in all three and is never filtered out: it is the tier that
- * has to answer when the others cannot, and a health check that could empty
- * the list is worse than a call that might fail. */
-const PREFERENCE: Record<ModelTask, Provider[]> = {
-  // Groq first purely on the clock: 0.42s against 1.35s, on a turn where the
-  // student is waiting in silence for a reply they will hear rather than read.
-  // A spoken turn's prompt is small by design, so this is also the one job
-  // that reliably fits inside the free tier's budget.
-  voice_turn: ["groq", "deepseek", "google"],
-  // DeepSeek first because this is the job Groq cannot hold: a typed question
-  // carries six passages, and at 8,300 tokens Groq answers 413 rather than
-  // answering. Groq stays in the chain below it for the short typed turns
-  // that do fit, where it is still three times faster and free.
-  chat_answer: ["deepseek", "groq", "google"],
-  // DeepSeek led this list because a paper is high-volume, non-interactive and
-  // validated after the fact — exactly the shape of work worth moving off a
-  // metered free tier. The reasoning was right and both of its premises turned
-  // out to be wrong.
+ * Nothing here is filtered unconditionally any more. The old rule — "Google is
+ * never filtered, it is the last resort" — existed to stop a health check
+ * emptying the cascade, and it stopped being true the moment Google moved to
+ * the FRONT of two of these three lists: a rule that refuses to skip a dead
+ * first tier is not a safety net, it is a guaranteed wasted round trip. The
+ * emptiness it guarded against is handled directly in `routeModels` instead.
+ */
+const PREFERENCE: Record<ModelTask, Slot[]> = {
+  // Groq still leads on the clock — 0.62s against flash-lite's 0.77s — and a
+  // spoken prompt is small by design, so it is the one job that reliably fits
+  // inside the free tier's shared input budget.
   //
-  // It cannot finish a paper. generateObject returns a whole object or
-  // nothing, and a real paper is a 17-item schema with an explanation and a
-  // review reference on every item. Measured twice, on two days, against the
-  // real corpus (scripts/local-db.sh):
+  // What changed is second place. DeepSeek sat there at 1.33s and is now
+  // behind flash-lite at 0.77s, which is worth having: second place is not a
+  // hypothetical on a tier metered per MINUTE across the whole deployment.
+  // Two classmates speaking at once is enough to push the second one down a
+  // tier, and that student now waits 0.77s instead of 1.33s.
+  voice_turn: [
+    { key: "groq", provider: "groq", model: "qwen/qwen3.8-27b" },
+    { key: "google", provider: "google", model: "gemini-3.5-flash-lite" },
+    { key: "deepseek", provider: "deepseek", model: "deepseek-v4-flash" },
+  ],
+
+  // Gemini first, and this is the change the app will be judged on.
   //
-  //   google   gemini-3.5-flash-lite    10.1s   17 items, 4 sections
-  //   groq     openai/gpt-oss-120b      9-45s   on the free tier's smaller prompt
-  //   deepseek deepseek-v4-flash       138.5s   returned nothing at all
+  // DeepSeek led here because it was the only paid tier that could hold six
+  // passages of textbook: Groq answers 413 over its shared 7,000-token input
+  // ceiling, and Gemini was rationed to twenty requests a day. Both halves of
+  // that reasoning are now false, and on the same prompt flash-lite answers in
+  // 0.94s where DeepSeek takes 5.22s. Nothing about the prompt changed; the
+  // key did.
   //
-  // This route's ceiling is 60 seconds. A tier that needs 138 of them is not
-  // a slow first choice, it is a guaranteed timeout in front of every student
-  // — which is exactly what "Could not generate a test" was. A reasoning model
-  // is the wrong tool for filling a large schema: it spent 15,490 of its
-  // 17,493 output tokens thinking.
+  // Groq stays second rather than first. It is marginally faster on the small
+  // prompts it can take, but `canTakePrompt` skips it for most real questions
+  // anyway, and putting a tier that usually cannot answer ahead of one that
+  // always can buys a wasted round trip far more often than a saved 150ms.
   //
-  // And the free tier it was moving work off is not the one this app uses.
-  // "20 requests a day" is gemini-3.6-flash's budget; wrangler.jsonc sets
-  // FALLBACK_MODEL to gemini-3.5-flash-lite for that exact reason, and its
-  // budget is a real one. Groq behind it is free too and answers in nine
-  // seconds when the prompt fits its 8,000-token-a-minute ceiling.
+  // DeepSeek stays last and stays valuable: uncapped, cheap, and the tier that
+  // absorbs an oversized prompt on a day when the Google key is rate-limited.
+  // It is demoted from primary, not dropped.
+  chat_answer: [
+    { key: "google", provider: "google", model: "gemini-3.5-flash-lite" },
+    { key: "groq", provider: "groq", model: "qwen/qwen3.8-27b" },
+    { key: "deepseek", provider: "deepseek", model: "deepseek-v4-flash" },
+  ],
+
+  // A paper is not interactive — the student pressed "New Test" and the app
+  // shows a loading state — but it is not unbounded either, and that is the
+  // correction this order encodes. Pro led this list on quality and the
+  // quality was real: measured across four papers it kept every item the
+  // validator looked at where every other tier lost some. What it also did
+  // was take 22 to 48 seconds, and on one run 56 — past this route's own
+  // 55-second deadline, which is a paper that never arrives at all.
   //
-  // So DeepSeek is not here. It keeps every job it is genuinely good at —
-  // chat_answer and voice_turn above, where it is paid, uncapped, and the only
-  // tier that can hold a prompt over Groq's input limit. It is not asked to do
-  // the one thing it cannot.
-  structured: ["google", "groq"],
+  // Re-measured on six-section papers against the real corpus, two runs of
+  // each setting, through the full validate pipeline:
+  //
+  //   model                     time        six-section papers   failures in 8 runs
+  //   gemini-3.8-flash +128     8.2-12.5s   4-6 of 6 sections    0
+  //   gemini-3.8-flash +0       8.4-23.1s   3-6 of 6             1 schema failure
+  //   gemini-3.8-flash +512     8.7-59.1s   3-6 of 6             2, one of them 59s
+  //   gemini-pro-latest +128    22.3-47.8s  always the full plan 0
+  //   gemini-3.5-flash-lite     8.2-17.1s   3-6 of 6             0, worst coverage
+  //
+  // 128 is the only budget at which 3.8-flash did not fail once, and it is
+  // three to four times faster than Pro. Neither 0 nor 512 is a safe default:
+  // both produced "response did not match schema" — a thinking budget is a
+  // target and pushing it to either extreme makes the JSON less reliable, not
+  // more.
+  //
+  // So speed leads and Pro backs it up. A paper that comes back in ten
+  // seconds and is missing one of six sections is a better paper than one
+  // that takes forty-eight, and the gate below it was relaxed to say so: the
+  // sat papers themselves run to between three and seven 問題.
+  //
+  // flash-lite is not here any more. It is as fast as 3.8-flash and returned
+  // three of six sections on a kanji paper, which is the one thing this list
+  // is ordered to avoid.
+  //
+  // The fast tier is asked TWICE before Pro. Its papers vary run to run —
+  // measured, the same Foundation 2 kanji prompt came back with six sections,
+  // then four, then six — so a short paper from it is usually bad luck rather
+  // than a prompt it cannot do, and a second ten-second attempt beats a
+  // thirty-to-fifty-second one. Temperature is 0.8, so the retry is a
+  // different paper, not the same one again.
+  structured: [
+    { key: "google-fast", provider: "google", model: "gemini-3.8-flash", thinkingBudget: 128 },
+    {
+      key: "google-fast-retry",
+      provider: "google",
+      model: "gemini-3.8-flash",
+      thinkingBudget: 128,
+      retries: "google-fast",
+    },
+    { key: "google-pro", provider: "google", model: "gemini-pro-latest", thinkingBudget: 128 },
+    { key: "groq", provider: "groq", model: "openai/gpt-oss-120b" },
+  ],
 };
 
 /** The models to try, in order, for this task right now.
  *
- * Filtered by three things, in this order: whether the deployment has the
- * key, whether the provider has proven dead this isolate, and whether the
- * prompt fits. The last is the one that earns its place — an oversized
- * request to Groq is not a failure that costs nothing, it is seven seconds
- * of the student's turn spent being told no.
+ * Filtered by three things: whether the deployment has the key, whether the
+ * tier has proven dead this isolate, and whether the prompt fits. The last is
+ * the one that earns its place — an oversized request to Groq is not a failure
+ * that costs nothing, it is seven seconds of the student's turn spent being
+ * told no.
+ *
+ * Health is checked per TIER and not per provider, so a Pro that keeps timing
+ * out does not take the flash tier behind it down as well. A key-level failure
+ * still takes everything on that key down, one tier at a time; see Tier.key.
  */
 export function routeModels(task: ModelTask, options: RouteOptions = {}): Tier[] {
   const { promptTokens = 0, hasDeepSeek = true, models = {} } = options;
 
-  return PREFERENCE[task]
-    .filter((provider) => {
-      if (provider === "google") return true; // never filtered: the last resort
-      if (provider === "deepseek" && !hasDeepSeek) return false;
-      if (isProviderDead(provider)) return false;
-      return canTakePrompt(provider, promptTokens);
-    })
-    .map((provider) => ({
-      provider,
-      model: models[provider] ?? DEFAULT_MODELS[provider],
-    }));
+  const configured = PREFERENCE[task].filter(
+    (slot) => slot.provider !== "deepseek" || hasDeepSeek,
+  );
+  const usable = configured.filter(
+    (slot) => !isProviderDead(slot.key) && canTakePrompt(slot.provider, promptTokens),
+  );
+
+  // A health check must never empty the cascade. It used to be stopped from
+  // doing that by exempting Google, which worked only while Google was last;
+  // now that it leads two of the three lists, the guard has to be about
+  // emptiness rather than about one provider.
+  //
+  // Falling back to the LAST configured tier rather than the first is
+  // deliberate: if everything is marked dead we are already on a bad day, and
+  // the bottom of a cascade is the tier chosen to be the one that still
+  // answers on a bad day. The prompt-size filter is honoured even here —
+  // handing Groq a prompt it has already said it cannot take is not a
+  // last-ditch attempt, it is a guaranteed 413.
+  const chosen =
+    usable.length > 0
+      ? usable
+      : configured.filter((slot) => canTakePrompt(slot.provider, promptTokens)).slice(-1);
+
+  return chosen.map((slot) => {
+    const config = slot.retries ?? slot.key;
+    return {
+      provider: slot.provider,
+      key: slot.key,
+      model: models[config] ?? slot.model,
+      thinkingBudget: slot.thinkingBudget,
+      config,
+    };
+  });
 }
 
 /** Why this order, in one line for the worker log.
  *
- * Worth logging because the order is now conditional: "deepseek,google" on a
- * typed turn means Groq was skipped for size, and that is the difference
- * between a tier being slow and a tier never being asked. */
+ * Worth logging because the order is conditional: "google,deepseek" on a typed
+ * turn means Groq was skipped for size, and that is the difference between a
+ * tier being slow and a tier never being asked. Tier keys rather than provider
+ * names, because "google,google" would not say which two Gemini models ran.
+ */
 export function routeReason(task: ModelTask, tiers: Tier[], promptTokens: number): string {
-  return `route ${task} ~${promptTokens}tok → ${tiers.map((t) => t.provider).join(",")}`;
+  return `route ${task} ~${promptTokens}tok → ${tiers.map((t) => t.key).join(",")}`;
 }
