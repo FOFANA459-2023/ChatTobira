@@ -154,14 +154,23 @@ export async function POST(request: Request) {
   }
 
   if (!response.ok) {
-    // 429 is the one worth naming: the Google key also carries vision and
-    // embeddings, so a busy ingestion run can starve the voice. The client
-    // reads the status and falls back to the browser rather than going silent.
-    console.error(`tts ${model} failed: ${response.status} ${await response.text()}`);
-    return Response.json(
-      { error: response.status === 429 ? "tts_quota" : "tts_failed" },
-      { status: 502 },
-    );
+    const detail = await response.text();
+    console.error(`tts ${model} failed: ${response.status} ${detail.slice(0, 300)}`);
+    if (response.status === 429) {
+      // Passed through as a 429 WITH the wait Google asked for, so the client
+      // can retry the same voice rather than give up on it. The speech models
+      // allow ten requests a minute for the whole project — measured on every
+      // TTS model this key can see — and a long answer read aloud used to run
+      // straight into that and hand its second half to the browser's voice,
+      // a different person finishing the tutor's sentence. The wait is read
+      // from the error's RetryInfo ("13s"); absent that, a conservative guess.
+      const retry = /"retryDelay":\s*"(\d+(?:\.\d+)?)s"/.exec(detail)?.[1];
+      return Response.json(
+        { error: "tts_quota", retryAfter: retry ? Math.ceil(Number(retry)) : 10 },
+        { status: 429 },
+      );
+    }
+    return Response.json({ error: "tts_failed" }, { status: 502 });
   }
 
   const json = (await response.json()) as TtsResponse;

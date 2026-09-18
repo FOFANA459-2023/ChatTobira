@@ -129,7 +129,16 @@ LABEL org.opencontainers.image.title="chattobira-web" \
 # image came from npm's OWN bundled dependencies (tar, pacote, sigstore,
 # brace-expansion, ip-address, picomatch), none of them from anything this
 # project wrote or chose. Deleting it is more honest than suppressing them.
-RUN apt-get update && apt-get install -y --no-install-recommends tini ca-certificates \
+#
+# apt-get upgrade, because the base image's own packages go stale between its
+# releases. Seen on 2026-09-18: three HIGH findings in libpcre2-8-0 10.42-1,
+# with the fix (10.42-1+deb12u1) already published by Debian - a package this
+# project never asked for, failing the deploy on a change that touched only
+# the app. The ingest image has done this all along for the same reason; CI
+# pairs it with `no-cache-filters: runtime` so the layer is actually rebuilt
+# rather than replayed from a cache that predates the fix.
+RUN apt-get update && apt-get upgrade -y \
+ && apt-get install -y --no-install-recommends tini ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
  && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 

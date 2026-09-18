@@ -93,7 +93,11 @@ provided course material, in the format of the course's own test papers. Rules:
   test covers — name the specific grammar points or vocabulary drilled, and
   the textbook or lesson area they come from.
 - Never reference "the source", file names, or page numbers in questions or
-  explanations; page numbers belong in review only.`;
+  explanations; page numbers belong in review only.
+- Never write your own labels into an item's text — 空欄, 番目, 問題, "blank
+  1". The paper numbers its gaps as （ 1 ）（ 2 ） and the student reads the
+  sentence, not your bookkeeping; a label is also usually a kanji the book
+  never prints, which makes the item unanswerable at this level.`;
 
 /** The uniqueness rule, stated as concretely as it can be stated.
  *
@@ -248,7 +252,10 @@ export function sectionPlan(
   level: Level,
   compact = false,
 ): string {
-  const numerals = ["I", "II", "III", "IV", "V"];
+  // Seven, matching the schema's section cap. This was five while papers
+  // were four sections long, and a sixth section was sent to the model as
+  // "Section undefined".
+  const numerals = ["I", "II", "III", "IV", "V", "VI", "VII"];
   const lines = plan.map((archetype, index) => {
     const items = itemsPerSection(archetype, perSection);
     const counts = allowedChoiceCounts(archetype);

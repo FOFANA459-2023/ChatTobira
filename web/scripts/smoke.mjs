@@ -97,6 +97,54 @@ const CHECKS = [
     },
   },
   {
+    name: "the pages are actually styled",
+    why:
+      "every other check here passes on a page with no CSS at all. A 200 is " +
+      "not a rendered app: a stylesheet that 404s leaves Times New Roman on a " +
+      "white background with every control still present and every assertion " +
+      "above still green. Seen in development on 2026-09-18 — the app served " +
+      "unstyled for a stretch and nothing in the pipeline had an opinion about " +
+      "it, because nothing in the pipeline had ever looked at an asset",
+    async run() {
+      const response = await request("/login");
+      const html = await response.text();
+
+      // Next emits its CSS as <link rel="stylesheet"> in the document head.
+      // Nothing matching at all means the build produced no stylesheet, which
+      // is a different failure from one that fails to load and is worth
+      // telling apart in the message.
+      const hrefs = [...html.matchAll(/<link[^>]+rel="stylesheet"[^>]*>/g)]
+        .map((tag) => /href="([^"]+)"/.exec(tag[0])?.[1])
+        .filter((href) => typeof href === "string");
+      assert(
+        hrefs.length > 0,
+        "the page references no stylesheet at all — the CSS build produced " +
+          "nothing, so this would ship as unstyled HTML",
+      );
+
+      for (const href of hrefs) {
+        // Same-origin only. A font or icon CDN being down is not this app
+        // failing to deploy, and CI has no business asserting on it.
+        if (/^https?:\/\//i.test(href)) continue;
+        const asset = await request(href);
+        assert(
+          asset.status === 200,
+          `stylesheet ${href} answered ${asset.status} — the page renders but ` +
+            "arrives unstyled",
+        );
+        const css = await asset.text();
+        assert(css.length > 0, `stylesheet ${href} is empty`);
+        // Tailwind's output always carries rules. A file that is served but
+        // contains no declaration block is a broken build, not a stylesheet.
+        assert(
+          /\{[^}]*:[^}]*\}/.test(css),
+          `stylesheet ${href} contains no CSS rules — ${css.length} bytes of ` +
+            "something else",
+        );
+      }
+    },
+  },
+  {
     name: "chat page renders for a signed-out visitor",
     why: "the 3-question trial lives here; it is the app's front door",
     async run() {

@@ -17,7 +17,7 @@
  * but a silent filter is one nobody can tune.
  */
 
-import { allowedChoiceCounts, type SectionArchetype } from "./paper-format";
+import { allowedChoiceCounts, matchSections, type SectionArchetype } from "./paper-format";
 import { normalizeAnswer, type Quiz, type QuizItem, type QuizSection } from "./quiz";
 import { offStyleForms, unattestedKanji, type HouseStyle } from "./textbook-usage";
 
@@ -155,6 +155,22 @@ export function tidyQuiz(quiz: Quiz): { quiz: Quiz; tidied: number } {
           question = question.replace(inline, "（　）");
           sentence = sentence?.replace(inline, "（　）");
           if (`${question}${sentence ?? ""}` !== before) tidied += 1;
+        }
+
+        // A ○× item whose "choices" are just ○ and × is the model restating
+        // the answer format, not offering options — the paper prints the two
+        // marks itself. Seen on a Foundation 3 reading section, every item of
+        // it: the validator rejected all five, the paper fell below its
+        // section floor, and a sound paper cost the student a retry. Only
+        // marks are stripped; a ○× item carrying real options is still the
+        // fault the validator names.
+        if (
+          (section.form === "maru_batsu" || item.type === "true_false") &&
+          choices?.length &&
+          choices.every((choice) => MARKS.test(choice.trim()))
+        ) {
+          tidied += 1;
+          return { ...item, choices: undefined, question, sentence, answer: item.answer };
         }
 
         // Stripping a label must not orphan the answer from its options.
@@ -329,10 +345,12 @@ export function validateQuiz(
   material: MaterialContext = {},
 ): { quiz: Quiz; rejected: Rejection[] } {
   const rejected: Rejection[] = [];
+  // Matched by instruction, not by position — see matchSections.
+  const matched = matchSections(quiz.sections, blueprint);
 
   const sections = quiz.sections
     .map((section, sectionIndex) => {
-      const archetype = blueprint[sectionIndex];
+      const archetype = matched[sectionIndex];
       const usedBankWords = new Set<string>();
 
       const items = section.items.filter((item, itemIndex) => {

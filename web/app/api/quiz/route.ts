@@ -24,7 +24,7 @@ import {
   type ExemplarChunk,
   type Quiz,
 } from "@/lib/quiz";
-import { planPaper, type Level } from "@/lib/paper-format";
+import { matchSections, planPaper, type Level } from "@/lib/paper-format";
 import { buildQuizPrompt, itemsForPlan, MIN_PASSAGE_CHARS } from "@/lib/quiz-prompt";
 import { dropDuplicates, dropRepeats, fingerprint, type Fingerprint } from "@/lib/quiz-signature";
 import { tidyQuiz, validateQuiz, type MaterialContext } from "@/lib/quiz-validate";
@@ -35,28 +35,35 @@ import { trialCookie, trialUsed, TRIALS } from "@/lib/trial";
 
 export const maxDuration = 60;
 
-/** How much room a paper is given to be written in, and on which prompt.
+/** How much room a paper is given to be written in, on which prompt, and by
+ * which tier.
  *
- * Both numbers below are measurements taken against the local copy of the
- * corpus (scripts/local-db.sh), not estimates, because every previous version
- * of this constant was an estimate and every one of them was wrong in a way
- * that surfaced as a different error.
+ * Every number below is a measurement taken against the local copy of the
+ * corpus (scripts/local-db.sh), not an estimate, because every previous
+ * version of this constant was an estimate and every one of them was wrong in
+ * a way that surfaced as a different error.
  *
- * Google is first for a structured job (lib/router.ts) and gets the whole
- * budget, because it meters nothing of the sort and because how much of that
- * budget it spends depends entirely on which Gemini a deployment names.
- * Measured on the corpus copy with the same prompt:
+ * Keyed by TIER rather than by provider. The two Google tiers need different
+ * numbers and were forced to share one while the router spoke only in
+ * provider names.
  *
- *   gemini-3.5-flash-lite   8.7s   18 items, 4 sections   what this app runs
- *   gemini-3.6-flash        38-50s 17 items, 4 sections   input 6,239,
- *                                                         output 2,352,
- *                                                         REASONING 5,735
+ *   google-pro (gemini-pro-latest)  32,000
+ *   google     (gemini-3.5-flash-lite) 16,000
  *
- * The paper itself is 2,400 tokens of JSON either way. What made the previous
- * 4,800 too small was the second row: a thinking model bills its reasoning to
- * the same allowance, so the symptom was never a short paper, it was invalid
- * JSON — "could not parse the response" — from a tier that looked like it had
- * failed for no reason. 16,000 covers both.
+ * That gap is the difference between Pro writing a paper and Pro appearing to
+ * be broken. A thinking model bills its reasoning to the same allowance as its
+ * answer, so the symptom is never a short paper — it is INVALID JSON, "No
+ * object generated: could not parse the response", a message that points at
+ * the schema and means the budget. Measured across four papers:
+ *
+ *   gemini-3.5-flash-lite   6-11s    16,000  three papers of four
+ *   gemini-3.6-flash        38-50s   16,000  output 2,352, REASONING 5,735
+ *   gemini-pro-latest       95-111s  16,000  ONE paper of four
+ *   gemini-pro-latest +128  17-33s   32,000  four of four, nothing rejected
+ *
+ * Capping Pro's reasoning (lib/router.ts) is what fixed the latency; 32,000 is
+ * what gives the paper somewhere to land once the reasoning stops eating the
+ * room. The paper itself is ~2,400 tokens of JSON on every one of these rows.
  *
  * Groq's free tier meters PROMPT PLUS RESERVED OUTPUT against 8,000 tokens a
  * minute, and the full prompt is ~6,300 tokens by the provider's own count.
@@ -86,7 +93,16 @@ export const maxDuration = 60;
  * around, and it is written down here so the next person does not spend an
  * afternoon rediscovering it.
  */
-const OUTPUT_BUDGET = { groq: 3_800, deepseek: 8_000, google: 16_000 } as const;
+const OUTPUT_BUDGET: Record<string, number> = {
+  groq: 3_800,
+  deepseek: 8_000,
+  google: 16_000,
+  // The fast paper tier. 3.8-flash with a capped budget spends little on
+  // reasoning, but a six-section paper is ~27 items of JSON and a truncated
+  // one arrives as a parse failure, not a short paper.
+  "google-fast": 32_000,
+  "google-pro": 32_000,
+};
 
 /** Excerpts for the free tier's prompt: fewer, shorter. */
 const COMPACT_EXCERPTS = 4;
@@ -293,10 +309,19 @@ export async function POST(request: Request) {
   const contentScope =
     scopeDivisionForContent.length > 0 ? Math.max(...scopeDivisionForContent) : null;
 
+  // How much of the book the paper is drawn from. A kanji paper gets half as
+  // much again, because on a kanji paper every WORD may appear once across
+  // the whole paper, and six sections were being asked to find twenty-odd
+  // distinct words in eight excerpts. Measured on Foundation 3 Topic 13 with
+  // eight: the sections drew on the same words and the duplicate filter
+  // removed twelve items, leaving three sections — the "Could not generate"
+  // on a kanji test. A grammar paper can drill different patterns in the same
+  // sentences, so it keeps the tighter, faster prompt.
+  const excerptCount = kind === "kanji" ? 12 : 8;
   let picked: QuizChunk[] =
-    contentScope !== null ? chunksForLesson(allChunks, lessons, contentScope, 8) : [];
+    contentScope !== null ? chunksForLesson(allChunks, lessons, contentScope, excerptCount) : [];
   if (picked.length === 0) {
-    picked = rankChunksByFocus(allChunks, focus ?? "", 8);
+    picked = rankChunksByFocus(allChunks, focus ?? "", excerptCount);
   }
 
   // ~10 focused excerpts with tight character caps: quiz latency is dominated
@@ -335,10 +360,11 @@ export async function POST(request: Request) {
   // ---------------------------------------------------------------------
   const level = (doc as { level: string | null }).level;
 
-  // The paper's plan, from the format catalogue. Intermediate has no sat
-  // papers in the corpus, so it falls back to the Foundation 3 shapes —
-  // closest in level, and better than a template nobody's course uses.
-  const formatLevel: Level = level === "F2" ? "F2" : "F3";
+  // The paper's format. Intermediate has no sat papers of its own yet, and
+  // used to be quietly handed Foundation 3's five grammar shapes; it now has
+  // its own entry in the catalogue, built from every section type the
+  // Foundation papers attest. See INT_GRAMMAR in lib/paper-format.ts.
+  const formatLevel: Level = level === "F2" ? "F2" : level === "INT" ? "INT" : "F3";
 
   // What this student has already been asked at this level. The paper they
   // just sat still rides in on `avoid`, but that dies with the page; this is
@@ -389,16 +415,30 @@ export async function POST(request: Request) {
 
   let exemplars: ExemplarChunk[] = [];
   if (level) {
-    const paperKey = `papers:${level}`;
+    // Whose papers this one is modelled on. A Foundation book reads its own
+    // level's papers and never wider — a Foundation 2 test modelled on a
+    // Foundation 3 paper drills the right book in the wrong register. The
+    // Intermediate books have no papers of their own, so they read the
+    // collective Foundation set, most advanced first, until theirs are
+    // ingested; the moment an INT past paper exists it is used instead.
+    const paperLevels = level === "INT" ? ["INT", "F3", "F2"] : [level];
+    const paperKey = `papers:${paperLevels.join("+")}`;
     let papers = cachedPool<ExemplarChunk[]>(paperKey);
     if (!papers) {
       const { data: paperChunks } = await db
         .from("chunks")
         .select("content, metadata, documents!inner(doc_type, level)")
         .eq("documents.doc_type", "past_paper")
-        .eq("documents.level", level)
+        .in("documents.level", paperLevels)
         .limit(300);
       papers = (paperChunks ?? []) as unknown as ExemplarChunk[];
+      // The book's own level wins outright once it has any papers at all:
+      // the collective set is a stand-in, not a blend to keep diluting the
+      // real thing with.
+      const own = papers.filter(
+        (chunk) => (chunk as { documents?: { level?: string } }).documents?.level === level,
+      );
+      if (own.length > 0) papers = own;
       // Remembered even when empty: a level with no past papers should cost
       // one query per TTL, not one per generated test.
       rememberPool(paperKey, papers);
@@ -429,12 +469,31 @@ export async function POST(request: Request) {
   // question of it twice.
   let material = cachedPool<MaterialContext>(`material:${documentId}`);
   if (!material) {
+    // Which characters count as printed. For a Foundation book, that book:
+    // a Foundation 2 student owns Foundation 1 & 2 and nothing later. The
+    // Intermediate course is TWO books a student holds together — the Tobira
+    // reader and the Tobira Kanji and Vocabulary book — so a character either
+    // one prints is one the student can read. Checked against one book alone,
+    // a grammar paper drawn from the Kanji book lost twelve of its items to
+    // 李, the name of a character the reader introduces on its first pages.
+    let attested = attestedKanji(allChunks.map((c) => c.content));
+    if (level === "INT") {
+      const { data: siblings } = await db
+        .from("chunks")
+        .select("content, documents!inner(doc_type, level)")
+        .eq("documents.doc_type", "textbook")
+        .eq("documents.level", "INT")
+        .neq("document_id", documentId)
+        .limit(1600);
+      const theirs = attestedKanji(((siblings ?? []) as { content: string }[]).map((c) => c.content));
+      attested = new Set([...attested, ...theirs]);
+    }
     material = {
       style: houseStyle(
         picked.map((c) => c.content),
         allChunks.map((c) => c.content),
       ),
-      attestedKanji: attestedKanji(allChunks.map((c) => c.content)),
+      attestedKanji: attested,
     };
     rememberPool(`material:${documentId}`, material);
   }
@@ -465,7 +524,7 @@ export async function POST(request: Request) {
       perSection,
     });
 
-  const { system, prompt, planned } = promptFor(picked, true, 700);
+  const { system, prompt } = promptFor(picked, true, 700);
   // The free tier's version of the same request — see OUTPUT_BUDGET.
   const compact = promptFor(picked.slice(0, COMPACT_EXCERPTS), false, COMPACT_EXCERPT_CHARS);
 
@@ -499,6 +558,13 @@ export async function POST(request: Request) {
     models: {
       groq: process.env.QUIZ_MODEL ?? "openai/gpt-oss-120b",
       deepseek: process.env.DEEPSEEK_MODEL,
+      // Two Google tiers, two settings. PAPER_MODEL is the one that writes
+      // the paper a student sits; FALLBACK_MODEL is the flash tier behind it
+      // and is shared with the chat route. They were a single variable while
+      // there was a single Google tier, and giving the paper the chat model
+      // is what kept papers on flash-lite after the key could afford Pro.
+      "google-fast": process.env.PAPER_FAST_MODEL,
+      "google-pro": process.env.PAPER_MODEL,
       google: process.env.FALLBACK_MODEL,
     },
   });
@@ -532,11 +598,13 @@ export async function POST(request: Request) {
 
   // The label is the model id. Two tiers now share the provider "groq", so a
   // log line naming only the provider cannot say which of them failed.
-  const tiers = route.map(({ provider, model }) => ({
+  const tiers = route.map(({ provider, key, config, model, thinkingBudget }) => ({
     provider,
+    key,
     label: model,
     model: clientFor[provider](model),
-    outputBudget: OUTPUT_BUDGET[provider],
+    outputBudget: OUTPUT_BUDGET[config] ?? OUTPUT_BUDGET[provider],
+    thinkingBudget,
     // Groq is metered on prompt plus reserved output together, so it gets the
     // compact prompt or it gets a 413. Everything else gets the real one.
     ask: provider === "groq" ? compact : { system, prompt },
@@ -551,6 +619,10 @@ export async function POST(request: Request) {
    * questions again next week. */
   function recordHistory(written: Quiz, prints: Fingerprint[]): void {
     if (!user || prints.length === 0) return;
+    // Which section type each served section is, by instruction rather than
+    // position: a paper that lost a section would otherwise record every
+    // later one as its neighbour, and the rotation reads these rows.
+    const served = matchSections(written.sections, plan);
     void supabase
       .from("quiz_items")
       .insert(
@@ -562,7 +634,7 @@ export async function POST(request: Request) {
               level,
               kind,
               topic: contentScope !== null ? `T${contentScope}` : null,
-              archetype: plan[sectionIndex]?.id ?? null,
+              archetype: served[sectionIndex]?.id ?? null,
               question_type: item.type,
               question: item.question.slice(0, 500),
               answer: item.answer.slice(0, 200),
@@ -647,6 +719,23 @@ export async function POST(request: Request) {
           // 4,800 sits above the 3,852 a full seventeen-item paper actually
           // used, and leaves a ~3,000-token prompt inside the minute's budget.
           maxOutputTokens: tier.outputBudget,
+          // The cap that makes Pro usable here. A paper is a large schema and
+          // a reasoning model asked to fill one will think its way through the
+          // entire output allowance if nothing stops it: measured, Pro spent
+          // 95-111 seconds a paper and finished one of four. Capped, 17-33
+          // seconds and four of four. See lib/router.ts for the table.
+          ...(tier.provider === "google" && tier.thinkingBudget !== undefined
+            ? {
+                providerOptions: {
+                  google: {
+                    thinkingConfig: {
+                      thinkingBudget: tier.thinkingBudget,
+                      includeThoughts: false,
+                    },
+                  },
+                },
+              }
+            : {}),
           abortSignal: controller.signal,
         }),
         Math.min(ACCEPT_BUDGET_MS.structured, remaining),
@@ -658,7 +747,7 @@ export async function POST(request: Request) {
       // that asks 食べる twice.
       const { quiz: deduped, removed } = dedupeQuiz(object, kind);
       if (removed > 0) {
-        console.warn(`quiz on ${tier.provider}: dropped ${removed} repeated item(s)`);
+        console.warn(`quiz on ${tier.key}: dropped ${removed} repeated item(s)`);
       }
       // Then: no question may be a past-paper question. The exemplars are
       // shown as form, and a generator that lifts one has handed the student
@@ -666,7 +755,7 @@ export async function POST(request: Request) {
       // the repeat check is — the prompt asks, and mostly gets, compliance.
       const { quiz: uncopied, removed: copied } = dropCopiedItems(deduped, exemplars);
       if (copied > 0) {
-        console.warn(`quiz on ${tier.provider}: dropped ${copied} item(s) copied from a past paper`);
+        console.warn(`quiz on ${tier.key}: dropped ${copied} item(s) copied from a past paper`);
       }
       // Then: no question may be one the student cannot answer. Every fault
       // here is schema-valid and unusable — a right answer that is not among
@@ -677,7 +766,7 @@ export async function POST(request: Request) {
       // rejecting items over them would throw away good questions.
       const { quiz: tidied, tidied: fixes } = tidyQuiz(uncopied);
       if (fixes > 0) {
-        console.warn(`quiz on ${tier.provider}: tidied ${fixes} layout artefact(s)`);
+        console.warn(`quiz on ${tier.key}: tidied ${fixes} layout artefact(s)`);
       }
       // Judged against the plan AND against the book: an item can be perfectly
       // answerable and still be one this course could not have set, because
@@ -687,7 +776,7 @@ export async function POST(request: Request) {
       const { quiz: checked, rejected } = validateQuiz(tidied, plan, material);
       if (rejected.length > 0) {
         console.warn(
-          `quiz on ${tier.provider}: rejected ${rejected.length} invalid item(s): ` +
+          `quiz on ${tier.key}: rejected ${rejected.length} invalid item(s): ` +
             rejected.map((r) => `[${r.section}.${r.item}] ${r.reason}`).join("; "),
         );
       }
@@ -699,7 +788,7 @@ export async function POST(request: Request) {
       const near = dropDuplicates(checked);
       if (near.removed > 0) {
         console.warn(
-          `quiz on ${tier.provider}: dropped ${near.removed} duplicate item(s): ` +
+          `quiz on ${tier.key}: dropped ${near.removed} duplicate item(s): ` +
             near.reasons.join("; "),
         );
       }
@@ -710,7 +799,7 @@ export async function POST(request: Request) {
       let paper = dropped.quiz;
       const { removed: repeats, kept } = dropped;
       if (repeats > 0) {
-        console.warn(`quiz on ${tier.provider}: dropped ${repeats} item(s) seen before`);
+        console.warn(`quiz on ${tier.key}: dropped ${repeats} item(s) seen before`);
       }
 
       // A paper that is schema-valid but far too short is still unusable —
@@ -724,14 +813,39 @@ export async function POST(request: Request) {
       // A missing SECTION is a different failure from a short one, and the
       // item count cannot see it. dropRepeats removes a section once its last
       // item is filtered away, so a paper could lose a whole 問題 — the
-      // reading passage, the word bank — and still clear a 60% item bar. That
-      // is exactly what stopped these looking like the papers they copy:
-      // the format is the sections, not the number of questions.
+      // reading passage, the word bank — and still clear an item bar. The
+      // format is the sections, not the number of questions.
+      //
+      // But "every section the plan asked for" is the wrong bar, and it was
+      // the bar. It only looked right while a plan was four sections drawn
+      // from a catalogue of nine: now that a plan asks for six, demanding all
+      // six throws away a perfectly good five-section paper and sends the
+      // student to a tier three times slower for it — or, when that one is
+      // short too, to "Could not generate a test". That is the kanji failure
+      // reported from the app, and it is self-inflicted: measured, the fast
+      // tier returns four to six sections of six and the validator is
+      // strictest on exactly the kanji items where it returns five.
+      //
+      // The sat papers themselves run to between three and seven 問題. Four
+      // is a paper. So four is the bar, or the whole plan when the plan is
+      // shorter than that — Foundation 3 grammar only has five archetypes to
+      // draw on and a three-section paper there should not pass as complete.
+      const MIN_SECTIONS = 4;
+      const sectionFloor = Math.min(MIN_SECTIONS, plan.length);
+      // Items are bounded by an absolute floor rather than a fraction of the
+      // plan, and that changed for the same reason. A percentage of a
+      // six-section plan is a much larger number than the same percentage of
+      // a four-section one, so raising the section count silently raised this
+      // bar too and started failing papers that had grown, not shrunk. Nine is
+      // the smallest test the API will accept a request for (BodySchema's
+      // `count` floor), which makes it the smallest paper anyone has ever
+      // called a paper here.
+      const MIN_ITEMS = 9;
       const shortOf =
-        paper.sections.length < plan.length
-          ? `missing a section: ${paper.sections.length} of ${plan.length} survived`
-          : produced < Math.ceil(planned * 0.6)
-            ? `too short: ${produced} items for a ${planned}-item plan`
+        paper.sections.length < sectionFloor
+          ? `missing sections: ${paper.sections.length} of ${plan.length}, below the floor of ${sectionFloor}`
+          : produced < MIN_ITEMS
+            ? `too short: ${produced} items, below the floor of ${MIN_ITEMS}`
             : null;
       if (shortOf) {
         // Keep it in case nothing better comes back. More sections first,
@@ -781,7 +895,7 @@ export async function POST(request: Request) {
       if (needsPassage && paper.sections.some(unanswerable)) {
         const kept = paper.sections.filter((section) => !unanswerable(section));
         console.warn(
-          `quiz on ${tier.provider}: dropped ${paper.sections.length - kept.length} section(s) whose passage was missing or too short`,
+          `quiz on ${tier.key}: dropped ${paper.sections.length - kept.length} section(s) whose passage was missing or too short`,
         );
         paper = { ...paper, sections: kept };
       }
@@ -809,11 +923,11 @@ export async function POST(request: Request) {
         (error as { responseBody?: string; cause?: unknown } | null)?.responseBody ??
         (error as { cause?: { responseBody?: string } } | null)?.cause?.responseBody;
       console.error(
-        `quiz generation failed on ${tier.provider} (${tier.label}):`,
+        `quiz generation failed on ${tier.key} (${tier.label}):`,
         error instanceof Error ? error.message : error,
         detail ? `\n  response: ${String(detail).slice(0, 1200)}` : "",
       );
-      noteProviderFailure(tier.provider, error);
+      noteProviderFailure(tier.key, error);
     }
   }
   // Nothing cleared the bar, but something was written. A slightly short

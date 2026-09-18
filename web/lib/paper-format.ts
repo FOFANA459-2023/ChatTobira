@@ -51,7 +51,10 @@
 
 import type { QuizKind } from "./quiz";
 
-export type Level = "F2" | "F3";
+/** F2 and F3 are the two Foundation courses whose sat papers are in the
+ * corpus. INT is the two Tobira Intermediate books, which have NO past papers
+ * ingested yet — see INT_GRAMMAR below for what they are given instead. */
+export type Level = "F2" | "F3" | "INT";
 
 /** How an item is answered, which decides how it renders and how it grades. */
 export type ItemForm =
@@ -730,9 +733,61 @@ const F3_KANJI: SectionArchetype[] = [
   },
 ];
 
+/* ------------------------------------------------------------------------ */
+/* Intermediate: the collective Foundation format, until its own papers exist */
+/* ------------------------------------------------------------------------ */
+/* The two Tobira Intermediate books have no sat papers in the corpus, so     */
+/* there is no Intermediate format to read off. They used to be handed the    */
+/* Foundation 3 catalogue on its own, which gave an Intermediate grammar      */
+/* paper five archetypes to draw from and topic gates written for a different */
+/* course's numbering.                                                        */
+/*                                                                            */
+/* Until Intermediate papers are ingested, they draw on EVERY section type    */
+/* the Foundation papers attest — Foundation 3's first, then Foundation 2's — */
+/* which is the whole of the evidence this app has about how this course sets */
+/* a paper. Three adjustments, each for a stated reason:                      */
+/*                                                                            */
+/*   - Topic gates are dropped. `fromTopic`/`toTopic` count Foundation        */
+/*     topics; Tobira counts Lessons 1–15, and "not before Topic 10" means    */
+/*     nothing in a book whose Lesson 1 already assumes the plain form.       */
+/*   - Only Foundation 3's spine stays mandatory. Foundation 2's `always`     */
+/*     sections are the backbone of an elementary paper; carried over as     */
+/*     mandatory they would crowd the plan with Topic 6 drills.               */
+/*   - One archetype per SKILL, Foundation 3's winning. Both levels test      */
+/*     kanji-reading, kanji-writing, reading-comprehension and                */
+/*     kanji-discrimination; carried over twice, the first plan this built    */
+/*     had two word-bank sections on one kanji paper, and the prompt tells    */
+/*     the model that no two sections may test the same thing.                */
+/*   - Ids are prefixed, so the history table can tell an Intermediate        */
+/*     student's word bank from a Foundation 2 student's, and the rotation    */
+/*     moves on each independently.                                           */
+/*                                                                            */
+/* When Intermediate papers arrive, this is the one block to replace.         */
+function collective(
+  primary: SectionArchetype[],
+  secondary: SectionArchetype[],
+): SectionArchetype[] {
+  const intermediate = (archetype: SectionArchetype, spine: boolean): SectionArchetype => ({
+    ...archetype,
+    id: `int_${archetype.id}`,
+    always: spine ? archetype.always : false,
+    fromTopic: undefined,
+    toTopic: undefined,
+  });
+  const skills = new Set(primary.map((a) => a.skill));
+  return [
+    ...primary.map((a) => intermediate(a, true)),
+    ...secondary.filter((a) => !skills.has(a.skill)).map((a) => intermediate(a, false)),
+  ];
+}
+
+const INT_GRAMMAR = collective(F3_GRAMMAR, F2_GRAMMAR);
+const INT_KANJI = collective(F3_KANJI, F2_KANJI);
+
 const CATALOGUE: Record<Level, Record<QuizKind, SectionArchetype[]>> = {
   F2: { grammar: F2_GRAMMAR, kanji: F2_KANJI },
   F3: { grammar: F3_GRAMMAR, kanji: F3_KANJI },
+  INT: { grammar: INT_GRAMMAR, kanji: INT_KANJI },
 };
 
 export function archetypes(level: Level, kind: QuizKind): SectionArchetype[] {
@@ -744,6 +799,57 @@ export function archetypeById(id: string): SectionArchetype | undefined {
     .flatMap((byKind) => Object.values(byKind))
     .flat()
     .find((a) => a.id === id);
+}
+
+/** Which planned archetype each section of a paper actually is.
+ *
+ * Position was the answer, and position is only right when the model returns
+ * every section it was asked for in the order it was asked. It does not
+ * always: a six-section plan comes back with five, or with two sections
+ * swapped, and from the first gap onward every section was being judged by
+ * its neighbour's rules — word-bank rules applied to an antonym section, a
+ * passage demanded of a katakana one — and recorded in history as the wrong
+ * section type, which moves the next paper's rotation on the wrong axis.
+ *
+ * The prompt tells the model to copy each section's instruction line exactly,
+ * so that line is the key. Where it was reworded, the section's answer form
+ * decides among the archetypes not yet claimed; position is the last resort.
+ * Each archetype is claimed at most once.
+ */
+export function matchSections(
+  sections: { instruction_ja: string; form?: ItemForm }[],
+  plan: SectionArchetype[],
+): (SectionArchetype | undefined)[] {
+  // The model often adds furigana to the instruction it was told to copy —
+  // 選《えら》んで, 選（えら）んで — so readings and spacing are ignored.
+  const normal = (text: string) =>
+    text
+      .replace(/《[^》]*》/g, "")
+      .replace(/[（(][ぁ-ゖー]+[）)]/g, "")
+      .replace(/\s|　/g, "");
+  const claimed = new Set<string>();
+  const claim = (archetype: SectionArchetype | undefined) => {
+    if (archetype) claimed.add(archetype.id);
+    return archetype;
+  };
+  const free = () => plan.filter((a) => !claimed.has(a.id));
+
+  // Exact instruction first, across the whole paper, so an exact match is
+  // never stolen by an earlier section's looser one.
+  const exact = sections.map((section) =>
+    claim(
+      free().find(
+        (a) => a.instructionJa === section.instruction_ja || normal(a.instructionJa) === normal(section.instruction_ja),
+      ),
+    ),
+  );
+  return sections.map((section, index) => {
+    if (exact[index]) return exact[index];
+    const byForm = free().filter((a) => a.form === section.form);
+    if (byForm.length > 0) return claim(byForm[0]);
+    const atIndex = plan[index];
+    return atIndex && !claimed.has(atIndex.id) ? claim(atIndex) : undefined;
+  });
 }
 
 /** The option counts this section's items may legitimately print. */
@@ -768,12 +874,28 @@ export function fitsTopic(archetype: SectionArchetype, topic: number | null): bo
 
 /** How many 問題 a paper of this level and kind carries.
  *
- * Four. The sat papers run to between three and seven, but the ones with six
- * and seven get there with picture tasks and open writing this app cannot
- * mark, and the schema caps a paper at five sections. Four machine-markable
- * 問題 is the most paper that can honestly be built.
+ * Six, or as many as the level and kind can actually fill.
+ *
+ * It was four, and four was wrong in a way that only showed up next to a real
+ * paper: the sat papers run to between three and SEVEN 問題, and this file
+ * holds eight or nine machine-markable archetypes for each Foundation 2 kind.
+ * Planning four of nine meant a student could sit paper after paper and never
+ * meet five of the section types their own course sets — the katakana
+ * spelling, the opposites, the radical association, the form table. The
+ * catalogue was built to cover the format and then three quarters of it was
+ * unreachable.
+ *
+ * Four also quietly agreed with a cap in the SCHEMA — sections maxed at five
+ * — so the two constraints propped each other up and neither looked wrong on
+ * its own. Both moved together; see QuizSchema.
+ *
+ * Not seven: the papers that reach seven get there with picture tasks and
+ * open writing this app cannot mark, so six is the most paper that can
+ * honestly be built out of machine-markable sections. Where a level has fewer
+ * eligible archetypes than that — Foundation 3 grammar has five — the plan is
+ * simply shorter, which is also what the real papers do.
  */
-const SECTIONS_PER_PAPER = 4;
+const SECTIONS_PER_PAPER = 6;
 
 /** Which sections a paper is built from, in the order the papers print them.
  *
@@ -821,7 +943,7 @@ export function planPaper(
     plan.push(rest[(offset + i) % rest.length]);
   }
 
-  return orderPlan(finishPassages(plan, rest));
+  return orderPlan(finishPassages(plan, rest, variant));
 }
 
 /** Sort a plan into the order the papers print these sections in, keeping a
@@ -848,13 +970,28 @@ function orderPlan(plan: SectionArchetype[]): SectionArchetype[] {
 function finishPassages(
   plan: SectionArchetype[],
   rest: SectionArchetype[],
+  variant = 0,
 ): SectionArchetype[] {
   const owns = (a: SectionArchetype) => Boolean(a.passage) && !a.sharesPassage;
   let kept = [...plan];
 
+  // Which two passage-writers survive. Spine sections always do; the
+  // remaining slots ROTATE with the variant rather than going to whichever
+  // prints first. Print order used to be enough because a four-section plan
+  // rarely held three writers — the rotation had usually left one out already.
+  // A six-section plan takes every eligible Foundation 3 grammar archetype,
+  // so the same two writers won every time and the narrative cloze, on the
+  // real papers, was never planned again.
   const owners = kept.filter(owns);
   if (owners.length > 2) {
-    const allowed = new Set(orderPlan(owners).slice(0, 2).map((a) => a.id));
+    const spine = owners.filter((a) => a.always);
+    const optional = orderPlan(owners.filter((a) => !a.always));
+    const free = Math.max(0, 2 - spine.length);
+    const start = optional.length > 0 ? ((variant % optional.length) + optional.length) % optional.length : 0;
+    const chosen = Array.from({ length: Math.min(free, optional.length) }, (_, i) =>
+      optional[(start + i) % optional.length],
+    );
+    const allowed = new Set([...spine, ...chosen].slice(0, 2).map((a) => a.id));
     kept = kept.filter((a) => !owns(a) || allowed.has(a.id));
   }
 
@@ -902,7 +1039,9 @@ export function instructionLanguage(
   level: Level,
   topic: number | null,
 ): "en" | "ja+en" | "ja" {
-  if (level === "F3") return "ja";
+  // Intermediate students have been reading Japanese instructions since
+  // Foundation 3; there is no stage of that course where English leads.
+  if (level === "F3" || level === "INT") return "ja";
   return topic !== null && topic <= 6 ? "en" : "ja+en";
 }
 
@@ -930,5 +1069,13 @@ export const SENTENCE_LENGTH: Record<Level, { min: number; max: number; note: st
     min: 20,
     max: 55,
     note: "two or three clauses joined by ので, のに, たら, ば, とき, or a relative clause before the noun",
+  },
+  // Not measured — there are no Intermediate papers to measure. Foundation
+  // 3's range, with room above it for the longer, more embedded sentences the
+  // Tobira books are written in. Replace with a measurement when papers exist.
+  INT: {
+    min: 25,
+    max: 70,
+    note: "multi-clause sentences with embedded modifiers, as the Tobira readings use; quote the book's own register",
   },
 };

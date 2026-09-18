@@ -100,6 +100,14 @@ export function Chat({
   // are spoken. A typed question in the middle of a spoken conversation gets
   // a written answer, which is what typing one means.
   const replyShouldSpeak = useRef(false);
+  // onFinish closes over the render that created it.
+  const authenticatedRef = useRef(authenticated);
+  authenticatedRef.current = authenticated;
+  // The assistant message the voice is part way through speaking. The reply is
+  // now fed to the voice AS IT STREAMS, so there has to be something that says
+  // which reply is being fed: without it, the first token of the next answer
+  // would be appended to the last one's queue.
+  const spokenReplyId = useRef<string | null>(null);
   // Files stay attached across turns: a student asks several questions about
   // one worksheet, and re-picking it for each would be absurd.
   const [attached, setAttached] = useState<AttachedFile[]>([]);
@@ -156,17 +164,48 @@ export function Chat({
       // are spoken back, and a failure to speak is silent by design: the
       // answer is already on screen, and the useTextToSpeech fallback has
       // tried the browser's own voice before giving up.
-      if (!replyShouldSpeak.current) return;
+      if (!replyShouldSpeak.current) {
+        // A typed answer: nobody is listening yet, but the Listen button under
+        // it should play the moment it is pressed. Synthesising the first
+        // clause now, while the student reads, is the only way to make that
+        // instant — the synthesis itself takes 2.5-4.4 seconds and no model
+        // on this key is faster.
+        //
+        // Signed-in students only. A trial visitor's /api/speak answers 401,
+        // and the browser voice they fall back to is local and already
+        // instant, so for them this would be a request that can only fail.
+        if (authenticatedRef.current) {
+          tts.prefetch(
+            message.parts
+              .filter((part): part is { type: "text"; text: string } => part.type === "text")
+              .map((part) => part.text)
+              .join(""),
+          );
+        }
+        return;
+      }
       replyShouldSpeak.current = false;
+      spokenReplyId.current = null;
       const said = message.parts
         .filter((part): part is { type: "text"; text: string } => part.type === "text")
         .map((part) => part.text)
         .join("");
+      // The LAST feed of this turn, not the first. Most of this answer has
+      // already been handed to the voice while it streamed, and clauses are
+      // taken by position, so this adds only the final clause — the one that
+      // could not be sent earlier because it was still being written.
+      //
+      // Calling `speak` here instead would start the whole answer again from
+      // its first clause, which is what this route did when the voice waited
+      // for onFinish to say anything at all.
+      //
       // Spoken in the conversation's language, not the reply's script. The
       // server has just told us which one it settled on; the local derivation
       // is the same function over the same turns and covers the first reply
       // of a conversation, before any metadata exists.
-      if (said.trim()) void tts.speak(said, meta.language ?? languageRef.current);
+      if (said.trim()) {
+        tts.speakAsItArrives(said, true);
+      }
     },
   });
 
@@ -198,6 +237,7 @@ export function Chat({
       if (busyRef.current) return;
       awaitingSpokenId.current = true;
       replyShouldSpeak.current = voiceLiveRef.current;
+      spokenReplyId.current = null;
       setHeard(text);
       tts.stop();
       void sendMessage({ text });
@@ -205,7 +245,18 @@ export function Chat({
     {
       // Barge-in. The student starting to talk is the end of the tutor's
       // turn, exactly as it would be with a person.
-      onSpeechStart: () => tts.stop(),
+      //
+      // Stopping the audio is no longer enough on its own. A reply is fed to
+      // the voice while it streams, so a turn talked over half way through is
+      // still arriving — and without this the next token would open a fresh
+      // job and start the tutor talking again over a student who had just
+      // interrupted it. Clearing the flag ends the feed, and onFinish reads
+      // the same flag, so the tail of that answer stays silent too.
+      onSpeechStart: () => {
+        tts.stop();
+        replyShouldSpeak.current = false;
+        spokenReplyId.current = null;
+      },
     },
   );
   voiceRef.current = voice;
@@ -249,6 +300,36 @@ export function Chat({
     // After the transcript has been rendered again, not before it.
     requestAnimationFrame(() => scroll.scrollToBottom());
   }
+
+  /** Speak the reply while it is still being written.
+   *
+   * The voice used to start at onFinish, which is by definition the moment
+   * generation ends — so a spoken turn spent the whole of generation in
+   * silence and then spent another three seconds in silence having its first
+   * clause synthesised. The two are unrelated and both slow, and running them
+   * one after the other spends the sum of them.
+   *
+   * Feeding on every render is safe and is the reason this is so short:
+   * `speakAsItArrives` takes clauses by position and only ever sends the ones
+   * that have become final since the last call, so handing it the same answer
+   * twice sends nothing twice.
+   */
+  const { speakAsItArrives } = tts;
+  useEffect(() => {
+    if (!replyShouldSpeak.current) return;
+    const reply = messages.at(-1);
+    if (reply?.role !== "assistant") return;
+    // One reply at a time. The id is pinned on first sight so a late render
+    // for a superseded turn cannot append to the queue of the current one.
+    if (spokenReplyId.current === null) spokenReplyId.current = reply.id;
+    if (spokenReplyId.current !== reply.id) return;
+    const text = reply.parts
+      .filter((part): part is { type: "text"; text: string } => part.type === "text")
+      .map((part) => part.text)
+      .join("");
+    if (!text.trim()) return;
+    speakAsItArrives(text, false);
+  }, [messages, speakAsItArrives]);
 
   // The transcript's message id is only knowable once useChat has added it,
   // so the turn is tagged on the render after it appears.
@@ -375,7 +456,6 @@ export function Chat({
                       .map((part) => part.text)
                       .join("")}
                     tts={tts}
-                    language={language}
                   />
                   {message.id === messages.at(-1)?.id && (
                     <FeedbackButtons conversationId={meta.conversationId} />
@@ -574,13 +654,8 @@ function MicGlyph() {
 function SpeakButton({
   text,
   tts,
-  language,
 }: {
   text: string;
-  /** The conversation's language, so a student who presses Listen in an
-   * English conversation gets the same voice they would have heard if they
-   * had spoken the turn instead. */
-  language: ConversationLanguage;
   tts: ReturnType<typeof useTextToSpeech>;
 }) {
   if (!text.trim()) return null;
@@ -588,7 +663,7 @@ function SpeakButton({
   return (
     <button
       type="button"
-      onClick={() => (busy ? tts.stop() : void tts.speak(text, language))}
+      onClick={() => (busy ? tts.stop() : void tts.speak(text))}
       className="flex items-center gap-1 rounded-lg px-1.5 py-1 text-xs text-stone-400 hover:bg-stone-100 hover:text-stone-700"
       aria-label={busy ? "Stop reading this answer" : "Read this answer aloud"}
       title={busy ? "Stop" : "Read aloud"}

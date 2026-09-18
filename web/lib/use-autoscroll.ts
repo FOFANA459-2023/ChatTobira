@@ -32,8 +32,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const BOTTOM_THRESHOLD = 64;
 
 export interface AutoScroll<T extends HTMLElement> {
-  /** Put this on the scrolling container. */
-  ref: React.RefObject<T | null>;
+  /** Put this on the scrolling container.
+   *
+   * A callback ref rather than a ref object, and that is the fix for the
+   * second time auto-scroll broke. The listeners below used to subscribe
+   * once, on mount, to whichever element a ref object held at that moment.
+   * The chat does not keep one element: voice mode replaces the transcript
+   * with the voice screen, and leaving voice mounts a NEW list in its place —
+   * so after the first spoken conversation every observer was watching a
+   * detached node, and new answers arrived below the fold with nothing
+   * following them. A callback ref is told about each new element, and the
+   * listeners re-subscribe to it. */
+  ref: (element: T | null) => void;
   /** True while the view is following new content. */
   pinned: boolean;
   /** Go to the newest content and start following again. */
@@ -48,7 +58,14 @@ function atBottom(element: HTMLElement): boolean {
 }
 
 export function useAutoScroll<T extends HTMLElement>(): AutoScroll<T> {
-  const ref = useRef<T | null>(null);
+  // The element, as state so the effects re-run when it changes, and as a
+  // ref so scrollToBottom can reach it without being recreated.
+  const [element, setElement] = useState<T | null>(null);
+  const elementRef = useRef<T | null>(null);
+  const ref = useCallback((node: T | null) => {
+    elementRef.current = node;
+    setElement(node);
+  }, []);
   const [pinned, setPinned] = useState(true);
   // The effects below must not re-subscribe every time `pinned` flips, and
   // the observer callbacks need its current value rather than the one from
@@ -57,7 +74,7 @@ export function useAutoScroll<T extends HTMLElement>(): AutoScroll<T> {
   pinnedRef.current = pinned;
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
-    const element = ref.current;
+    const element = elementRef.current;
     if (!element) return;
     setPinned(true);
     pinnedRef.current = true;
@@ -73,7 +90,6 @@ export function useAutoScroll<T extends HTMLElement>(): AutoScroll<T> {
 
   // Who is scrolling, and therefore whether to keep following.
   useEffect(() => {
-    const element = ref.current;
     if (!element) return;
 
     const onScroll = () => {
@@ -84,7 +100,7 @@ export function useAutoScroll<T extends HTMLElement>(): AutoScroll<T> {
 
     element.addEventListener("scroll", onScroll, { passive: true });
     return () => element.removeEventListener("scroll", onScroll);
-  }, []);
+  }, [element]);
 
   // Content arriving. A streamed answer grows by a few characters at a time
   // and never changes the child count, so watching the message list would
@@ -92,8 +108,12 @@ export function useAutoScroll<T extends HTMLElement>(): AutoScroll<T> {
   // actually changes, and ResizeObserver on the content is how that is
   // observed without polling.
   useEffect(() => {
-    const element = ref.current;
     if (!element) return;
+
+    // A list that has just come back — from voice mode, say — is a new
+    // conversation view, and the student expects to see its newest turn.
+    pinnedRef.current = true;
+    setPinned(true);
 
     const follow = () => {
       if (!pinnedRef.current) return;
@@ -134,7 +154,7 @@ export function useAutoScroll<T extends HTMLElement>(): AutoScroll<T> {
       resize?.disconnect();
       mutation?.disconnect();
     };
-  }, []);
+  }, [element]);
 
   return { ref, pinned, scrollToBottom };
 }

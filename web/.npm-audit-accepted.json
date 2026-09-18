@@ -1,0 +1,24 @@
+{
+  "_comment": [
+    "Known high/critical advisories in PRODUCTION dependencies that this",
+    "deployment accepts for now. Read by scripts/audit.mjs, which fails CI on",
+    "anything not listed here and on any entry whose review date has passed.",
+    "",
+    "Same bargain as .trivyignore.yaml: a reason somebody can disagree with,",
+    "and a date when it comes back. Every entry below needs a semver-major",
+    "upgrade of a framework dependency, which is a deliberate piece of work",
+    "rather than something to slip into an unrelated change."
+  ],
+  "postcss": {
+    "advisory": "PostCSS XSS via unescaped </style> in CSS stringify output",
+    "reason": "Build-time only. postcss runs in the Next/Tailwind build on our own stylesheets; no student input ever reaches it, and it is not part of the worker bundle served to a browser. The fix is next@16, a major upgrade of the framework.",
+    "fix": "next@16.3.5 (semver-major)",
+    "review": "2026-12-01"
+  },
+  "undici": {
+    "advisory": "Unbounded decompression chain in HTTP responses via Content-Encoding",
+    "reason": "Transitive under @ai-sdk/deepseek. Production runs on Cloudflare Workers, where the platform's own fetch is used and undici is not in the request path; it is reachable only from Node during build and test. The fix is @ai-sdk/deepseek@3, a major upgrade whose API this app pins deliberately.",
+    "fix": "@ai-sdk/deepseek@3.0.47 (semver-major)",
+    "review": "2026-12-01"
+  }
+}

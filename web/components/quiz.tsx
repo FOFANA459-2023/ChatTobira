@@ -63,7 +63,7 @@ const KIND_INFO: Record<
 };
 
 // Section numerals as they appear on the paper.
-const ROMAN = ["I", "II", "III", "IV", "V"];
+const ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII"];
 
 /** Option labels as the papers print them: a. b. c., never A) B) C) D).
  * Across the 40 sat papers in the corpus, every listed-option question is

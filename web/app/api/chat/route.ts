@@ -485,6 +485,8 @@ export async function POST(request: Request) {
   // two jobs no other provider in this stack can do.
   const tiers: {
     provider: string;
+    /** What health is recorded against — the tier, not the provider. */
+    key: string;
     label: string;
     start: (signal: AbortSignal) => ReturnType<typeof streamText>;
   }[] = [];
@@ -509,6 +511,8 @@ export async function POST(request: Request) {
   const route = routeModels(speaking ? "voice_turn" : "chat_answer", {
     promptTokens,
     hasDeepSeek: Boolean(process.env.DEEPSEEK_API_KEY),
+    // Keyed by tier, not by provider. Chat has one Google tier so the two
+    // spellings coincide here; the quiz route has two and does not.
     models: {
       groq: process.env.CHAT_MODEL,
       deepseek: process.env.DEEPSEEK_MODEL,
@@ -525,12 +529,28 @@ export async function POST(request: Request) {
     google: (model: string) => google(model),
   } as const;
 
-  for (const { provider, model } of route) {
+  for (const { provider, key, model, thinkingBudget } of route) {
     tiers.push({
       provider,
+      key,
       label: model,
       start: (abortSignal) =>
-        streamText({ model: clientFor[provider](model), ...chatOptions, abortSignal }),
+        streamText({
+          model: clientFor[provider](model),
+          ...chatOptions,
+          // Only ever set where the router measured it to matter. The chat
+          // tiers leave it undefined: flash-lite spends 0-97 tokens reasoning
+          // on these prompts anyway, and pinning a budget it does not need
+          // would be a number nobody had measured.
+          ...(provider === "google" && thinkingBudget !== undefined
+            ? {
+                providerOptions: {
+                  google: { thinkingConfig: { thinkingBudget, includeThoughts: false } },
+                },
+              }
+            : {}),
+          abortSignal,
+        }),
     });
   }
 
@@ -550,8 +570,8 @@ export async function POST(request: Request) {
       // Resolves once the provider accepts the request; rejects on 429/5xx
       // before any tokens stream, which is exactly the fallback window.
       await withDeadline(attempt.warnings, budget, "tier_timeout");
-      clock.mark(`model:${tier.provider}`);
-      noteProviderSuccess(tier.provider);
+      clock.mark(`model:${tier.key}`);
+      noteProviderSuccess(tier.key);
       result = attempt;
       modelUsed = tier.label;
       break;
@@ -565,7 +585,7 @@ export async function POST(request: Request) {
         `chat tier ${tier.label} declined after ${Date.now() - tierFrom}ms:`,
         error instanceof Error ? error.message : error,
       );
-      noteProviderFailure(tier.provider, error);
+      noteProviderFailure(tier.key, error);
     }
   }
 

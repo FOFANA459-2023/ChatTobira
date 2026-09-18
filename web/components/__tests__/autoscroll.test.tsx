@@ -114,3 +114,73 @@ describe("following the newest message", () => {
     expect(list.scrollTop).toBe(1000);
   });
 });
+
+/** The chat's real shape: the scrolling list is not always on screen. Voice
+ * mode replaces it with the voice screen, and leaving voice mounts a NEW list
+ * element in its place. */
+/** A component, not a bare element, because that is what the chat swaps in.
+ * React reuses a DOM node when a <div> replaces a <div>; it destroys it when a
+ * component takes the div's place — which is the case that broke. */
+function VoiceScreen() {
+  return <section data-testid="voice">voice screen</section>;
+}
+
+function SwappingHarness() {
+  const scroll = useAutoScroll<HTMLDivElement>();
+  const [lines, setLines] = useState(1);
+  const [voice, setVoice] = useState(false);
+  return (
+    <div>
+      {voice ? (
+        <VoiceScreen />
+      ) : (
+        <div ref={scroll.ref} data-testid="list">
+          {Array.from({ length: lines }, (_, i) => (
+            <p key={i}>line {i}</p>
+          ))}
+        </div>
+      )}
+      <span data-testid="pinned">{scroll.pinned ? "following" : "held"}</span>
+      <button onClick={() => setLines((n) => n + 1)}>add</button>
+      <button onClick={() => setVoice((v) => !v)}>voice</button>
+    </div>
+  );
+}
+
+describe("after the list has been replaced", () => {
+  it("follows new content on the list that came back from voice mode", async () => {
+    // Reported from the app: auto-scroll stopped working. The hook subscribed
+    // once, on mount, to whichever element the ref held then. Voice mode
+    // unmounts that element and leaving voice mounts a new one, so every
+    // observer after the first voice session was watching a detached node.
+    render(<SwappingHarness />);
+    fireEvent.click(screen.getByText("voice"));
+    fireEvent.click(screen.getByText("voice"));
+
+    const list = screen.getByTestId("list");
+    makeScrollable(list);
+    fireEvent.click(screen.getByText("add"));
+    await waitFor(() => expect(list.scrollTop).toBe(1000));
+  });
+
+  it("notices the student scrolling on the new list", () => {
+    render(<SwappingHarness />);
+    fireEvent.click(screen.getByText("voice"));
+    fireEvent.click(screen.getByText("voice"));
+
+    const list = screen.getByTestId("list");
+    const box = makeScrollable(list);
+    box.scrollTo(100);
+    expect(pinned()).toBe("held");
+  });
+});
+
+it("really does get a new list element back from voice mode", () => {
+  // Guards the two tests above: if the list were the same node before and
+  // after, they would pass without testing anything.
+  render(<SwappingHarness />);
+  const before = screen.getByTestId("list");
+  fireEvent.click(screen.getByText("voice"));
+  fireEvent.click(screen.getByText("voice"));
+  expect(screen.getByTestId("list")).not.toBe(before);
+});

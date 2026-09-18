@@ -302,3 +302,26 @@ describe("duplicates within one paper", () => {
     expect(quiz.sections).toHaveLength(1);
   });
 });
+
+describe("numbered gaps in one passage", () => {
+  const gap = (n: number, answer: string) =>
+    item({
+      type: "fill_blank",
+      question: `文中の（ ${n} ）に入る適切なことばを書いてください。`,
+      answer,
+      target: answer,
+    });
+
+  it("treats different gaps as different questions", () => {
+    // Seen live: three gaps of one passage-bank section dropped as "the same
+    // sentence as an earlier item", because the pointer text is identical
+    // apart from the number.
+    const items = [gap(1, "成功"), gap(2, "実現"), gap(3, "挑戦")];
+    expect(dropDuplicates({ sections: [{ items }] }).removed).toBe(0);
+  });
+
+  it("still drops two gaps that test the same word", () => {
+    const items = [gap(1, "成功"), gap(2, "成功")];
+    expect(dropDuplicates({ sections: [{ items }] }).removed).toBe(1);
+  });
+});

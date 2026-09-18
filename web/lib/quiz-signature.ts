@@ -150,6 +150,11 @@ export interface Fingerprint {
   /** ○× statements about one passage are SUPPOSED to look alike, and are
    * exempted from the frame-similarity test for that reason. */
   comprehension: boolean;
+  /** The numbered gap the item points at — "2" for 「文中の（ 2 ）に入る…」 —
+   * or empty. A passage-gap section's items all read the same apart from that
+   * number, so without it three different gaps look like one sentence asked
+   * three times. */
+  gap?: string;
 }
 
 const normalise = (text: string) => text.replace(FURIGANA, "").replace(NOISE, "").toLowerCase();
@@ -221,7 +226,14 @@ export function fingerprint(item: QuizItem): Fingerprint {
     frame: looseSkeleton(body),
     skill: skillKey(item),
     comprehension: item.type === "true_false",
+    gap: gapNumber(item.question ?? ""),
   };
+}
+
+/** The gap number an item's question points at, in ASCII digits. */
+function gapNumber(question: string): string {
+  const match = /[（(]\s*([0-9０-９]+)\s*[）)]/.exec(question);
+  return match ? match[1].replace(/[０-９]/g, (d) => String(d.charCodeAt(0) - 0xff10)) : "";
 }
 
 /** Is this item one the student has already been asked?
@@ -264,6 +276,11 @@ function sameQuestion(item: Fingerprint, prior: Fingerprint): boolean {
   if (prior.exact === item.exact) return true;
   if (item.comprehension || prior.comprehension) return false;
   if (item.skill && prior.skill && item.skill === prior.skill) return true;
+  // Two DIFFERENT numbered gaps are two questions, however alike the pointer
+  // text reads — measured on an Intermediate kanji paper, 「文中の（ 2 ）」,
+  // 「（ 3 ）」 and 「（ 4 ）」 were dropped as one sentence asked three times.
+  // They are still one question if they test the same word.
+  if (item.gap && prior.gap && item.gap !== prior.gap) return item.pattern === prior.pattern;
   if (!comparableFrames(item, prior)) return false;
   if (similarity(prior.frame, item.frame) >= SAME_QUESTION) return true;
   return prior.pattern === item.pattern && similarity(prior.frame, item.frame) >= SAME_FRAME;
