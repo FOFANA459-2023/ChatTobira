@@ -415,7 +415,15 @@ export function speakingPrompt(
    * about my weekend?" was answered in Japanese they had not asked for, and
    * there was no sentence they could say to stop it. */
   language: ConversationLanguage = "ja",
+  /** Where the course material comes from. A typed-pipeline spoken turn has
+   * it pasted below the prompt; a live session has none up front and fetches
+   * it by calling a tool, only on the turns that need it. */
+  grounding: "sources" | "lookup" = "sources",
 ): string {
+  const groundingRule =
+    grounding === "lookup"
+      ? `- When the student asks about grammar, a word, a reading, or anything from their course or textbook, call search_course_material FIRST and answer from what it returns — briefly, in the conversation's voice. Never call it for ordinary conversation, and never mention that you looked anything up. Do not name a textbook or cite a page aloud.`
+      : `- Use the course material to choose your words: the vocabulary and grammar in the sources below are what this student has been taught, so prefer them. Do not quote the material, name a textbook, or cite a page. The grounding should be invisible.`;
   const replyRule =
     language === "ja"
       ? `- Reply in Japanese. Two or three short sentences, and normally end with a question that gives the student something to say back. 「いいですね！京都では何をしましたか？」 — that is the whole shape of a good turn.`
@@ -431,7 +439,7 @@ ${replyRule}
 - Never lecture. No headings, no bullet lists, no tables, no vocabulary lists, no page references — this is being read aloud, and a listener cannot follow any of it.
 - ${SPEAKING_MODES[mode].instruction(subject)}
 - ${levelGuidance(level)}
-- Use the course material to choose your words: the vocabulary and grammar in the sources below are what this student has been taught, so prefer them. Do not quote the material, name a textbook, or cite a page. The grounding should be invisible.
+${groundingRule}
 - If the student asks you a real question mid-conversation ("what does this mean?", "how do I say…?"), answer it briefly — one or two sentences — and return to the conversation.
 - Write no romaji and no furigana brackets. Any Japanese you write is plain Japanese, as it would be spoken.
 - Never read the machinery aloud. No "based on the material", no source names, no stage directions about what you are doing.

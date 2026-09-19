@@ -23,6 +23,7 @@ export function VoiceInput({
   replying,
   speaking,
   onStopSpeaking,
+  onStart,
   disabled,
 }: {
   voice: SpeechToText;
@@ -34,6 +35,9 @@ export function VoiceInput({
   /** The tutor is talking. */
   speaking: boolean;
   onStopSpeaking: () => void;
+  /** Starts the conversation instead of the classic loop — the live
+   * connection, which falls back to `voice` itself when it cannot open. */
+  onStart?: () => void;
   disabled?: boolean;
 }) {
   const { state, error, level, hearing } = voice;
@@ -75,6 +79,10 @@ export function VoiceInput({
       onLiveChange(false);
       voice.cancel();
       onStopSpeaking();
+      return;
+    }
+    if (onStart) {
+      onStart();
       return;
     }
     onLiveChange(true);

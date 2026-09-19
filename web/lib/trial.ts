@@ -2,8 +2,9 @@
  *
  * A visitor may sample the platform before signing in. The count lives in a
  * cookie, so a determined visitor can clear it — this is a taster, not a
- * security boundary. The real gate stays the invite: everything that persists
- * anything (history, quotas, feedback) requires a session.
+ * security boundary. The real gate is an account on an @apu.ac.jp address:
+ * everything that persists anything (history, quotas, feedback) requires a
+ * session.
  *
  * Chat and quizzes are metered separately because they are different tastes of
  * the product and one should not consume the other. A visitor who asks three

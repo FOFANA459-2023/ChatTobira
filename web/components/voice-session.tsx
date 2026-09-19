@@ -52,6 +52,7 @@ export function VoiceSession({
   error,
   onEnd,
   onInterrupt,
+  realtime = false,
 }: {
   phase: VoicePhase;
   /** Microphone loudness, 0–1. */
@@ -67,6 +68,9 @@ export function VoiceSession({
   onEnd: () => void;
   /** Stop the tutor talking without ending the conversation. */
   onInterrupt: () => void;
+  /** A live connection: the microphone never closes, and the student can
+   * talk over the tutor at any moment. */
+  realtime?: boolean;
 }) {
   const copy = PHASE_COPY[phase];
   const speaking = phase === "speaking";
@@ -159,9 +163,13 @@ export function VoiceSession({
           </p>
         ) : (
           <p className="text-center text-sm text-stone-300">
-            {language === "ja"
-              ? "話しかけてください。返事のあと、またマイクが開きます。"
-              : "Just start talking. The microphone reopens after each reply."}
+            {realtime
+              ? language === "ja"
+                ? "話しかけてください。いつでも話をさえぎってかまいません。"
+                : "Just start talking. You can cut in at any time."
+              : language === "ja"
+                ? "話しかけてください。返事のあと、またマイクが開きます。"
+                : "Just start talking. The microphone reopens after each reply."}
           </p>
         )}
       </div>

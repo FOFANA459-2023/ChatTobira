@@ -197,9 +197,9 @@ const CHECKS = [
   },
   {
     name: "admin-only API refuses an anonymous caller",
-    why: "the invite list must never be readable without an admin session",
+    why: "the student roster must never be readable without an admin session",
     async run() {
-      const response = await request("/api/invite");
+      const response = await request("/api/admin/students");
       assert(
         [401, 403, 503].includes(response.status),
         `expected 401/403/503, got ${response.status}`,

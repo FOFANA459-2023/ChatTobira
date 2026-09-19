@@ -56,6 +56,15 @@
     "PAPER_FAST_MODEL": "gemini-3.8-flash",
     "EMBED_MODEL": "gemini-embedding-001",
     "STT_MODEL": "whisper-large-v3-turbo",
+    // The live spoken conversation: one model that listens and speaks over a
+    // single connection. Measured fastest on this key — ~0.95s from the end
+    // of a student's sentence to the first audio back, against 5-7s for the
+    // record/transcribe/answer/synthesise loop it replaces. See
+    // lib/live-voice.ts for the table.
+    "LIVE_MODEL": "gemini-3.8-live",
+    // How long a student must be quiet before their turn ends. 300 is faster
+    // and cuts learners off mid-sentence while they look for a word.
+    "LIVE_SILENCE_MS": "500",
     "CITATION_QUOTE_CHARS": "200"
   }
 }

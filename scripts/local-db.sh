@@ -117,8 +117,8 @@ SQL
 
 # Tables whose SHAPE is copied and whose ROWS are not.
 #
-# The corpus is what development needs; the student body is not. profiles and
-# allowlist are a list of a hundred classmates' email addresses, quiz_items is
+# The corpus is what development needs; the student body is not. profiles is
+# a list of a hundred classmates' names and email addresses, quiz_items is
 # what each of them was asked and messages is what each of them typed, and
 # none of it makes a generated paper one line better. Copying it would put a
 # named student's coursework on a laptop for no reason — the same objection
@@ -128,7 +128,7 @@ SQL
 # The tables still arrive, empty, because the app queries them and a copy that
 # 404s on quiz history is not a copy of the app's database.
 PRIVATE_TABLES=(
-  allowlist profiles conversations messages feedback qa_cache
+  profiles conversations messages feedback qa_cache
   quiz_items uploads upload_usage_daily usage_daily
 )
 

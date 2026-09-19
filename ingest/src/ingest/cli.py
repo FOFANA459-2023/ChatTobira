@@ -274,41 +274,6 @@ def cmd_verify() -> None:
     raise typer.Exit(0 if ok else 1)
 
 
-@app.command("invite")
-def cmd_invite(
-    # Optional so `--list` works on its own rather than demanding a dummy email.
-    emails: list[str] | None = typer.Argument(None, help="Email addresses to invite"),
-    note: str = typer.Option("", help="Optional note, e.g. 'F3 spring cohort'"),
-    remove: bool = typer.Option(False, "--remove", help="Remove instead of add"),
-    show: bool = typer.Option(False, "--list", help="List the allowlist and exit"),
-) -> None:
-    """Manage which students can sign up. Signup is blocked for anyone else."""
-    from . import invite
-
-    if show:
-        rows = invite.list_all()
-        for row in rows:
-            console.print(f"{row['email']}  [dim]{row['note'] or ''}[/dim]")
-        console.print(f"[bold]{len(rows)} invited[/bold]")
-        return
-
-    if not emails:
-        console.print("[red]No email addresses given.[/red] Try --list to see the allowlist.")
-        raise typer.Exit(2)
-
-    if remove:
-        for email in emails:
-            gone = invite.remove(email)
-            console.print(f"{'removed' if gone else 'not found'}: {email}")
-        return
-
-    added = invite.add(emails, note=note or None)
-    skipped = len(emails) - len(added)
-    console.print(
-        f"[green]{len(added)} invited[/green]" + (f", {skipped} already present" if skipped else "")
-    )
-
-
 @app.command("backup")
 def cmd_backup() -> None:
     """Mirror source files and transcripts to the private Supabase bucket.
@@ -376,40 +341,6 @@ def cmd_restore(
             manifest_path.write_bytes(manifest_bytes)
 
     console.print(f"[green]restored[/green] {fetched} object(s), {skipped} already present")
-
-
-@app.command("bounces")
-def cmd_bounces(
-    days: int = typer.Option(7, help="How many days of bounce messages to scan"),
-    dry_run: bool = typer.Option(False, help="Report what would be revoked without deleting"),
-) -> None:
-    """Revoke invites whose email bounced.
-
-    Gmail accepts a message and the invite API reports success; the
-    university gateway rejects it minutes later and the bounce lands in the
-    sending inbox. This reads that inbox and removes any student whose invite
-    provably never arrived and who has never signed in."""
-    from . import bounces
-
-    found = bounces.fetch_bounces(days=days)
-    if not found:
-        console.print("no bounce messages found — every sent invite was accepted downstream")
-        return
-
-    for b in found:
-        console.print(f"[yellow]bounce[/yellow]  {b.recipient} at {b.bounced_at:%Y-%m-%d %H:%M}")
-    if dry_run:
-        console.print("[dim]dry run — nothing deleted[/dim]")
-        return
-
-    revoked = bounces.sweep(found)
-    for address in revoked:
-        console.print(f"[red]revoked[/red] {address} — invite removed, they were never reachable")
-    console.print(
-        f"[bold]{len(revoked)} invite(s) revoked[/bold]"
-        if revoked
-        else "bounces were stale or students already signed in — nothing revoked"
-    )
 
 
 @app.command("uploads")

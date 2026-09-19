@@ -3,28 +3,34 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { AdminShell, Card, TableSkeleton } from "@/components/admin/shell";
+import { COLLEGES, ordinal, REASONS } from "@/lib/signup";
 import { relativeTime, shortDate } from "@/lib/time";
 
 interface Student {
   email: string;
   name: string | null;
-  invited_at: string;
-  registered: boolean;
-  accepted: boolean;
+  college: string | null;
+  semester: number | null;
+  reasons: string[];
+  signed_up_at: string;
+  verified: boolean;
+  onboarded: boolean;
   suspended: boolean;
   last_sign_in_at: string | null;
   last_activity_at: string | null;
   questions_today: number;
 }
 
-type Filter = "all" | "active" | "waiting" | "suspended";
+type Filter = "all" | "active" | "pending" | "suspended";
 
 const FILTERS: { id: Filter; label: string }[] = [
   { id: "all", label: "All" },
-  { id: "active", label: "Signed in" },
-  { id: "waiting", label: "Never signed in" },
+  { id: "active", label: "Active" },
+  { id: "pending", label: "Not finished signing up" },
   { id: "suspended", label: "Suspended" },
 ];
+
+const REASON_LABEL = new Map<string, string>(REASONS.map((r) => [r.id, r.label]));
 
 export default function StudentsPage() {
   const [students, setStudents] = useState<Student[] | null>(null);
@@ -46,13 +52,12 @@ export default function StudentsPage() {
 
   useEffect(load, [load]);
 
-  /** Suspend, restore, resend a link, or remove — all through the invite API
-   * that already owns these operations. */
-  async function act(email: string, action: "suspend" | "restore" | "resend" | "remove") {
+  /** Suspend, restore or remove, through the admin students API. */
+  async function act(email: string, action: "suspend" | "restore" | "remove") {
     if (
       action === "remove" &&
       !window.confirm(
-        `Remove ${email} completely?\n\nThis deletes their account and everything attached to it — chat history, feedback and usage — and cannot be undone.\n\nTo pause access instead and keep their work, use Suspend.`,
+        `Remove ${email} completely?\n\nThis deletes their account and everything attached to it — chat history, feedback and usage — and cannot be undone. They could sign up again with the same address.\n\nTo pause access instead and keep their work, use Suspend.`,
       )
     ) {
       return;
@@ -61,45 +66,25 @@ export default function StudentsPage() {
     setBusyEmail(email);
     setNote(null);
     try {
-      const request =
-        action === "resend"
-          ? { method: "POST", body: { email } }
-          : action === "remove"
-            ? { method: "DELETE", body: { email } }
-            : { method: "PATCH", body: { email, action } };
-
-      const response = await fetch("/api/invite", {
-        method: request.method,
+      const response = await fetch("/api/admin/students", {
+        method: action === "remove" ? "DELETE" : "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(request.body),
+        body: JSON.stringify(action === "remove" ? { email } : { email, action }),
       });
-      const body = (await response.json().catch(() => ({}))) as {
-        error?: string;
-        retryAfter?: number;
-      };
+      const body = (await response.json().catch(() => ({}))) as { error?: string };
 
       if (response.ok) {
         setNote({
           ok: true,
           text:
-            action === "resend"
-              ? `A fresh sign-in link is on its way to ${email}.`
-              : action === "remove"
-                ? `${email} was removed completely.`
-                : action === "suspend"
-                  ? `${email} is suspended. Their account and history are kept.`
-                  : `${email} can sign in again.`,
+            action === "remove"
+              ? `${email} was removed completely.`
+              : action === "suspend"
+                ? `${email} is suspended. Their account and history are kept.`
+                : `${email} can sign in again.`,
         });
-      } else if (body.error === "cooldown") {
-        setNote({
-          ok: true,
-          text: `${email} was emailed a link very recently — the next one can go out in ${body.retryAfter ?? 60} seconds.`,
-        });
-      } else if (body.error === "never_signed_in") {
-        setNote({
-          ok: false,
-          text: `${email} has not signed in yet, so there is no account to suspend. Remove the invite instead.`,
-        });
+      } else if (body.error === "no_account") {
+        setNote({ ok: false, text: `There is no account for ${email} any more.` });
       } else {
         setNote({ ok: false, text: `Could not ${action} ${email}. Please try again.` });
       }
@@ -115,9 +100,9 @@ export default function StudentsPage() {
     filter === "all"
       ? true
       : filter === "active"
-        ? student.accepted && !student.suspended
-        : filter === "waiting"
-          ? !student.accepted
+        ? student.onboarded && !student.suspended
+        : filter === "pending"
+          ? !student.onboarded
           : student.suspended,
   );
 
@@ -125,14 +110,12 @@ export default function StudentsPage() {
     <AdminShell
       active="students"
       title="Students"
-      intro="Everyone invited to ChatTobira, and whether they have actually used it."
+      intro="Everyone who has signed up for ChatTobira, and whether they have actually used it."
     >
       {note && (
         <p
           className={`mb-4 rounded-xl px-4 py-2.5 text-sm ${
-            note.ok
-              ? "bg-green-50 text-green-800"
-              : "bg-red-50 text-red-800"
+            note.ok ? "bg-green-50 text-green-800" : "bg-red-50 text-red-800"
           }`}
         >
           {note.text}
@@ -161,7 +144,7 @@ export default function StudentsPage() {
         }
       >
         {students === null ? (
-          <TableSkeleton rows={5} columns={5} />
+          <TableSkeleton rows={5} columns={6} />
         ) : failed ? (
           <div className="px-4 py-10 text-center text-sm text-stone-500">
             The student list could not be loaded.{" "}
@@ -171,19 +154,18 @@ export default function StudentsPage() {
           </div>
         ) : shown.length === 0 ? (
           <p className="px-4 py-10 text-center text-sm text-stone-500">
-            {students.length === 0
-              ? "No students invited yet. Invite the first from the dashboard."
-              : "No students match this filter."}
+            {students.length === 0 ? "Nobody has signed up yet." : "No students match this filter."}
           </p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[46rem] border-collapse text-sm">
+            <table className="w-full min-w-[54rem] border-collapse text-sm">
               <thead>
                 <tr className="border-b border-stone-100 text-left text-xs uppercase tracking-wide text-stone-400">
                   <th className="px-4 py-2 font-medium">Student</th>
+                  <th className="px-4 py-2 font-medium">College</th>
                   <th className="px-4 py-2 font-medium">Status</th>
                   <th className="px-4 py-2 font-medium">Last activity</th>
-                  <th className="px-4 py-2 font-medium">Invited</th>
+                  <th className="px-4 py-2 font-medium">Signed up</th>
                   <th className="px-4 py-2 font-medium" />
                 </tr>
               </thead>
@@ -195,6 +177,29 @@ export default function StudentsPage() {
                         {student.name ?? student.email.split("@")[0]}
                       </p>
                       <p className="text-xs text-stone-500">{student.email}</p>
+                    </td>
+                    <td className="px-4 py-3">
+                      {student.college ? (
+                        <>
+                          <p
+                            className="text-stone-700"
+                            title={COLLEGES.find((c) => c.id === student.college)?.name}
+                          >
+                            {student.college}
+                            {student.semester && (
+                              <span className="text-stone-400">
+                                {" "}
+                                · {ordinal(student.semester)} semester
+                              </span>
+                            )}
+                          </p>
+                          <p className="text-xs text-stone-500">
+                            {student.reasons.map((r) => REASON_LABEL.get(r) ?? r).join(", ")}
+                          </p>
+                        </>
+                      ) : (
+                        <span className="text-stone-400">—</span>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       <StatusBadge student={student} />
@@ -215,27 +220,17 @@ export default function StudentsPage() {
                         <span className="text-stone-400">Never logged in</span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-stone-500">
-                      {shortDate(student.invited_at)}
-                    </td>
+                    <td className="px-4 py-3 text-stone-500">{shortDate(student.signed_up_at)}</td>
                     <td className="px-4 py-3 text-right">
                       <div className="inline-flex gap-1">
                         <RowButton
-                          onClick={() => act(student.email, "resend")}
+                          onClick={() =>
+                            act(student.email, student.suspended ? "restore" : "suspend")
+                          }
                           busy={busyEmail === student.email}
                         >
-                          Resend link
+                          {student.suspended ? "Restore" : "Suspend"}
                         </RowButton>
-                        {student.registered && (
-                          <RowButton
-                            onClick={() =>
-                              act(student.email, student.suspended ? "restore" : "suspend")
-                            }
-                            busy={busyEmail === student.email}
-                          >
-                            {student.suspended ? "Restore" : "Suspend"}
-                          </RowButton>
-                        )}
                         <RowButton
                           onClick={() => act(student.email, "remove")}
                           busy={busyEmail === student.email}
@@ -256,15 +251,15 @@ export default function StudentsPage() {
   );
 }
 
-/** Where a student is in the journey: invited → emailed → signed in. */
+/** Where a student is in the journey: signed up → verified → profile done. */
 function StatusBadge({ student }: { student: Student }) {
   const [label, className] = student.suspended
     ? ["Suspended", "bg-red-50 text-red-700"]
-    : student.accepted
+    : student.onboarded
       ? ["Active", "bg-green-50 text-green-800"]
-      : student.registered
-        ? ["Link opened", "bg-sky-50 text-sky-800"]
-        : ["Invited", "bg-stone-100 text-stone-600"];
+      : student.verified
+        ? ["Profile pending", "bg-sky-50 text-sky-800"]
+        : ["Email not verified", "bg-stone-100 text-stone-600"];
   return (
     <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${className}`}>{label}</span>
   );
