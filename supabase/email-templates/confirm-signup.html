@@ -1,0 +1,68 @@
+<!-- ChatTobira signup confirmation email.
+     Paste into: Supabase dashboard -> Authentication -> Emails -> "Confirm signup".
+     Suggested subject:  ChatTobira — メールアドレスの確認 / confirm your email
+     Links straight to the app's /auth/confirm, which verifies the token itself.
+     Email-client rules: inline styles only, no external fonts/images, tables for layout. -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fafaf9;padding:32px 16px;">
+  <tr>
+    <td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:440px;background-color:#ffffff;border:1px solid #e7e5e4;border-radius:16px;padding:36px 32px;font-family:'Hiragino Kaku Gothic ProN','Hiragino Sans','Yu Gothic UI',Meiryo,-apple-system,'Segoe UI',sans-serif;">
+        <tr>
+          <td align="center" style="padding-bottom:6px;">
+            <span style="font-size:22px;font-weight:700;color:#1c1917;letter-spacing:-0.02em;">ChatTobira</span>
+            <span style="font-size:16px;color:#a8a29e;">&nbsp;とびら</span>
+          </td>
+        </tr>
+        <tr>
+          <td align="center" style="padding-bottom:24px;">
+            <span style="font-size:13px;color:#78716c;">Japanese study assistant</span>
+          </td>
+        </tr>
+        <tr>
+          <td align="center" style="padding-bottom:8px;">
+            <span style="font-size:17px;color:#1c1917;font-weight:600;">メールアドレスを確認してください</span>
+          </td>
+        </tr>
+        <tr>
+          <td align="center" style="padding-bottom:28px;">
+            <span style="font-size:14px;color:#57534e;line-height:1.6;">Welcome to ChatTobira. Confirm your APU email<br>to finish creating your account.</span>
+          </td>
+        </tr>
+        <tr>
+          <td align="center" style="padding-bottom:28px;">
+            <a href="{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=email"
+               style="display:inline-block;background-color:#1c1917;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;padding:13px 36px;border-radius:12px;">
+              Confirm email&nbsp;·&nbsp;確認する
+            </a>
+          </td>
+        </tr>
+        <tr>
+          <td align="center" style="border-top:1px solid #f5f5f4;padding-top:20px;">
+            <span style="font-size:12px;color:#a8a29e;line-height:1.7;">
+              This link works once and expires in 1 hour.<br>
+              If you did not sign up for ChatTobira, you can safely<br>
+              ignore this email — no account is created without it.
+            </span>
+          </td>
+        </tr>
+        <tr>
+          <td align="center" style="padding-top:18px;">
+            <span style="font-size:11px;color:#d6d3d1;word-break:break-all;line-height:1.6;">
+              Button not working? Copy this link:<br>
+              <a href="{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=email" style="color:#a8a29e;">{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=email</a>
+            </span>
+          </td>
+        </tr>
+      </table>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:440px;">
+        <tr>
+          <td align="center" style="padding-top:16px;">
+            <span style="font-family:-apple-system,'Segoe UI',sans-serif;font-size:11px;color:#d6d3d1;">
+              ChatTobira — Japanese study assistant for APU students
+            </span>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>

@@ -23,7 +23,7 @@ Tick anything this PR touches — each one has bitten this project before.
       on free tiers; a change here can exhaust a daily budget in an hour.
 - [ ] **Anything students can write** (uploads, feedback). Could one student's
       content reach another student, or reach the shared corpus unreviewed?
-- [ ] **Auth, RLS, or the allowlist.** Who can now see or do something they
+- [ ] **Auth, RLS, or the signup rules.** Who can now see or do something they
       could not before?
 - [ ] **Copyright surface.** Does this serve or store more source material
       than before?

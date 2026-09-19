@@ -10,7 +10,7 @@ const EXIT_MS = 400;
 
 /** Data-use notice, shown once per browser until acknowledged.
  *
- * The legal purpose of the data ChatTobira keeps (email, first name, study
+ * The legal purpose of the data ChatTobira keeps (email, full name, college, study
  * activity) is enrollment verification: the course materials are copyrighted,
  * so access has to be verifiably limited to APU students, and this banner is
  * where that is disclosed. */
@@ -66,7 +66,7 @@ export function ConsentBanner() {
         <div className="mt-2 max-h-48 space-y-2 overflow-y-auto text-xs leading-relaxed text-stone-600 sm:max-h-none">
           <p>
             ChatTobira collects and stores limited personal information, such
-            as your email address, first name, and study activity, solely for
+            as your email address, full name, college and semester, and study activity, solely for
             the purposes of verifying your eligibility as an enrolled student
             of Ritsumeikan Asia Pacific University (APU), providing access to
             the platform, and maintaining a secure learning environment.

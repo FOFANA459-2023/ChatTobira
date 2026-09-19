@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { Answer } from "@/components/answer";
 import { FeedbackButtons } from "@/components/feedback-buttons";
-import { MagicLinkForm } from "@/components/magic-link-form";
+import { AuthPrompt } from "@/components/auth-card";
 import { VoiceInput } from "@/components/voice-input";
 import { VoiceSession } from "@/components/voice-session";
 import { NavBar } from "@/components/nav";
@@ -405,8 +405,8 @@ export function Chat({
             </p>
             {!authenticated && (
               <p className="mt-3 text-xs text-stone-400">
-                You can try 3 questions free — after that, sign in with your
-                invited email.
+                You can try 3 questions free — after that, create a free
+                account with your APU email.
               </p>
             )}
           </div>
@@ -495,13 +495,7 @@ export function Chat({
       {trialExhausted ? (
         <div className="border-t border-stone-200 bg-white px-4 py-5">
           <div className="mx-auto max-w-sm">
-            <p className="text-sm font-medium text-stone-800">
-              You are out of free trial. Enter your email below and we will
-              send you a sign-in link so you can keep studying.
-            </p>
-            <div className="mt-3">
-              <MagicLinkForm showAdminLink />
-            </div>
+            <AuthPrompt message="You are out of free trial. Create an account or sign in to keep studying." />
           </div>
         </div>
       ) : (

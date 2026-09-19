@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { Answer, RichText } from "@/components/answer";
-import { MagicLinkForm } from "@/components/magic-link-form";
+import { AuthPrompt } from "@/components/auth-card";
 import { NavBar } from "@/components/nav";
 import {
   flattenItems,
@@ -215,14 +215,8 @@ export function QuizView({
       <NavBar active={kind} authenticated={authenticated} />
       <div className="flex-1 px-4 py-6">
         {phase === "trial_exhausted" && (
-          <div className="mx-auto mt-16 max-w-sm text-center">
-            <p className="text-sm font-medium text-stone-800">
-              You are out of free trial. Enter your email below and we will
-              send you a sign-in link so you can keep studying.
-            </p>
-            <div className="mt-4 text-left">
-              <MagicLinkForm showAdminLink />
-            </div>
+          <div className="mx-auto mt-16 max-w-sm">
+            <AuthPrompt message="You are out of free trial. Create an account or sign in to keep studying." />
           </div>
         )}
 
@@ -316,8 +310,8 @@ export function QuizView({
             )}
             {!authenticated && (
               <p className="mt-3 text-center text-xs text-stone-400">
-                You can sit 1 practice test free — after that, sign in with
-                your invited email.
+                You can sit 1 practice test free — after that, create a free
+                account with your APU email.
               </p>
             )}
             <p className="mt-4 text-center">

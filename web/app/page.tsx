@@ -1,7 +1,6 @@
 import { isAdminEmail } from "@/lib/admin";
 import { Chat } from "@/components/chat";
-import { NameGate } from "@/components/name-gate";
-import { firstNameFrom } from "@/lib/name";
+import { greetingName } from "@/lib/name";
 import { createClient } from "@/lib/supabase/server";
 import type { CourseLevel } from "@/lib/uploads";
 import type { User } from "@supabase/supabase-js";
@@ -9,7 +8,7 @@ import type { User } from "@supabase/supabase-js";
 export default async function Home() {
   // Signed-out visitors see the chat too: middleware lets "/" through and
   // /api/chat meters them with the 3-question trial before requiring the
-  // invited sign-in.
+  // sign-in.
   let user: User | null = null;
   let level: CourseLevel | null = null;
   try {
@@ -31,17 +30,10 @@ export default async function Home() {
     // Unreachable auth reads as signed out; the trial still works.
   }
 
-  // A name is required before studying: metadata only, no email guessing —
-  // an invited student's first visit must actually ask. The admin skips the
-  // gate; their name is stamped when they set their password.
-  const firstName = firstNameFrom(
-    user?.user_metadata as Record<string, unknown> | undefined,
-    null,
-  );
+  // The full name given at signup. The middleware has already sent anyone
+  // who has not finished the welcome questions to /welcome.
+  const firstName = greetingName(user?.user_metadata as Record<string, unknown> | undefined);
   const isAdmin = isAdminEmail(user?.email);
-  if (user && !firstName && !isAdmin) {
-    return <NameGate />;
-  }
 
   return (
     <Chat

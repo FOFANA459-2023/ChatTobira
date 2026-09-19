@@ -35,8 +35,12 @@ pipeline, retrieval, model serving, auth, admin tooling, CI/CD.
   its book contains once in 253,000 characters. Nothing may be asked twice —
   across sections, not just within one — and a paper the student has already
   been asked is not asked again.
-- **Invite-only access** — the admin invites students by email; they sign in
-  with a magic link. No passwords for students, no public signup.
+- **APU students only** — anyone with an `@apu.ac.jp` address signs up with
+  their full name (as on their student ID) and a password, confirms the
+  address by email, and answers three questions: college, semester, and why
+  they are studying. The domain rule is enforced by the database, not the
+  form — the anon key is public, and a check that lives only in React can be
+  skipped by calling the auth API directly.
 
 ## The problems that made it interesting
 
@@ -101,13 +105,9 @@ citations quote short excerpts with page numbers instead of serving pages;
 class handouts ground answers for students who own them; source PDFs live in
 a private bucket that the app never reads, used only for backup and restore.
 
-**Email in the real world.** University mail gateways silently eat invites.
-The invite flow rolls back if the send fails, and a scheduled job reads the
-sender's inbox over IMAP for bounce notices and revokes invites that provably
-never arrived — the student list stays a list of people who can be reached.
-(Related fix: students type email addresses with the Japanese IME on, so all
-email input is NFKC-normalized before validation. A full-width ＠ is not a
-typo, it's Tuesday.)
+**Email in the real world.** Students type email addresses with the Japanese
+IME on, so all email input is NFKC-normalized before validation. A full-width
+＠ is not a typo, it's Tuesday.
 
 ## Stack
 
@@ -120,7 +120,7 @@ typo, it's Tuesday.)
 - **Serving:** Vercel AI SDK, Groq → DeepSeek → Gemini cascade, structured
   output for test generation
 - **Ops:** GitHub Actions — lint/type/unit/e2e gates, deploy on green,
-  scheduled bounce sweep; pytest + vitest + Playwright
+  pytest + vitest + Playwright
 
 ```
 ingest/      Python pipeline: discover → transcribe → chunk → embed → push
@@ -139,7 +139,6 @@ ingest transcribe        # pages -> Markdown via vision model (resumable)
 ingest push              # chunk, embed, upsert to Supabase
 ingest verify            # corpus health checks, fails CI-style on regression
 ingest backup            # mirror sources + transcripts to a private bucket
-ingest bounces           # revoke invites whose email bounced
 ```
 
 ```bash

@@ -17,33 +17,56 @@ const ago = (seconds: number) => new Date(NOW - seconds * 1000).toISOString();
 
 const STUDENTS = [
   {
-    email: "active@ed.ritsumei.ac.jp",
-    name: "Rin",
-    invited_at: ago(30 * 86400),
-    registered: true,
-    accepted: true,
+    email: "rin21ab@apu.ac.jp",
+    name: "Rin Tanaka",
+    college: "APM",
+    semester: 3,
+    reasons: ["japanese_class", "jpt_prep"],
+    signed_up_at: ago(30 * 86400),
+    verified: true,
+    onboarded: true,
     suspended: false,
     last_sign_in_at: ago(3 * 3600),
     last_activity_at: ago(2 * 3600),
     questions_today: 4,
   },
   {
-    email: "waiting@ed.ritsumei.ac.jp",
-    name: null,
-    invited_at: ago(2 * 86400),
-    registered: false,
-    accepted: false,
+    email: "waiting@apu.ac.jp",
+    name: "Aiko Sato",
+    college: null,
+    semester: null,
+    reasons: [],
+    signed_up_at: ago(2 * 86400),
+    verified: false,
+    onboarded: false,
     suspended: false,
     last_sign_in_at: null,
     last_activity_at: null,
     questions_today: 0,
   },
   {
-    email: "paused@ed.ritsumei.ac.jp",
-    name: "Kenji",
-    invited_at: ago(60 * 86400),
-    registered: true,
-    accepted: true,
+    email: "halfway@apu.ac.jp",
+    name: "Budi Santoso",
+    college: null,
+    semester: null,
+    reasons: [],
+    signed_up_at: ago(1 * 86400),
+    verified: true,
+    onboarded: false,
+    suspended: false,
+    last_sign_in_at: ago(86400),
+    last_activity_at: ago(86400),
+    questions_today: 0,
+  },
+  {
+    email: "paused@apu.ac.jp",
+    name: "Kenji Mori",
+    college: "ST",
+    semester: 8,
+    reasons: ["improve_japanese"],
+    signed_up_at: ago(60 * 86400),
+    verified: true,
+    onboarded: true,
     suspended: true,
     last_sign_in_at: ago(20 * 86400),
     last_activity_at: ago(20 * 86400),
@@ -79,43 +102,58 @@ describe("admin students page", () => {
 
   it("shows each student's name, email and last activity", async () => {
     render(<StudentsPage />);
-    const row = (await screen.findByText("Rin")).closest("tr")!;
-    expect(within(row).getByText("active@ed.ritsumei.ac.jp")).toBeInTheDocument();
+    const row = (await screen.findByText("Rin Tanaka")).closest("tr")!;
+    expect(within(row).getByText("rin21ab@apu.ac.jp")).toBeInTheDocument();
     expect(within(row).getByText("2 hours ago")).toBeInTheDocument();
     // Today's questions sit beside it: activity a month ago and activity this
     // morning are different situations.
     expect(within(row).getByText(/4 today/)).toBeInTheDocument();
   });
 
-  it("says plainly when a student has never signed in", async () => {
+  it("shows the welcome answers: college, semester and reasons", async () => {
     render(<StudentsPage />);
-    const row = (await screen.findByText("waiting@ed.ritsumei.ac.jp")).closest("tr")!;
-    expect(within(row).getByText("Never logged in")).toBeInTheDocument();
-    expect(within(row).getByText("Invited")).toBeInTheDocument();
+    const row = (await screen.findByText("Rin Tanaka")).closest("tr")!;
+    expect(within(row).getByText(/APM/)).toBeInTheDocument();
+    expect(within(row).getByText(/3rd semester/)).toBeInTheDocument();
+    expect(within(row).getByText("Japanese class, JPT test prep")).toBeInTheDocument();
   });
 
-  it("distinguishes active, waiting and suspended at a glance", async () => {
+  it("says plainly when a student has never signed in", async () => {
     render(<StudentsPage />);
-    await screen.findByText("Rin");
-    // Scoped to the rows: "Invited" is also a column heading, and the badge
-    // is the thing under test.
+    const row = (await screen.findByText("waiting@apu.ac.jp")).closest("tr")!;
+    expect(within(row).getByText("Never logged in")).toBeInTheDocument();
+    expect(within(row).getByText("Email not verified")).toBeInTheDocument();
+  });
+
+  it("distinguishes each step of signing up, and suspension, at a glance", async () => {
+    render(<StudentsPage />);
+    await screen.findByText("Rin Tanaka");
     const badges = document.querySelectorAll("tbody .rounded-full");
     expect([...badges].map((badge) => badge.textContent)).toEqual([
       "Active",
-      "Invited",
+      "Email not verified",
+      "Profile pending",
       "Suspended",
     ]);
   });
 
-  it("offers Suspend only for students who have an account to suspend", async () => {
+  it("filters to the students who have not finished signing up", async () => {
     render(<StudentsPage />);
-    const waiting = (await screen.findByText("waiting@ed.ritsumei.ac.jp")).closest("tr")!;
-    expect(within(waiting).queryByRole("button", { name: "Suspend" })).not.toBeInTheDocument();
-    // A link can always be resent, account or not.
-    expect(within(waiting).getByRole("button", { name: "Resend link" })).toBeInTheDocument();
+    await screen.findByText("Rin Tanaka");
+    screen.getByRole("button", { name: "Not finished signing up" }).click();
+    await waitFor(() => expect(screen.queryByText("Rin Tanaka")).not.toBeInTheDocument());
+    expect(screen.getByText("Aiko Sato")).toBeInTheDocument();
+    expect(screen.getByText("Budi Santoso")).toBeInTheDocument();
+  });
 
-    const active = screen.getByText("Rin").closest("tr")!;
+  it("offers Suspend and Remove, and no invite links", async () => {
+    render(<StudentsPage />);
+    const active = (await screen.findByText("Rin Tanaka")).closest("tr")!;
     expect(within(active).getByRole("button", { name: "Suspend" })).toBeInTheDocument();
+    expect(within(active).getByRole("button", { name: "Remove" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /resend/i })).not.toBeInTheDocument();
+    const paused = screen.getByText("Kenji Mori").closest("tr")!;
+    expect(within(paused).getByRole("button", { name: "Restore" })).toBeInTheDocument();
   });
 
   it("offers a retry rather than an empty table when the roster fails to load", async () => {
