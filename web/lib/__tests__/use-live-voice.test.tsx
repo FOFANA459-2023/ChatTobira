@@ -261,10 +261,22 @@ describe("useLiveConversation", () => {
   it("carries the conversation onto a new connection when the server rotates it", async () => {
     const { socket } = await connect();
     act(() => socket.receive({ sessionResumptionUpdate: { newHandle: "handle-7", resumable: true } }));
+    act(() => socket.receive({ serverContent: { inputTranscription: { text: "京都に行きました" } } }));
+    act(() => socket.receive({ serverContent: { outputTranscription: { text: "いいですね" } } }));
+    act(() => socket.receive({ serverContent: { turnComplete: true } }));
     act(() => socket.receive({ goAway: { timeLeft: "10s" } }));
     await waitFor(() => expect(FakeSocket.all).toHaveLength(2));
+    // The old connection is still up, so the new session is seeded with the
+    // whole conversation rather than resumed by handle.
     const [, init] = fetchMock.mock.calls.filter(([url]) => url === "/api/voice/session")[1];
-    expect(JSON.parse(init.body)).toMatchObject({ resume: "handle-7" });
+    expect(JSON.parse(init.body)).toEqual({
+      language: "ja",
+      history: [
+        { role: "user", text: "こんにちは" },
+        { role: "user", text: "京都に行きました" },
+        { role: "assistant", text: "いいですね" },
+      ],
+    });
     const next = FakeSocket.all[1];
     act(() => next.open());
     act(() => next.receive({ setupComplete: {} }));
@@ -279,6 +291,113 @@ describe("useLiveConversation", () => {
     expect(socket.readyState).toBe(3);
     expect(track.stop).toHaveBeenCalled();
     expect(result.current.active).toBe(false);
+  });
+});
+
+describe("metered by the minute", () => {
+  /** A session route that hands out minutes: each token ends `lifeMs` after
+   * it is minted, with `left` seconds after it. */
+  function minutes(lifeMs: number, left: number[]) {
+    let call = 0;
+    fetchMock.mockImplementation((url: string) => {
+      if (url !== "/api/voice/session") return jsonResponse({});
+      const remaining = left[Math.min(call, left.length - 1)];
+      call += 1;
+      if (remaining < 0) {
+        return jsonResponse(
+          { error: "quota_exhausted", message: "You have used your 10 minutes of conversation for now. More are available at 3:40 PM (Japan time)." },
+          429,
+        );
+      }
+      return jsonResponse({
+        token: `tok ${call}`,
+        model: "gemini-3.8-live",
+        expiresAt: Date.now() + lifeMs,
+        remainingSeconds: remaining,
+      });
+    });
+  }
+
+  it("moves to the next minute before this one runs out, and never while the tutor is talking", async () => {
+    // Handover is due 8s before expiry: 8.4s of life puts it ~0.4s away.
+    minutes(8_400, [540, 480]);
+    const { socket, result } = await connect();
+    expect(result.current.secondsLeft).toBeGreaterThanOrEqual(540);
+    act(() => socket.receive({ sessionResumptionUpdate: { newHandle: "h-1", resumable: true } }));
+    // The tutor starts talking before the handover.
+    act(() =>
+      socket.receive({ serverContent: { modelTurn: { parts: [{ inlineData: { data: audioChunk(24000) } }] } } }),
+    );
+
+    await waitFor(() => expect(FakeSocket.all).toHaveLength(2), { timeout: 3000 });
+    const next = FakeSocket.all[1];
+    act(() => next.open());
+    act(() => next.receive({ setupComplete: {} }));
+    // Ready, but the tutor is mid-sentence: the old connection keeps it.
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(socket.readyState).toBe(1);
+
+    // The sentence ends; the switch happens in the quiet.
+    act(() => sources[0].onended?.());
+    await waitFor(() => expect(socket.readyState).toBe(3));
+    // The new minute carries the conversation on — as a fresh session seeded
+    // with the transcript, because Google will not resume a session whose
+    // connection is still open.
+    const [, init] = fetchMock.mock.calls.filter(([url]) => url === "/api/voice/session")[1];
+    const body = JSON.parse(init.body);
+    expect(body.resume).toBeUndefined();
+    expect(body.history).toEqual([{ role: "user", text: "こんにちは" }]);
+    // And the microphone now feeds it.
+    act(() => FakeWorkletNode.created.at(-1)!.port.onmessage!({ data: new Float32Array(1920).fill(0.01) }));
+    expect(next.last("realtimeInput")).toBeDefined();
+  });
+
+  it("finishes the last minute and then ends the call, saying when more is available", async () => {
+    // One minute left in the window, then none.
+    minutes(8_400, [0]);
+    const { socket, result, onTurn } = await connect();
+    act(() => socket.receive({ serverContent: { inputTranscription: { text: "ありがとう" } } }));
+    act(() => socket.receive({ serverContent: { outputTranscription: { text: "どういたしまして" } } }));
+    // No handover is attempted: there is nothing left to buy.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(FakeSocket.all).toHaveLength(1);
+    // Google ends the call when the minute's token expires.
+    act(() => socket.close(1011));
+    expect(result.current.error).toBe("quota");
+    expect(result.current.active).toBe(false);
+    expect(onTurn).toHaveBeenCalledWith({ user: "ありがとう", assistant: "どういたしまして" });
+  });
+
+  it("keeps talking through a paid minute when the next one is refused", async () => {
+    minutes(8_400, [60, -1]);
+    const { socket, result } = await connect();
+    await waitFor(
+      () => expect(fetchMock.mock.calls.filter(([url]) => url === "/api/voice/session")).toHaveLength(2),
+      { timeout: 3000 },
+    );
+    await waitFor(() => expect(result.current.notice).toMatch(/3:40 PM/));
+    // The minute already paid for is still running.
+    expect(result.current.active).toBe(true);
+    expect(socket.readyState).toBe(1);
+    act(() => socket.close(1011));
+    expect(result.current.error).toBe("quota");
+  });
+
+  it("shows no countdown on an unmetered account", async () => {
+    minutes(30 * 60_000, [2147483647]);
+    const { result } = await connect();
+    expect(result.current.secondsLeft).toBeNull();
+  });
+});
+
+describe("recovering a dropped connection", () => {
+  it("resumes by handle when the old connection is already gone", async () => {
+    const { socket } = await connect();
+    act(() => socket.receive({ sessionResumptionUpdate: { newHandle: "handle-9", resumable: true } }));
+    act(() => socket.close(1011));
+    await waitFor(() => expect(FakeSocket.all).toHaveLength(2));
+    const [, init] = fetchMock.mock.calls.filter(([url]) => url === "/api/voice/session")[1];
+    expect(JSON.parse(init.body)).toEqual({ language: "ja", resume: "handle-9" });
   });
 });
 

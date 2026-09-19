@@ -4,6 +4,7 @@ import { createGroq } from "@ai-sdk/groq";
 import { generateObject } from "ai";
 import { z } from "zod";
 
+import { exhaustedMessage, spendAllowance } from "@/lib/allowance";
 import { cachedPool, rememberPool } from "@/lib/corpus-cache";
 import {
   ACCEPT_BUDGET_MS,
@@ -235,15 +236,22 @@ export async function POST(request: Request) {
     );
   }
 
-  // A quiz costs one model call, so it spends one quota unit like a question.
-  // Trial visitors have no quota row; the cookie is their whole allowance.
+  // A practice test is one of the student's 20 requests for this five-hour
+  // window, the same as a question. Trial visitors have no allowance row; the
+  // cookie is their whole allowance.
   if (user) {
-    const { data: remaining, error: quotaError } = await supabase.rpc("consume_quota");
-    if (quotaError) {
-      return Response.json({ error: "quota_check_failed" }, { status: 500 });
-    }
-    if (remaining === -1) {
-      return Response.json({ error: "quota_exhausted" }, { status: 429 });
+    const spent = await spendAllowance(supabase, "chat", 1);
+    if (!spent.ok) {
+      return spent.exhausted
+        ? Response.json(
+            {
+              error: "quota_exhausted",
+              resetsAt: spent.resetsAt,
+              message: exhaustedMessage("chat", spent.resetsAt),
+            },
+            { status: 429 },
+          )
+        : Response.json({ error: "quota_check_failed" }, { status: 500 });
     }
   }
 

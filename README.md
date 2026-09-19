@@ -73,7 +73,9 @@ written 見える.
 
 **Free tiers are a design constraint, not a footnote.** The whole thing runs
 near $0/month for a classroom of users: a semantic answer cache (100 students
-ask the same ~30 questions), per-student daily quotas, and a provider cascade
+ask the same ~30 questions), per-student five-hour allowances (20 questions or
+practice tests and 10 minutes of conversation, the minutes enforced by
+issuing the live model one-minute tokens), and a provider cascade
 (Groq free tier → DeepSeek prepaid → Gemini last) that degrades gracefully as
 each tier's limit is hit. The transcription pipeline is checkpointed per page
 so a rate-limited run resumes tomorrow without re-paying for a single page.
