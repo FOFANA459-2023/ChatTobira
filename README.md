@@ -35,6 +35,12 @@ pipeline, retrieval, model serving, auth, admin tooling, CI/CD.
   its book contains once in 253,000 characters. Nothing may be asked twice —
   across sections, not just within one — and a paper the student has already
   been asked is not asked again.
+- **Spoken conversation practice, in real time** — press the microphone and
+  talk. The tutor answers out loud in under a second from the moment you stop,
+  in Japanese or English, and you can cut in at any point the way you would
+  with a person. When you ask about a grammar point mid-conversation it looks
+  it up in your own textbooks before answering. The whole call lands in your
+  chat history when you hang up.
 - **APU students only** — anyone with an `@apu.ac.jp` address signs up with
   their full name (as on their student ID) and a password, confirms the
   address by email, and answers three questions: college, semester, and why
@@ -104,6 +110,23 @@ not a guarantee.
 citations quote short excerpts with page numbers instead of serving pages;
 class handouts ground answers for students who own them; source PDFs live in
 a private bucket that the app never reads, used only for backup and restore.
+
+**A spoken turn used to take seven seconds.** The first version of voice was
+a pipeline: wait for 1.1s of silence, upload the recording to Whisper, run the
+chat route, then synthesise the reply a clause at a time. Each stage was
+reasonable and they ran in a row, so a student waited five to seven seconds in
+silence for every reply — and the speech model alone was 2.6–6s of that. No
+tuning inside the pipeline could fix a latency that was the sum of its stages,
+so it became one stage: the browser streams microphone audio to a native-audio
+live model over a WebSocket, which detects the end of speech itself and
+streams its reply back while still generating it. Measured on a real
+3.2-second Japanese sentence, three live models, end of speech to first audio:
+0.95s for the one chosen, 2.6s for the slowest. The Google key never reaches
+the browser — the server mints a single-use token that locks the model, the
+voice, the prompt and the one tool the tutor has, which is the same hybrid
+retrieval the typed chat uses. The microphone opens before the connection
+does and queues what the student says meanwhile, so the first sentence is
+never lost to the handshake.
 
 **Email in the real world.** Students type email addresses with the Japanese
 IME on, so all email input is NFKC-normalized before validation. A full-width

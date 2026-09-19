@@ -22,6 +22,7 @@ import {
   voicePhase,
   type SpeechToText,
 } from "@/lib/use-voice";
+import { useLiveConversation } from "@/lib/use-live-voice";
 
 interface MessageMeta {
   citations?: Citation[];
@@ -139,7 +140,7 @@ export function Chat({
     },
   });
 
-  const { messages, sendMessage, status, error } = useChat({
+  const { messages, sendMessage, setMessages, status, error } = useChat({
     transport: new DefaultChatTransport({
       api: "/api/chat",
       // Read from a ref so the id set mid-conversation applies immediately.
@@ -261,6 +262,71 @@ export function Chat({
   );
   voiceRef.current = voice;
 
+  /** Which engine the spoken conversation is running on. "live" is one open
+   * connection that listens and speaks at once — under a second from the
+   * student going quiet to the reply starting. "classic" is the older
+   * record → transcribe → answer → synthesise loop, kept as the fallback for
+   * when the live service cannot be reached. */
+  const [voiceEngine, setVoiceEngine] = useState<"live" | "classic">("live");
+
+  const live = useLiveConversation({
+    // A finished spoken exchange goes into the transcript the student gets
+    // back, and into the same saved conversation as a typed one.
+    onTurn: ({ user, assistant }) => {
+      const stamp = Date.now().toString(36);
+      const turn: typeof messages = [];
+      if (user) {
+        const id = `live-user-${stamp}`;
+        turn.push({ id, role: "user", parts: [{ type: "text", text: user }] });
+        setSpokenTurns((all) => new Set(all).add(id));
+      }
+      if (assistant) {
+        turn.push({
+          id: `live-assistant-${stamp}`,
+          role: "assistant",
+          parts: [{ type: "text", text: assistant }],
+          metadata: { model: "live" },
+        });
+      }
+      setMessages((all) => [...all, ...turn]);
+      void fetch("/api/voice/turn", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversationId: conversationRef.current, user, assistant }),
+      })
+        .then((response) => (response.ok ? response.json() : null))
+        .then((body: { conversationId?: number } | null) => {
+          if (body?.conversationId) conversationRef.current = body.conversationId;
+        })
+        .catch(() => {
+          /* the transcript is on screen either way */
+        });
+    },
+  });
+
+  /** Start talking. Live first; the classic loop if live cannot open. Called
+   * straight from the button's click so the audio can start on Safari. */
+  function startVoice() {
+    setVoiceLive(true);
+    setVoiceEngine("live");
+    setHeard(null);
+    const history = messages
+      .map((message) => ({
+        role: message.role === "user" ? ("user" as const) : ("assistant" as const),
+        text: message.parts
+          .filter((part): part is { type: "text"; text: string } => part.type === "text")
+          .map((part) => part.text)
+          .join(" "),
+      }))
+      .filter((turn) => turn.text.trim());
+    void live.start({ language, history }).then((result) => {
+      if (result !== "fallback" || !voiceLiveRef.current) return;
+      console.warn("live voice unavailable; using the classic voice loop");
+      setVoiceEngine("classic");
+      void voice.start();
+    });
+  }
+
   const busy = status === "submitted" || status === "streaming";
   // The transcript callback closes over its first render; a ref keeps it
   // honest about whether a request is already in flight.
@@ -294,6 +360,7 @@ export function Chat({
    * where the newest turn is. */
   function endVoice() {
     setVoiceLive(false);
+    live.stop();
     voice.cancel();
     tts.stop();
     setHeard(null);
@@ -360,7 +427,7 @@ export function Chat({
             href="/admin"
             className="rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-sm text-stone-700 hover:bg-stone-100"
           >
-            Invite students
+            Admin
           </Link>
         )}
       </NavBar>
@@ -370,13 +437,14 @@ export function Chat({
           same conversation — and comes back whole when the student finishes. */}
       {voiceLive ? (
         <VoiceSession
-          phase={phase}
-          level={voice.level}
+          phase={voiceEngine === "live" ? live.phase : phase}
+          level={voiceEngine === "live" ? live.level : voice.level}
           language={language}
-          heard={heard}
-          error={voice.error}
+          heard={voiceEngine === "live" ? live.heard : heard}
+          error={voiceEngine === "live" ? live.error : voice.error}
+          realtime={voiceEngine === "live"}
           onEnd={endVoice}
-          onInterrupt={tts.stop}
+          onInterrupt={voiceEngine === "live" ? live.interrupt : tts.stop}
         />
       ) : (
       <div ref={scroll.ref} className="relative flex-1 space-y-4 overflow-y-auto px-4 py-6">
@@ -609,6 +677,7 @@ export function Chat({
               replying={busy}
               speaking={tts.speaking}
               onStopSpeaking={tts.stop}
+              onStart={startVoice}
             />
           )}
           {!voiceLive && (

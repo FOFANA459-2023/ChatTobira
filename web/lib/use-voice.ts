@@ -82,7 +82,8 @@ export type VoiceError =
   | "recording_failed"
   | "empty"
   | "transcription_failed"
-  | "network";
+  | "network"
+  | "quota";
 
 export const VOICE_ERROR_TEXT: Record<VoiceError, string> = {
   unsupported: "This browser cannot record audio. Try Chrome, Edge or Safari.",
@@ -92,6 +93,7 @@ export const VOICE_ERROR_TEXT: Record<VoiceError, string> = {
   empty: "I did not catch anything — try speaking a little closer to the microphone.",
   transcription_failed: "I could not make out that recording. Please try again.",
   network: "The connection dropped. Check your network and try again.",
+  quota: "You have reached today's limit. It resets at midnight (Japan time).",
 };
 
 /** The audio format this browser will actually record.

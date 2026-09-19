@@ -58,6 +58,15 @@ test("admin page offers the password sign-in when signed out", async ({
   await expect(page.getByRole("button", { name: /^sign in$/i })).toBeVisible();
 });
 
+test("live voice APIs reject unauthenticated requests", async ({ request }) => {
+  // A token for the live model is a paid, minute-billed credential; a lookup
+  // reads the corpus. Neither is part of the anonymous trial.
+  for (const path of ["/api/voice/session", "/api/voice/lookup", "/api/voice/turn"]) {
+    const response = await request.post(path, { data: {} });
+    expect(response.status(), path).toBe(401);
+  }
+});
+
 test("admin students API rejects unauthenticated requests", async ({ request }) => {
   const response = await request.get("/api/admin/students");
   expect(response.status()).toBe(401);
