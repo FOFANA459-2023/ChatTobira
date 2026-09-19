@@ -1,6 +1,12 @@
 import { z } from "zod";
 
 import { isAdminEmail } from "@/lib/admin";
+import {
+  exhaustedMessage,
+  spendAllowance,
+  VOICE_HANDOVER_MS,
+  VOICE_SLICE_SECONDS,
+} from "@/lib/allowance";
 import { LIVE_MODEL, LIVE_SILENCE_MS, LIVE_VOICE, liveSetup } from "@/lib/live-voice";
 import { greetingName } from "@/lib/name";
 import { createClient } from "@/lib/supabase/server";
@@ -18,12 +24,13 @@ const BodySchema = z.object({
   resume: z.string().max(2000).optional(),
 });
 
-/** How long the browser has to open the socket with this token, and how long
- * the conversation it opens may run before a fresh token is needed. The
- * server closes a live connection every ten minutes or so anyway; resumption
- * asks for a new token then, which is what re-checks the quota. */
-const OPEN_WITHIN_MS = 60_000;
-const SESSION_MS = 30 * 60_000;
+/** How long the browser has to open the socket with this token. */
+const OPEN_WITHIN_MS = 30_000;
+/** How long a token's conversation may run. One charged minute, plus the few
+ * seconds a connection takes to open and to hand over to the next token —
+ * the client moves on before this, and Google ends the call at it whatever
+ * the client does (measured: "closed 1011 auth token has expired"). */
+const SLICE_MS = VOICE_SLICE_SECONDS * 1000 + VOICE_HANDOVER_MS;
 
 /** A single-use token for one live spoken conversation.
  *
@@ -33,10 +40,11 @@ const SESSION_MS = 30 * 60_000;
  * student with the browser console open can hold a conversation and nothing
  * else: not a different model, not a different prompt, not a second socket.
  *
- * Each token costs one unit of the student's daily quota, the same as a typed
- * question. A conversation takes a new token when the server rotates its
- * connection, every ten minutes or so, which keeps the daily cap meaningful
- * for a feature that is otherwise billed by the minute.
+ * Each token is ONE MINUTE of the student's ten per five-hour window, charged
+ * when it is minted. The browser asks for the next one a few seconds before
+ * this one runs out and moves the conversation onto it; when the allowance
+ * is spent, there is no next token and the call ends with the minute it is
+ * in. The server never has to trust the browser about how long it talked.
  */
 export async function POST(request: Request) {
   const key = process.env.GOOGLE_API_KEY;
@@ -58,15 +66,21 @@ export async function POST(request: Request) {
   }
   const { language, history, resume } = parsed.data;
 
-  const [{ data: remaining, error: quotaError }, { data: profile }] = await Promise.all([
-    supabase.rpc("consume_quota"),
+  const [spent, { data: profile }] = await Promise.all([
+    spendAllowance(supabase, "voice", VOICE_SLICE_SECONDS),
     supabase.from("profiles").select("level").eq("id", user.id).maybeSingle(),
   ]);
-  if (quotaError) {
-    return Response.json({ error: "quota_check_failed" }, { status: 500 });
-  }
-  if (remaining === -1) {
-    return Response.json({ error: "quota_exhausted" }, { status: 429 });
+  if (!spent.ok) {
+    return spent.exhausted
+      ? Response.json(
+          {
+            error: "quota_exhausted",
+            resetsAt: spent.resetsAt,
+            message: exhaustedMessage("voice", spent.resetsAt),
+          },
+          { status: 429 },
+        )
+      : Response.json({ error: "quota_check_failed" }, { status: 500 });
   }
 
   const model = process.env.LIVE_MODEL ?? LIVE_MODEL;
@@ -89,7 +103,7 @@ export async function POST(request: Request) {
     headers: { "Content-Type": "application/json", "x-goog-api-key": key },
     body: JSON.stringify({
       uses: 1,
-      expireTime: new Date(now + SESSION_MS).toISOString(),
+      expireTime: new Date(now + SLICE_MS).toISOString(),
       newSessionExpireTime: new Date(now + OPEN_WITHIN_MS).toISOString(),
       bidiGenerateContentSetup: setup,
     }),
@@ -106,7 +120,15 @@ export async function POST(request: Request) {
   }
 
   return Response.json(
-    { token: token.name, model },
+    {
+      token: token.name,
+      model,
+      // When this minute's call ends, and how many seconds are left after it
+      // — so the browser knows when to move on and what to show.
+      expiresAt: now + SLICE_MS,
+      remainingSeconds: spent.remaining,
+      resetsAt: spent.resetsAt,
+    },
     // A token is a credential. Nothing between here and the browser keeps it.
     { headers: { "Cache-Control": "no-store" } },
   );

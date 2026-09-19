@@ -443,6 +443,8 @@ export function Chat({
           heard={voiceEngine === "live" ? live.heard : heard}
           error={voiceEngine === "live" ? live.error : voice.error}
           realtime={voiceEngine === "live"}
+          secondsLeft={voiceEngine === "live" ? live.secondsLeft : null}
+          errorDetail={voiceEngine === "live" ? live.notice : null}
           onEnd={endVoice}
           onInterrupt={voiceEngine === "live" ? live.interrupt : tts.stop}
         />
@@ -539,7 +541,7 @@ export function Chat({
         {error && !trialExhausted && (
           <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
             {/quota/i.test(error.message)
-              ? "You have reached today's question limit. It resets at midnight, Japan time."
+              ? quotaMessage(error.message)
               : "Something went wrong answering that. Please try again."}
           </div>
         )}
@@ -694,6 +696,18 @@ export function Chat({
       )}
     </div>
   );
+}
+
+/** The server's own sentence for a spent allowance, which names the time it
+ * comes back. useChat hands over the response body as the error message. */
+function quotaMessage(raw: string): string {
+  try {
+    const body = JSON.parse(raw) as { message?: string };
+    if (body.message) return body.message;
+  } catch {
+    /* not JSON */
+  }
+  return "You have used your questions and practice tests for now. More are available within 5 hours.";
 }
 
 /** A small mic glyph for the "this turn was spoken" label. */

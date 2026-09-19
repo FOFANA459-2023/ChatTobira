@@ -4,6 +4,7 @@ import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { convertToModelMessages, streamText, type UIMessage } from "ai";
 import { z } from "zod";
 
+import { exhaustedMessage, spendAllowance } from "@/lib/allowance";
 import { withoutLanguageRequest } from "@/lib/language";
 import { conversationState, languageModeFor } from "@/lib/conversation";
 import { routeModels, routeReason } from "@/lib/router";
@@ -255,21 +256,20 @@ export async function POST(request: Request) {
   // visitors are metered by the cookie above instead.
   const checkQuota = async (): Promise<Response | null> => {
     if (!user) return null;
-    const { data: remaining, error: quotaError } = await supabase.rpc("consume_quota");
-    if (quotaError) {
+    // One of the student's 20 requests for this five-hour window.
+    const spent = await spendAllowance(supabase, "chat", 1);
+    if (spent.ok) return null;
+    if (!spent.exhausted) {
       return Response.json({ error: "quota_check_failed" }, { status: 500 });
     }
-    if (remaining === -1) {
-      return Response.json(
-        {
-          error: "quota_exhausted",
-          message:
-            "You have reached today's question limit. The limit resets at midnight (Japan time).",
-        },
-        { status: 429 },
-      );
-    }
-    return null;
+    return Response.json(
+      {
+        error: "quota_exhausted",
+        resetsAt: spent.resetsAt,
+        message: exhaustedMessage("chat", spent.resetsAt),
+      },
+      { status: 429 },
+    );
   };
 
   const [persistedId, quotaVerdict, queryVector, attached] = await clock.time(

@@ -53,6 +53,8 @@ export function VoiceSession({
   onEnd,
   onInterrupt,
   realtime = false,
+  secondsLeft = null,
+  errorDetail = null,
 }: {
   phase: VoicePhase;
   /** Microphone loudness, 0–1. */
@@ -71,7 +73,13 @@ export function VoiceSession({
   /** A live connection: the microphone never closes, and the student can
    * talk over the tutor at any moment. */
   realtime?: boolean;
+  /** Conversation time left in this five-hour window; null when unmetered. */
+  secondsLeft?: number | null;
+  /** The server's own sentence for the error, when it has one (the quota
+   * message names the time more minutes become available). */
+  errorDetail?: string | null;
 }) {
+  const errorText = error ? (errorDetail ?? VOICE_ERROR_TEXT[error]) : null;
   const copy = PHASE_COPY[phase];
   const speaking = phase === "speaking";
   const hearing = phase === "hearing";
@@ -138,13 +146,20 @@ export function VoiceSession({
               : copy.en}
         </p>
         <p role="status" aria-live="polite" className="sr-only">
-          {error ? VOICE_ERROR_TEXT[error] : copy.announce}
+          {errorText ?? copy.announce}
         </p>
         <p className="text-xs text-stone-400">
           {language === "ja" ? "日本語で会話中" : "Talking in English"}
           {" · "}
           Say &ldquo;let&rsquo;s speak {language === "ja" ? "English" : "Japanese"}&rdquo; to switch
         </p>
+        {secondsLeft !== null && !error && (
+          <p
+            className={`text-xs tabular-nums ${secondsLeft <= 60 ? "font-medium text-amber-700" : "text-stone-400"}`}
+          >
+            {formatLeft(secondsLeft)} of conversation left
+          </p>
+        )}
       </div>
 
       {/* What it heard. One turn, never a scrollback — see the note above. */}
@@ -154,7 +169,7 @@ export function VoiceSession({
             aria-hidden="true"
             className="rounded-xl bg-amber-50 px-4 py-2 text-center text-sm text-amber-800"
           >
-            {VOICE_ERROR_TEXT[error]}
+            {errorText}
           </p>
         ) : heard ? (
           <p className="text-center text-sm leading-relaxed text-stone-500">
@@ -201,6 +216,12 @@ export function VoiceSession({
       </p>
     </div>
   );
+}
+
+/** "8:05" — minutes and seconds. */
+export function formatLeft(seconds: number): string {
+  const whole = Math.max(0, Math.round(seconds));
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
 }
 
 function MicGlyph() {

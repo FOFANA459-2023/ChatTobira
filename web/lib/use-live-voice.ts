@@ -19,6 +19,7 @@ import {
   type DownsampleState,
   type LiveTurn,
 } from "./live-voice";
+import { VOICE_HANDOVER_MS } from "./allowance";
 import type { VoiceError, VoicePhase } from "./use-voice";
 
 /* ------------------------------------------------------------------------ */
@@ -138,6 +139,12 @@ export interface LiveConversation {
   /** What the student is saying, or last said, as the model heard it. */
   heard: string | null;
   error: VoiceError | null;
+  /** The server's own words for an error, when it has some — for "quota",
+   * the time more conversation becomes available. */
+  notice: string | null;
+  /** Conversation time left in this five-hour window, in seconds; null when
+   * the account is unmetered or no call is running. */
+  secondsLeft: number | null;
   start: (options: { language: ConversationLanguage; history: LiveTurn[] }) => Promise<LiveStart>;
   stop: () => void;
   /** Stop the current reply without ending the conversation. */
@@ -168,23 +175,58 @@ function decode(data: unknown): ServerMessage | null {
   }
 }
 
-/** Ask the server for a token. The status decides what the caller does next. */
-async function requestToken(body: object): Promise<
-  { ok: true; token: string; model: string } | { ok: false; status: number }
-> {
+type Minted =
+  | {
+      ok: true;
+      token: string;
+      model: string;
+      /** When this token's call ends (epoch ms). */
+      expiresAt: number;
+      /** Seconds of conversation left after this minute. */
+      remainingSeconds: number;
+    }
+  | { ok: false; status: number; message?: string };
+
+/** Ask the server for a token — one charged minute of conversation. The
+ * status decides what the caller does next. */
+async function requestToken(body: object): Promise<Minted> {
   try {
     const response = await fetch("/api/voice/session", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    if (!response.ok) return { ok: false, status: response.status };
-    const { token, model } = (await response.json()) as { token: string; model: string };
-    return { ok: true, token, model };
+    if (!response.ok) {
+      const detail = (await response.json().catch(() => ({}))) as { message?: string };
+      return { ok: false, status: response.status, message: detail.message };
+    }
+    const minted = (await response.json()) as {
+      token: string;
+      model: string;
+      expiresAt?: number;
+      remainingSeconds?: number;
+    };
+    return {
+      ok: true,
+      token: minted.token,
+      model: minted.model,
+      expiresAt: minted.expiresAt ?? Date.now() + 30 * 60_000,
+      remainingSeconds: minted.remainingSeconds ?? Number.MAX_SAFE_INTEGER,
+    };
   } catch {
     return { ok: false, status: 0 };
   }
 }
+
+/** Above this many seconds left, the account is unmetered (the admin's) and
+ * no countdown is shown. */
+const UNMETERED_SECONDS = 24 * 60 * 60;
+/** Hard stop for the handover: move to the next token by now even if the
+ * student is mid-sentence, rather than let this one expire under them. */
+const HANDOVER_DEADLINE_MS = 700;
+/** Turns of conversation a new session is seeded with; the session route
+ * accepts at most this many. */
+const MAX_HISTORY = 40;
 
 /** Open a socket with a token and wait for the model to say it is ready. */
 function openSocket(
@@ -242,6 +284,8 @@ export function useLiveConversation(options: {
   const [level, setLevel] = useState(0);
   const [heard, setHeard] = useState<string | null>(null);
   const [error, setError] = useState<VoiceError | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
 
   const onTurnRef = useRef(options.onTurn);
   onTurnRef.current = options.onTurn;
@@ -279,12 +323,28 @@ export function useLiveConversation(options: {
    * the model's own setup — and a student who starts talking as soon as they
    * press the button must not lose their first sentence to it. */
   const queuedRef = useRef<string[]>([]);
+  /** The conversation is metered a minute at a time. When the current
+   * minute's token ends, how many seconds are left after it, and the timer
+   * that moves the call onto the next token before this one runs out. */
+  const expiresAtRef = useRef(0);
+  const remainingRef = useRef(0);
+  const rotateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** No minutes left: this is the last one, and the call ends with it. */
+  const outOfTimeRef = useRef(false);
+  const historyRef = useRef<LiveTurn[]>([]);
+  const awaitingRef = useRef(false);
+  awaitingRef.current = awaiting;
 
-  /** Hand the finished exchange to the transcript. */
+  /** Hand the finished exchange to the transcript — and to the history the
+   * next minute's session is seeded with. */
   const flushExchange = useCallback(() => {
     const { user, assistant } = pendingRef.current;
     if (user.trim() || assistant.trim()) {
       onTurnRef.current({ user: user.trim(), assistant: assistant.trim() });
+      const turns: LiveTurn[] = [];
+      if (user.trim()) turns.push({ role: "user", text: user.trim() });
+      if (assistant.trim()) turns.push({ role: "assistant", text: assistant.trim() });
+      historyRef.current = [...historyRef.current, ...turns].slice(-MAX_HISTORY);
     }
     pendingRef.current = { user: "", assistant: "" };
   }, []);
@@ -292,6 +352,9 @@ export function useLiveConversation(options: {
   const teardown = useCallback(() => {
     activeRef.current = false;
     reconnectingRef.current = false;
+    outOfTimeRef.current = false;
+    if (rotateTimerRef.current) clearTimeout(rotateTimerRef.current);
+    rotateTimerRef.current = null;
     const socket = socketRef.current;
     socketRef.current = null;
     if (socket && socket.readyState <= WebSocket.OPEN) socket.close(1000);
@@ -310,6 +373,7 @@ export function useLiveConversation(options: {
     setAwaiting(false);
     setLookingUp(false);
     setLevel(0);
+    setSecondsLeft(null);
   }, []);
 
   useEffect(() => teardown, [teardown]);
@@ -417,49 +481,156 @@ export function useLiveConversation(options: {
 
   const handleClose = useCallback((socket: WebSocket, event: CloseEvent) => {
     if (socket !== socketRef.current || !activeRef.current) return;
+    // The last minute has run out: the call ends here, as the student was
+    // told it would.
+    if (outOfTimeRef.current) {
+      flushExchange();
+      setError("quota");
+      teardown();
+      return;
+    }
+    // A replacement is already being opened; it takes over when it is up,
+    // and what the student says meanwhile is queued for it.
+    if (reconnectingRef.current) return;
     // The server ended the connection underneath a live conversation. Carry
-    // it on if it can be carried; otherwise say so.
-    if (handleRef.current && !reconnectingRef.current) {
+    // it on — a minute's token ending before the handover ran (a throttled
+    // tab, a slow network) is the common case.
+    if (remainingRef.current > 0 || handleRef.current) {
       void reconnectRef.current();
       return;
     }
     console.warn(`live voice closed: ${event.code} ${event.reason}`);
     setError("network");
     teardown();
-  }, [teardown]);
+  }, [flushExchange, teardown]);
 
-  /** Move the conversation onto a fresh connection, keeping its context. The
-   * microphone keeps running; the few hundred milliseconds of audio sent
-   * while the new socket opens go to the old one, which is still listening. */
+  /** Conversation time left: the minutes not yet started, plus what is left
+   * of this one before the handover. Nothing until a minute is known — the
+   * microphone opens before the first token arrives, and "0:00 left" in amber
+   * while it connects would read as having no time at all. */
+  const refreshLeft = useCallback(() => {
+    if (expiresAtRef.current === 0 || remainingRef.current >= UNMETERED_SECONDS) {
+      setSecondsLeft(null);
+      return;
+    }
+    const thisMinute = Math.max(0, expiresAtRef.current - VOICE_HANDOVER_MS - Date.now()) / 1000;
+    setSecondsLeft(Math.max(0, Math.round(remainingRef.current + thisMinute)));
+  }, []);
+
+  /** Arrange to move onto the next minute's token shortly before this one
+   * ends — or, with no minutes left, to let this one be the last. */
+  const scheduleHandover = useCallback(() => {
+    refreshLeft();
+    if (rotateTimerRef.current) clearTimeout(rotateTimerRef.current);
+    rotateTimerRef.current = null;
+    if (remainingRef.current <= 0) {
+      outOfTimeRef.current = true;
+      return;
+    }
+    const wait = Math.max(0, expiresAtRef.current - VOICE_HANDOVER_MS - Date.now());
+    rotateTimerRef.current = setTimeout(() => void reconnectRef.current(), wait);
+  }, [refreshLeft]);
+
+  /** Move the conversation onto a fresh connection — the next minute's
+   * token, or a replacement for one the server closed — keeping its context.
+   *
+   * The new connection is opened while the old one is still carrying the
+   * conversation, and the switch waits for a quiet moment: not while the
+   * tutor is talking, not while the student is, not while a reply is being
+   * composed. A switch mid-sentence would cut the tutor off or split what the
+   * student said between two sessions. The old token's expiry is the one
+   * deadline that overrides the wait. */
   const reconnect = useCallback(async () => {
     if (reconnectingRef.current || !activeRef.current) return;
     reconnectingRef.current = true;
-    const minted = await requestToken({
-      language: languageRef.current,
-      resume: handleRef.current ?? undefined,
-    });
+    // Two ways to carry the conversation over, and which one depends on
+    // whether the old connection is still up.
+    //
+    // Resuming by handle keeps the session's own memory, but Google refuses
+    // to resume a session whose connection is still open (measured: "1011
+    // Internal error encountered"), and once it is closed a resumed session
+    // took 3.4s to set up — dead air in the middle of a conversation, every
+    // minute. So a planned handover does not resume: it opens a FRESH session
+    // alongside the old one, seeded with the transcript so far, and switches
+    // with no gap at all.
+    //
+    // Resume is kept for when the connection is already gone — the server
+    // dropped it, or the tab was asleep past the handover — where there is
+    // no old session left to overlap with, and memory is worth the wait.
+    const stillUp = socketRef.current?.readyState === WebSocket.OPEN;
+    const pending: LiveTurn[] = [];
+    if (pendingRef.current.user.trim()) pending.push({ role: "user", text: pendingRef.current.user.trim() });
+    if (pendingRef.current.assistant.trim()) {
+      pending.push({ role: "assistant", text: pendingRef.current.assistant.trim() });
+    }
+    const history = [...historyRef.current, ...pending].slice(-MAX_HISTORY);
+    const minted = await requestToken(
+      stillUp || !handleRef.current
+        ? { language: languageRef.current, history }
+        : { language: languageRef.current, resume: handleRef.current },
+    );
+    if (!activeRef.current) {
+      reconnectingRef.current = false;
+      return;
+    }
     if (!minted.ok) {
       reconnectingRef.current = false;
-      if (!activeRef.current) return;
-      setError(minted.status === 429 ? "quota" : "network");
-      teardown();
-      return;
-    }
-    const next = await openSocket(minted.token, minted.model, handleMessage, handleClose);
-    reconnectingRef.current = false;
-    if (!activeRef.current) {
-      next?.close(1000);
-      return;
-    }
-    if (!next) {
+      if (minted.status === 429) {
+        // Out of minutes. The minute in progress is paid for and carries on;
+        // the call ends when it does.
+        outOfTimeRef.current = true;
+        setNotice(minted.message ?? null);
+        if (socketRef.current?.readyState !== WebSocket.OPEN) {
+          flushExchange();
+          setError("quota");
+          teardown();
+        }
+        return;
+      }
       setError("network");
       teardown();
       return;
     }
+    const next = await openSocket(minted.token, minted.model, handleMessage, handleClose);
+    if (!activeRef.current) {
+      reconnectingRef.current = false;
+      next?.close(1000);
+      return;
+    }
+    if (!next) {
+      reconnectingRef.current = false;
+      setError("network");
+      teardown();
+      return;
+    }
+
+    const deadline = expiresAtRef.current - HANDOVER_DEADLINE_MS;
+    const quiet = () =>
+      !playerRef.current?.playing && speechStartRef.current === null && !awaitingRef.current;
+    while (
+      activeRef.current &&
+      socketRef.current?.readyState === WebSocket.OPEN &&
+      !quiet() &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    reconnectingRef.current = false;
+    if (!activeRef.current) {
+      next.close(1000);
+      return;
+    }
+
     const previous = socketRef.current;
     socketRef.current = next;
     previous?.close(1000);
-  }, [handleClose, handleMessage, teardown]);
+    // Anything said while neither connection was open, in order.
+    for (const message of queuedRef.current) next.send(message);
+    queuedRef.current = [];
+    expiresAtRef.current = minted.expiresAt;
+    remainingRef.current = minted.remainingSeconds;
+    scheduleHandover();
+  }, [flushExchange, handleClose, handleMessage, scheduleHandover, teardown]);
   reconnectRef.current = reconnect;
 
   // A noise the model decided was not speech gets no reply at all, and the
@@ -469,6 +640,13 @@ export function useLiveConversation(options: {
     const timer = setTimeout(() => setAwaiting(false), 6000);
     return () => clearTimeout(timer);
   }, [awaiting]);
+
+  // The countdown on the voice screen ticks once a second while a call runs.
+  useEffect(() => {
+    if (!active) return;
+    const timer = setInterval(refreshLeft, 1000);
+    return () => clearInterval(timer);
+  }, [active, refreshLeft]);
 
   /** One batch of microphone audio: meter it, resample it, send it. */
   const onCapture = useCallback((samples: Float32Array) => {
@@ -534,8 +712,12 @@ export function useLiveConversation(options: {
         return "fallback" as const;
       }
       setError(null);
+      setNotice(null);
       setHeard(null);
       languageRef.current = language;
+      historyRef.current = history;
+      expiresAtRef.current = 0;
+      remainingRef.current = 0;
       handleRef.current = null;
       pendingRef.current = { user: "", assistant: "" };
       activeRef.current = true;
@@ -619,6 +801,7 @@ export function useLiveConversation(options: {
       if (!activeRef.current) return "failed" as const;
       if (!minted.ok) {
         if (minted.status === 429) {
+          setNotice(minted.message ?? null);
           setError("quota");
           teardown();
           return "failed" as const;
@@ -638,6 +821,9 @@ export function useLiveConversation(options: {
         return "fallback" as const;
       }
       socketRef.current = socket;
+      expiresAtRef.current = minted.expiresAt;
+      remainingRef.current = minted.remainingSeconds;
+      scheduleHandover();
       // Everything said while connecting, in order, then live from here on.
       for (const message of queuedRef.current) socket.send(message);
       const caughtUp = queuedRef.current.length;
@@ -650,7 +836,7 @@ export function useLiveConversation(options: {
 
       return "live" as const;
     },
-    [handleClose, handleMessage, onCapture, teardown],
+    [handleClose, handleMessage, onCapture, scheduleHandover, teardown],
   );
 
   const stop = useCallback(() => {
@@ -677,5 +863,5 @@ export function useLiveConversation(options: {
             ? "thinking"
             : "listening";
 
-  return { active, phase, level, heard, error, start, stop, interrupt };
+  return { active, phase, level, heard, error, notice, secondsLeft, start, stop, interrupt };
 }

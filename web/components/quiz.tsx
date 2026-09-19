@@ -135,6 +135,7 @@ export function QuizView({
       if (!response.ok) {
         const body = (await response.json().catch(() => ({}))) as {
           error?: string;
+          message?: string;
         };
         if (body.error === "trial_exhausted") {
           setPhase("trial_exhausted");
@@ -145,7 +146,7 @@ export function QuizView({
           body.error === "no_material"
             ? "No material is loaded for that selection yet. Try another textbook."
             : body.error === "quota_exhausted"
-              ? "You have reached today's limit. It resets at midnight, Japan time."
+              ? (body.message ?? "You have used your questions and practice tests for now. More are available within 5 hours.")
               : "Could not generate a test. Please try again.",
         );
         setPhase("error");
