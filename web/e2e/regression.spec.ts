@@ -117,7 +117,7 @@ test.describe("the app is styled", () => {
 });
 
 test.describe("the shell still navigates", () => {
-  test("the three tabs are present and go where they say", async ({ page }) => {
+  test("the tabs are present and go where they say", async ({ page }) => {
     await page.goto("/");
     // Located by href inside the tab bar rather than by name. Each tab renders
     // its English label beside a Japanese one — "Chat チャット" — so an exact
@@ -125,6 +125,7 @@ test.describe("the shell still navigates", () => {
     // wordmark, which is also a link to "/".
     const tabs = page.locator("nav").first();
     await expect(tabs.locator('a[href="/"]')).toBeVisible();
+    await expect(tabs.locator('a[href="/speaking"]')).toBeVisible();
     await expect(tabs.locator('a[href="/quiz?kind=grammar"]')).toBeVisible();
     await expect(tabs.locator('a[href="/quiz?kind=kanji"]')).toBeVisible();
 
@@ -152,4 +153,22 @@ test.describe("the shell still navigates", () => {
     );
     expect(overflow, "the page scrolls sideways on a phone").toBeLessThanOrEqual(1);
   });
+
+  // Every page a signed-out student can reach, at the two widths phones
+  // actually come in. The chat alone was not enough: a fourth nav tab fit the
+  // strip exactly on the machine it was written on and pushed every page
+  // sideways on a machine whose fonts were 14px wider.
+  for (const width of [375, 320]) {
+    for (const path of ["/", "/quiz?kind=grammar", "/login", "/signup"]) {
+      test(`${path} does not scroll sideways at ${width}px`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 800 });
+        await page.goto(path);
+        await expect(page.locator("nav").first()).toBeVisible();
+        const overflow = await page.evaluate(
+          () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        );
+        expect(overflow, `${path} scrolls sideways at ${width}px`).toBeLessThanOrEqual(1);
+      });
+    }
+  }
 });
