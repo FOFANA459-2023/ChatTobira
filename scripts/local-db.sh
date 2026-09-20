@@ -89,18 +89,56 @@ start_container() {
 # auth.users is left EMPTY on purpose. The copy carries course material and
 # nothing about a student.
 prepare_schemas() {
-  echo "• preparing extensions/ and auth/ stubs"
+  echo "• preparing extensions/, auth/ and role stubs"
   local_psql -v ON_ERROR_STOP=1 -q <<'SQL'
+-- Supabase's own roles. The dump is public-schema only, so the roles that
+-- every migration grants to and revokes from do not come with it, and
+-- applying one to the copy dies on `role "anon" does not exist` — after
+-- running half its DDL, if it was not wrapped in a transaction. They hold no
+-- privileges here and nothing connects as them; they exist so that a
+-- migration can be replayed against the copy before it is run against
+-- production, which is the entire point of having a copy.
+do $$
+declare r text;
+begin
+  foreach r in array array['anon', 'authenticated', 'service_role'] loop
+    if not exists (select 1 from pg_roles where rolname = r) then
+      execute format('create role %I nologin', r);
+    end if;
+  end loop;
+end $$;
+
 create schema if not exists extensions;
 create schema if not exists auth;
 create extension if not exists vector  with schema extensions;
 create extension if not exists pg_trgm with schema extensions;
 create extension if not exists pgcrypto with schema extensions;
 
+-- The columns the app's own functions read off auth.users, not just the two
+-- the foreign keys need. admin_students() selects created_at, banned_until,
+-- last_sign_in_at and email_confirmed_at, and complete_profile() writes
+-- raw_app_meta_data; a stub without them restores from a dump (pg_restore
+-- does not check function bodies) but cannot have those functions CREATED
+-- against it, which is exactly what replaying a migration does.
 create table if not exists auth.users (
-  id    uuid primary key default gen_random_uuid(),
-  email text
+  id                 uuid primary key default gen_random_uuid(),
+  email              text,
+  created_at         timestamptz not null default now(),
+  last_sign_in_at    timestamptz,
+  email_confirmed_at timestamptz,
+  banned_until       timestamptz,
+  raw_user_meta_data jsonb not null default '{}'::jsonb,
+  raw_app_meta_data  jsonb not null default '{}'::jsonb
 );
+-- A copy made before these columns were listed here still has the two-column
+-- stub, and `create table if not exists` would leave it that way.
+alter table auth.users
+  add column if not exists created_at         timestamptz not null default now(),
+  add column if not exists last_sign_in_at    timestamptz,
+  add column if not exists email_confirmed_at timestamptz,
+  add column if not exists banned_until       timestamptz,
+  add column if not exists raw_user_meta_data jsonb not null default '{}'::jsonb,
+  add column if not exists raw_app_meta_data  jsonb not null default '{}'::jsonb;
 
 -- The one auth function the public schema's policies call. Returning null is
 -- the honest answer here: nobody is signed in on a local copy, so every RLS

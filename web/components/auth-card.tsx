@@ -87,7 +87,7 @@ export function AuthPrompt({ message }: { message: string }) {
           Sign in
         </Link>
       </div>
-      <p className="mt-2 text-xs text-stone-500">Free for APU students with an @apu.ac.jp email.</p>
+      <p className="mt-2 text-xs text-stone-500">For APU students with an @apu.ac.jp email.</p>
     </div>
   );
 }

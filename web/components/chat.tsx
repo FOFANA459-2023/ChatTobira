@@ -652,7 +652,13 @@ export function Chat({
                 ? "話しかけてください — or type to switch back"
                 : "質問をどうぞ — ask in Japanese or English"
             }
-            className="flex-1 rounded-xl border border-stone-300 px-4 py-2.5 text-sm outline-none focus:border-stone-500"
+            // min-w-0 because flex-1 alone does not let an input shrink: a
+            // flex item's min-width defaults to auto, and for an input that
+            // resolves to its own intrinsic width, around 208px. On a phone
+            // signed in — where the upload and microphone buttons sit in this
+            // row too — that held the row 16px wider than the screen and
+            // pushed Send off the right edge.
+            className="min-w-0 flex-1 rounded-xl border border-stone-300 px-4 py-2.5 text-sm outline-none focus:border-stone-500"
           />
           {/* Everything except the input is hidden while a spoken
               conversation is running. The controls that matter then are on the
@@ -686,7 +692,7 @@ export function Chat({
             <button
               type="submit"
               disabled={busy || input.trim() === ""}
-              className="rounded-xl bg-stone-900 px-5 py-2.5 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
+              className="shrink-0 rounded-xl bg-stone-900 px-5 py-2.5 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
             >
               {busy ? "…" : "Send"}
             </button>

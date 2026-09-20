@@ -38,7 +38,7 @@
  */
 
 import type { ConversationLanguage } from "./conversation";
-import { levelGuidance, speakingPrompt } from "./speech";
+import { levelGuidance, speakingPrompt, type SpeakingMode } from "./speech";
 import type { CourseLevel } from "./uploads";
 
 export const LIVE_MODEL = "gemini-3.8-live";
@@ -58,6 +58,15 @@ export const LIVE_SOCKET_URL =
 /** The one tool the tutor has: the same retrieval the typed chat uses. */
 export const LOOKUP_TOOL = "search_course_material";
 
+/** What the browser sends to make the tutor take the first turn.
+ *
+ * The live model answers turns; it does not volunteer one. So a page that
+ * wants the tutor to greet the student has to hand it a turn to answer, and
+ * this is that turn. It is text rather than audio, so it produces no input
+ * transcription and never reaches the student's transcript. */
+export const OPENING_CUE =
+  "(The student has just opened speaking practice and is waiting for you to begin. Greet them now.)";
+
 export interface LiveTurn {
   role: "user" | "assistant";
   text: string;
@@ -69,6 +78,18 @@ export interface LiveSetupOptions {
   silenceMs?: number;
   level: CourseLevel | null;
   language: ConversationLanguage;
+  /** What kind of practice this is. The chat's microphone opens a free
+   * conversation; the speaking page lets the student choose. */
+  mode?: SpeakingMode;
+  /** What they chose to practise — a topic, a grammar point, a scene. Only
+   * the modes that need one use it. */
+  subject?: string;
+  /** The tutor speaks first and greets the student by name, rather than
+   * waiting to be spoken to. The speaking page opens this way: a student who
+   * pressed a button and met silence does not know it is their turn. The
+   * chat's microphone does not, because it is joining a conversation that is
+   * already under way. */
+  opening?: boolean;
   /** The student's name, so the tutor can use it. */
   name?: string | null;
   /** The conversation so far, typed or spoken, newest last. */
@@ -101,15 +122,37 @@ export function historyBlock(history: LiveTurn[] = []): string {
 
 /** The whole system instruction for a live session. */
 export function liveInstruction(options: LiveSetupOptions): string {
-  const { level, language, name, history } = options;
+  const { level, language, name, history, mode = "free", subject, opening } = options;
   const who = name ? ` The student's name is ${name}.` : "";
+
+  // Two different language rules, because the two ways in are different. The
+  // chat's microphone joins a conversation that already has a language and
+  // must not change it underfoot. The speaking page starts from nothing, so
+  // it opens in English (which every student here reads) and then follows
+  // whichever language the student actually answers in, without ever making
+  // them choose one.
+  const languageRule = opening
+    ? `- Open in English, whatever language the rest of the conversation turns out to be in.
+- From your second turn on, speak whichever language the STUDENT is speaking. If they answer in Japanese, carry on in Japanese. If they answer in English, stay in English. Follow them every time it changes, and never ask them to pick a language or comment on which one they used.`
+    : `- The conversation is being held in ${language === "ja" ? "Japanese" : "English"}. Stay in it.
+- If the student asks to switch ("let's speak Japanese", 「英語で話しましょう」), switch at once and stay in the new language until they ask again.`;
+
+  const openingRule = opening
+    ? `
+
+OPENING THE CONVERSATION
+- Speak first. The student has pressed a button and is waiting; do not wait for them.
+- Greet them ${name ? "by name" : ""}, say in one short sentence what you can practise together, and ask what they would like to work on. Two sentences, no more.
+- Something like: "${name ? `Hi ${name}!` : "Hi!"} We can practise anything from your course, or just talk about whatever you like. What would you like to work on today?" Say it in your own words rather than copying that line.
+- Do not list options, do not explain how this works, and do not mention textbooks by name.`
+    : "";
+
   return `You are ChatTobira, a friendly Japanese conversation partner for a university student at Ritsumeikan Asia Pacific University (APU) who is learning Japanese with the Tobira / Foundation Japanese curriculum.${who} You are talking out loud, in real time.
 
-${speakingPrompt("free", level, undefined, language, "lookup")}
+${speakingPrompt(mode, level, subject, language, "lookup")}${openingRule}
 
 LANGUAGE
-- The conversation is being held in ${language === "ja" ? "Japanese" : "English"}. Stay in it.
-- If the student asks to switch ("let's speak Japanese", 「英語で話しましょう」), switch at once and stay in the new language until they ask again.
+${languageRule}
 
 REAL-TIME CONVERSATION
 - Keep every turn short: one to three sentences. The student can interrupt you at any moment, and a long turn is one they have to wait through.

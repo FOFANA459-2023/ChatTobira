@@ -150,7 +150,7 @@ export function UploadButton({
         onClick={() => inputRef.current?.click()}
         aria-label="Attach a photo or PDF"
         title="Attach a photo or PDF of your handout"
-        className="relative rounded-xl border border-stone-300 bg-white px-3 py-2.5 text-stone-600 hover:bg-stone-100 disabled:opacity-50"
+        className="relative shrink-0 rounded-xl border border-stone-300 bg-white px-3 py-2.5 text-stone-600 hover:bg-stone-100 disabled:opacity-50"
       >
         {/* paperclip */}
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">

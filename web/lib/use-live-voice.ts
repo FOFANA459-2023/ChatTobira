@@ -14,12 +14,14 @@ import {
   LIVE_SILENCE_MS,
   LIVE_SOCKET_URL,
   LOOKUP_TOOL,
+  OPENING_CUE,
   OUTPUT_RATE,
   pcm16ToFloat,
   type DownsampleState,
   type LiveTurn,
 } from "./live-voice";
 import { VOICE_HANDOVER_MS } from "./allowance";
+import type { SpeakingMode } from "./speech";
 import type { VoiceError, VoicePhase } from "./use-voice";
 
 /* ------------------------------------------------------------------------ */
@@ -145,7 +147,17 @@ export interface LiveConversation {
   /** Conversation time left in this five-hour window, in seconds; null when
    * the account is unmetered or no call is running. */
   secondsLeft: number | null;
-  start: (options: { language: ConversationLanguage; history: LiveTurn[] }) => Promise<LiveStart>;
+  start: (options: {
+    language: ConversationLanguage;
+    history: LiveTurn[];
+    /** What kind of practice this is. Omitted by the chat's microphone,
+     * which always opens a free conversation. */
+    mode?: SpeakingMode;
+    /** The topic, grammar point or scene the student chose. */
+    subject?: string;
+    /** Have the tutor take the first turn and greet the student. */
+    opening?: boolean;
+  }) => Promise<LiveStart>;
   stop: () => void;
   /** Stop the current reply without ending the conversation. */
   interrupt: () => void;
@@ -332,6 +344,10 @@ export function useLiveConversation(options: {
   /** No minutes left: this is the last one, and the call ends with it. */
   const outOfTimeRef = useRef(false);
   const historyRef = useRef<LiveTurn[]>([]);
+  /** What the student chose to practise, held for every minute of the call. */
+  const modeRef = useRef<SpeakingMode | undefined>(undefined);
+  const subjectRef = useRef<string | undefined>(undefined);
+  const openingRef = useRef(false);
   const awaitingRef = useRef(false);
   awaitingRef.current = awaiting;
 
@@ -564,10 +580,11 @@ export function useLiveConversation(options: {
       pending.push({ role: "assistant", text: pendingRef.current.assistant.trim() });
     }
     const history = [...historyRef.current, ...pending].slice(-MAX_HISTORY);
+    const practice = { mode: modeRef.current, subject: subjectRef.current };
     const minted = await requestToken(
       stillUp || !handleRef.current
-        ? { language: languageRef.current, history }
-        : { language: languageRef.current, resume: handleRef.current },
+        ? { language: languageRef.current, history, ...practice }
+        : { language: languageRef.current, resume: handleRef.current, ...practice },
     );
     if (!activeRef.current) {
       reconnectingRef.current = false;
@@ -701,7 +718,19 @@ export function useLiveConversation(options: {
   }, []);
 
   const start = useCallback(
-    async ({ language, history }: { language: ConversationLanguage; history: LiveTurn[] }) => {
+    async ({
+      language,
+      history,
+      mode,
+      subject,
+      opening,
+    }: {
+      language: ConversationLanguage;
+      history: LiveTurn[];
+      mode?: SpeakingMode;
+      subject?: string;
+      opening?: boolean;
+    }) => {
       if (activeRef.current) return "live" as const;
       if (
         typeof window === "undefined" ||
@@ -716,6 +745,12 @@ export function useLiveConversation(options: {
       setHeard(null);
       languageRef.current = language;
       historyRef.current = history;
+      // Held for the whole call, not just its first minute: every minute mints
+      // a fresh token with a fresh system prompt, and a reconnect that forgot
+      // the topic would quietly drop the student back into free conversation.
+      modeRef.current = mode;
+      subjectRef.current = subject;
+      openingRef.current = Boolean(opening);
       expiresAtRef.current = 0;
       remainingRef.current = 0;
       handleRef.current = null;
@@ -734,7 +769,7 @@ export function useLiveConversation(options: {
       let tokenAt = 0;
       // The token is asked for first and not waited on: it is the slowest
       // thing here, and nothing about the microphone depends on it.
-      const token = requestToken({ language, history }).then((minted) => {
+      const token = requestToken({ language, history, mode, subject, opening }).then((minted) => {
         tokenAt = performance.now();
         return minted;
       });
@@ -828,6 +863,20 @@ export function useLiveConversation(options: {
       for (const message of queuedRef.current) socket.send(message);
       const caughtUp = queuedRef.current.length;
       queuedRef.current = [];
+      // The tutor opens the conversation, unless the student got there first.
+      // Somebody who pressed the button and started talking straight away has
+      // already taken the first turn, and greeting them over it would talk
+      // across the very sentence they came to say.
+      if (openingRef.current && caughtUp === 0) {
+        socket.send(
+          JSON.stringify({
+            clientContent: {
+              turns: [{ role: "user", parts: [{ text: OPENING_CUE }] }],
+              turnComplete: true,
+            },
+          }),
+        );
+      }
       const connectedAt = performance.now();
       console.info(
         `live voice: mic ${Math.round(micAt - began)}ms, token ${Math.round(tokenAt - began)}ms, ` +
