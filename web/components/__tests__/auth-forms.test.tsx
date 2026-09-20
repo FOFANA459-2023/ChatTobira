@@ -28,12 +28,30 @@ beforeEach(() => {
 function fillSignup({
   name = "FOFANA VARLEE",
   email = "fo25v2eg@apu.ac.jp",
+  gender = "Male" as string | null,
+  describedAs = undefined as string | undefined,
+  level = "Undergraduate" as string | null,
   password = "correct horse",
   confirm = undefined as string | undefined,
-}: { name?: string; email?: string; password?: string; confirm?: string } = {}) {
+}: {
+  name?: string;
+  email?: string;
+  gender?: string | null;
+  describedAs?: string;
+  level?: string | null;
+  password?: string;
+  confirm?: string;
+} = {}) {
   confirm ??= password;
   fireEvent.change(screen.getByLabelText("Full name"), { target: { value: name } });
   fireEvent.change(screen.getByLabelText("APU email"), { target: { value: email } });
+  if (gender) fireEvent.click(screen.getByLabelText(gender));
+  if (describedAs !== undefined) {
+    fireEvent.change(screen.getByLabelText("How would you describe it?"), {
+      target: { value: describedAs },
+    });
+  }
+  if (level) fireEvent.click(screen.getByLabelText(level));
   fireEvent.change(screen.getByLabelText("Password"), { target: { value: password } });
   fireEvent.change(screen.getByLabelText("Confirm password"), { target: { value: confirm } });
   fireEvent.click(screen.getByRole("button", { name: "Create account" }));
@@ -49,11 +67,40 @@ describe("signup form", () => {
 
   it("requires every field", async () => {
     render(<SignupForm />);
-    fillSignup({ name: "", email: "", password: "" });
+    fillSignup({ name: "", email: "", gender: null, level: null, password: "" });
     expect(await screen.findByText(/as it appears on your student ID/)).toBeInTheDocument();
     expect(screen.getByText(/Enter your APU email/)).toBeInTheDocument();
     expect(screen.getByText(/at least 8 characters for your password/)).toBeInTheDocument();
+    // Gender and undergraduate/graduate are required too, and each says so
+    // beside itself rather than as one message at the bottom.
+    expect(screen.getAllByText("Choose an option.")).toHaveLength(2);
     expect(auth.signUp).not.toHaveBeenCalled();
+  });
+
+  it("asks the student who answers Other to say what they mean", async () => {
+    render(<SignupForm />);
+    // The write-in does not exist until Other is the answer being given.
+    expect(screen.queryByLabelText("How would you describe it?")).not.toBeInTheDocument();
+    fillSignup({ gender: "Other" });
+    expect(await screen.findByText("Type how you would describe it.")).toBeInTheDocument();
+    expect(auth.signUp).not.toHaveBeenCalled();
+  });
+
+  it("sends the write-in beside Other, and nothing beside the rest", async () => {
+    auth.signUp.mockResolvedValue({
+      data: { user: { identities: [{}] }, session: null },
+      error: null,
+    });
+    render(<SignupForm />);
+    // A full-width space is what the Japanese IME types.
+    fillSignup({ gender: "Other", describedAs: " non　binary " });
+    expect(await screen.findByText("Check your inbox")).toBeInTheDocument();
+    expect(auth.signUp.mock.calls[0][0].options.data).toEqual({
+      full_name: "FOFANA VARLEE",
+      gender: "other",
+      gender_self_described: "non binary",
+      study_level: "undergraduate",
+    });
   });
 
   it("catches mismatched passwords", async () => {
@@ -69,14 +116,20 @@ describe("signup form", () => {
       error: null,
     });
     render(<SignupForm />);
-    fillSignup({ email: "FO25V2EG＠apu.ac.jp", name: " FOFANA   VARLEE " });
+    fillSignup({ email: "FO25V2EG＠apu.ac.jp", name: " FOFANA   VARLEE ", level: "Graduate" });
     expect(await screen.findByText("Check your inbox")).toBeInTheDocument();
     expect(auth.signUp).toHaveBeenCalledWith({
       email: "fo25v2eg@apu.ac.jp",
       password: "correct horse",
       options: {
         emailRedirectTo: "https://chattobira.com/auth/confirm",
-        data: { full_name: "FOFANA VARLEE" },
+        data: {
+          full_name: "FOFANA VARLEE",
+          gender: "male",
+          // The column means "what they wrote instead", and they wrote nothing.
+          gender_self_described: null,
+          study_level: "graduate",
+        },
       },
     });
   });
@@ -175,12 +228,14 @@ describe("welcome questions", () => {
     expect(rpc).not.toHaveBeenCalled();
   });
 
-  it("offers APS, APM and ST, semesters 1st to 8th, and three reasons", () => {
+  it("offers APS, APM and ST, semesters 1st to 8th and Graduated, and three reasons", () => {
     render(<ProfileForm />);
     expect(screen.getAllByRole("radio", { name: /APS|APM|ST/ })).toHaveLength(3);
     for (const s of ["1st", "2nd", "3rd", "4th", "5th", "6th", "7th", "8th"]) {
       expect(screen.getByRole("radio", { name: s })).toBeInTheDocument();
     }
+    // A student who has finished the degree is not in any of the eight.
+    expect(screen.getByRole("radio", { name: "Graduated" })).toBeInTheDocument();
     expect(screen.getAllByRole("checkbox")).toHaveLength(3);
   });
 
@@ -196,10 +251,40 @@ describe("welcome questions", () => {
     await waitFor(() => expect(assign).toHaveBeenCalledWith("/"));
     expect(rpc).toHaveBeenCalledWith("complete_profile", {
       p_college: "APM",
-      p_semester: 5,
+      p_semester: "5",
       p_reasons: ["japanese_class", "jpt_prep"],
     });
     expect(auth.refreshSession).toHaveBeenCalled();
+  });
+
+  it("saves Graduated as the semester", async () => {
+    rpc.mockResolvedValue({ error: null });
+    auth.refreshSession.mockResolvedValue({});
+    render(<ProfileForm />);
+    fireEvent.click(screen.getByRole("radio", { name: /APS/ }));
+    fireEvent.click(screen.getByRole("radio", { name: "Graduated" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Japanese class" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start studying" }));
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("/"));
+    expect(rpc).toHaveBeenCalledWith("complete_profile", {
+      p_college: "APS",
+      p_semester: "graduated",
+      p_reasons: ["japanese_class"],
+    });
+  });
+
+  it("still opens the chat when the session refresh fails after saving", async () => {
+    // The answers are already stored at that point. Stopping here would tell
+    // the student they had not saved, and leave them on the form.
+    rpc.mockResolvedValue({ error: null });
+    auth.refreshSession.mockRejectedValue(new Error("offline"));
+    render(<ProfileForm />);
+    fireEvent.click(screen.getByRole("radio", { name: /ST/ }));
+    fireEvent.click(screen.getByRole("radio", { name: "2nd" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Japanese class" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start studying" }));
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("/"));
+    expect(screen.queryByText(/Could not save/)).not.toBeInTheDocument();
   });
 
   it("lets a reason be unticked again", async () => {

@@ -19,8 +19,11 @@ const STUDENTS = [
   {
     email: "rin21ab@apu.ac.jp",
     name: "Rin Tanaka",
+    gender: "female",
+    gender_self_described: null,
+    study_level: "undergraduate",
     college: "APM",
-    semester: 3,
+    semester: "3",
     reasons: ["japanese_class", "jpt_prep"],
     signed_up_at: ago(30 * 86400),
     verified: true,
@@ -61,8 +64,11 @@ const STUDENTS = [
   {
     email: "paused@apu.ac.jp",
     name: "Kenji Mori",
+    gender: "other",
+    gender_self_described: "non-binary",
+    study_level: "graduate",
     college: "ST",
-    semester: 8,
+    semester: "graduated",
     reasons: ["improve_japanese"],
     signed_up_at: ago(60 * 86400),
     verified: true,
@@ -116,6 +122,18 @@ describe("admin students page", () => {
     expect(within(row).getByText(/APM/)).toBeInTheDocument();
     expect(within(row).getByText(/3rd semester/)).toBeInTheDocument();
     expect(within(row).getByText("Japanese class, JPT test prep")).toBeInTheDocument();
+  });
+
+  it("shows who the student said they are, and a finished degree as Graduated", async () => {
+    render(<StudentsPage />);
+    const rin = (await screen.findByText("Rin Tanaka")).closest("tr")!;
+    expect(within(rin).getByText("Female · Undergraduate")).toBeInTheDocument();
+
+    // An 'other' answer reads as what the student wrote, not as "Other".
+    const kenji = screen.getByText("Kenji Mori").closest("tr")!;
+    expect(within(kenji).getByText("non-binary · Graduate")).toBeInTheDocument();
+    expect(within(kenji).getByText(/Graduated/)).toBeInTheDocument();
+    expect(within(kenji).queryByText(/graduated semester/)).not.toBeInTheDocument();
   });
 
   it("says plainly when a student has never signed in", async () => {

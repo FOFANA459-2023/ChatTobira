@@ -62,6 +62,35 @@ const PAPER: Quiz = {
   ],
 };
 
+/** A bracket section whose options are whole conjugated verbs — the widest
+ * thing the in-place choice is ever asked to hold. */
+const BRACKET_PAPER: Quiz = {
+  scope_description: "Obligation forms from Topic 10.",
+  sections: [
+    {
+      instruction_ja: "正しいほうを【選】んで、〇を書いてください。",
+      instruction_en: "Circle the correct option in each sentence.",
+      form: "bracket",
+      marks: 1,
+      items: [
+        {
+          type: "multiple_choice",
+          question: "",
+          sentence: "あした しけんが ありますから、今晩 たくさん",
+          choices: [
+            "べんきょうしなければなりません",
+            "べんきょうしなくてもいいです",
+            "べんきょうしてはいけません",
+          ],
+          answer: "べんきょうしなければなりません",
+          explanation: "〜なければなりません states an obligation.",
+          review: "Topic 10 — obligation (p. 128)",
+        },
+      ],
+    },
+  ],
+};
+
 const FEEDBACK = {
   feedback:
     "Solid grasp of location particles. Your miss was the polite past tense — review Topic 6 (p. 76) and drill ました forms.",
@@ -236,6 +265,37 @@ describe("QuizView", () => {
     await waitFor(() => expect(screen.getByText("3")).toBeInTheDocument());
     expect(screen.getByText(/100%/)).toBeInTheDocument();
     expect(screen.getByText(/Nothing to review from this paper/)).toBeInTheDocument();
+  });
+
+  it("lets a bracket of long options wrap instead of running off a phone", async () => {
+    // The in-place choice used to be held on one line. With three conjugated
+    // options that line measured 646px inside a 375px screen and took the
+    // whole page sideways with it, so a student had to scrub left and right
+    // to read a sentence. The group may break between its options; what it
+    // may not do is refuse to break at all.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: RequestInfo | URL, init?: RequestInit) =>
+        Promise.resolve(
+          new Response(JSON.stringify(init?.method === "POST" ? BRACKET_PAPER : BOOKS), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+      ),
+    );
+    window.scrollTo = vi.fn();
+    render(<QuizView initialKind="grammar" />);
+
+    fireEvent.change(await screen.findByLabelText(/Textbook/), { target: { value: "1" } });
+    fireEvent.click(screen.getByRole("button", { name: /Start the Grammar Practice Test/ }));
+
+    const option = await screen.findByRole("button", {
+      name: "べんきょうしなければなりません",
+    });
+    for (let node = option.parentElement; node; node = node.parentElement) {
+      expect(node.className).not.toMatch(/whitespace-nowrap/);
+    }
   });
 
   it("starts in kanji mode when linked with ?kind=kanji", async () => {

@@ -4,10 +4,14 @@ import {
   cleanFullName,
   emailProblem,
   fullNameProblem,
+  cleanGenderDescription,
+  genderProblem,
   isApuEmail,
-  ordinal,
+  MAX_GENDER_DESCRIPTION,
   passwordProblem,
   profileProblems,
+  semesterLabel,
+  studyLevelProblem,
 } from "../signup";
 import { greetingName } from "../name";
 
@@ -91,17 +95,66 @@ describe("welcome questions", () => {
 
   it("passes a complete set of answers, including several reasons", () => {
     expect(
-      profileProblems({ college: "ST", semester: 8, reasons: ["jpt_prep", "improve_japanese"] }),
+      profileProblems({ college: "ST", semester: "8", reasons: ["jpt_prep", "improve_japanese"] }),
     ).toEqual({});
   });
 
   it("refuses answers outside the lists", () => {
-    const problems = profileProblems({ college: "LAW", semester: 9, reasons: ["fun"] });
+    const problems = profileProblems({ college: "LAW", semester: "9", reasons: ["fun"] });
     expect(Object.keys(problems).sort()).toEqual(["college", "reasons", "semester"]);
   });
 
+  it("takes Graduated as an answer, because a finished degree has no semester", () => {
+    expect(
+      profileProblems({ college: "APS", semester: "graduated", reasons: ["japanese_class"] }),
+    ).toEqual({});
+  });
+
   it("names semesters the way students say them", () => {
-    expect([1, 2, 3, 4, 8].map(ordinal)).toEqual(["1st", "2nd", "3rd", "4th", "8th"]);
+    expect(["1", "2", "3", "8"].map(semesterLabel)).toEqual([
+      "1st semester",
+      "2nd semester",
+      "3rd semester",
+      "8th semester",
+    ]);
+    // Not "graduated semester", which is not a thing anyone says.
+    expect(semesterLabel("graduated")).toBe("Graduated");
+    expect(semesterLabel(null)).toBeNull();
+    expect(semesterLabel("9")).toBeNull();
+  });
+});
+
+describe("the signup questions about the student", () => {
+  it("takes the three answers and refuses anything else", () => {
+    expect(genderProblem("female", "")).toBeNull();
+    expect(genderProblem("male", "")).toBeNull();
+    expect(genderProblem(null, "")).toEqual(expect.any(String));
+    expect(genderProblem("Female", "")).toEqual(expect.any(String));
+  });
+
+  it("asks the student who chose other to say what they mean", () => {
+    expect(genderProblem("other", "")).toEqual(expect.any(String));
+    expect(genderProblem("other", "   ")).toEqual(expect.any(String));
+    expect(genderProblem("other", "non-binary")).toBeNull();
+  });
+
+  it("holds the write-in to the length the column allows", () => {
+    expect(genderProblem("other", "x".repeat(MAX_GENDER_DESCRIPTION))).toBeNull();
+    expect(genderProblem("other", "x".repeat(MAX_GENDER_DESCRIPTION + 1))).toEqual(
+      expect.any(String),
+    );
+  });
+
+  it("normalises the write-in the way it normalises a name", () => {
+    // A full-width space is what the Japanese IME types, and it is a space.
+    expect(cleanGenderDescription("non　 binary ")).toBe("non binary");
+  });
+
+  it("takes undergraduate or graduate, and nothing else", () => {
+    expect(studyLevelProblem("undergraduate")).toBeNull();
+    expect(studyLevelProblem("graduate")).toBeNull();
+    expect(studyLevelProblem(null)).toEqual(expect.any(String));
+    expect(studyLevelProblem("postgraduate")).toEqual(expect.any(String));
   });
 });
 

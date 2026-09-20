@@ -69,8 +69,11 @@ export async function GET() {
   interface Row {
     email: string;
     full_name: string | null;
+    gender: string | null;
+    gender_self_described: string | null;
+    study_level: string | null;
     college: string | null;
-    semester: number | null;
+    semester: string | null;
     reasons: string[] | null;
     signed_up_at: string;
     verified: boolean;
@@ -87,6 +90,9 @@ export async function GET() {
     .map((row) => ({
       email: row.email,
       name: row.full_name,
+      gender: row.gender,
+      gender_self_described: row.gender_self_described,
+      study_level: row.study_level,
       college: row.college,
       semester: row.semester,
       reasons: row.reasons ?? [],

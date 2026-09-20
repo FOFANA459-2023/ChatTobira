@@ -212,7 +212,7 @@ export function QuizView({
   const { correct, total } = quiz ? scoreQuiz(quiz, answers) : { correct: 0, total: 0 };
 
   return (
-    <div className="mx-auto flex min-h-screen max-w-3xl flex-col">
+    <div className="mx-auto flex min-h-viewport max-w-3xl flex-col">
       <NavBar active={kind} authenticated={authenticated} />
       <div className="flex-1 px-4 py-6">
         {phase === "trial_exhausted" && (
@@ -638,10 +638,16 @@ function BracketChoice({
   onAnswer: (value: string) => void;
 }) {
   return (
-    <span lang="ja" className="whitespace-nowrap">
+    // The group sits in the sentence and stays on one line while it fits, as
+    // the paper prints it. On a phone three conjugated options do not fit —
+    // held on one line they ran 640px wide inside a 375px screen and took
+    // the whole page sideways with them — so the group wraps BETWEEN its
+    // options, which keeps each option whole and readable. An option wide
+    // enough to need it wraps inside itself rather than off the screen.
+    <span lang="ja" className="inline-flex max-w-full flex-wrap items-baseline align-baseline">
       <span className="text-stone-400">（</span>
       {choices.map((choice, index) => (
-        <span key={choice}>
+        <span key={choice} className="inline-flex items-baseline">
           {index > 0 && <span className="px-0.5 text-stone-300">/</span>}
           <button
             onClick={() => !checked && onAnswer(choice)}

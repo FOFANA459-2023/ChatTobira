@@ -11,5 +11,41 @@ html {
 
 body {
   height: 100%;
+  /* Nothing may push the page wider than the phone holding it. A long
+     unbroken run — a romaji answer, a URL a student pastes, a kanji compound
+     with no break opportunity — wraps instead of scrolling the whole page
+     sideways. Japanese breaks between characters already; this is for the
+     Latin text beside it. */
+  overflow-wrap: break-word;
   @apply bg-stone-50 text-stone-900 antialiased;
+}
+
+/* The visible viewport, not the notional one.
+ *
+ * On phones the browser's own toolbars overlay 100vh, so a screen sized in vh
+ * is taller than what the student can see and its last row — the chat
+ * composer — sits below the fold until they scroll. dvh tracks the area
+ * actually visible and resizes as the toolbars slide away. The vh line stays
+ * first as the fallback for browsers that do not know dvh. */
+.h-viewport {
+  height: 100vh;
+  height: 100dvh;
+}
+
+.min-h-viewport {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* iOS Safari zooms the page in when a field it focuses sets type smaller than
+ * 16px, and does not zoom back out afterwards — the student is left pinching
+ * the page back to width after every answer they type. So on phones every
+ * field is 16px; the design's smaller sizes return at sm, where no browser
+ * does this. */
+@media (max-width: 639px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
 }

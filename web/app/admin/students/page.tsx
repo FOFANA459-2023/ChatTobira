@@ -3,14 +3,17 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { AdminShell, Card, TableSkeleton } from "@/components/admin/shell";
-import { COLLEGES, ordinal, REASONS } from "@/lib/signup";
+import { COLLEGES, GENDERS, REASONS, semesterLabel, STUDY_LEVELS } from "@/lib/signup";
 import { relativeTime, shortDate } from "@/lib/time";
 
 interface Student {
   email: string;
   name: string | null;
+  gender: string | null;
+  gender_self_described: string | null;
+  study_level: string | null;
   college: string | null;
-  semester: number | null;
+  semester: string | null;
   reasons: string[];
   signed_up_at: string;
   verified: boolean;
@@ -31,6 +34,19 @@ const FILTERS: { id: Filter; label: string }[] = [
 ];
 
 const REASON_LABEL = new Map<string, string>(REASONS.map((r) => [r.id, r.label]));
+
+/** The two things signup asks about the student themselves, on one line:
+ * "Female · Undergraduate". Students who signed up before 0012 answered
+ * neither and get nothing rather than a row of dashes. */
+function whoTheyAre(student: Student): string | null {
+  const gender =
+    student.gender === "other"
+      ? (student.gender_self_described ?? "Other")
+      : (GENDERS.find((g) => g.id === student.gender)?.label ?? null);
+  const level = STUDY_LEVELS.find((l) => l.id === student.study_level)?.label ?? null;
+  const parts = [gender, level].filter(Boolean);
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
 
 export default function StudentsPage() {
   const [students, setStudents] = useState<Student[] | null>(null);
@@ -177,6 +193,9 @@ export default function StudentsPage() {
                         {student.name ?? student.email.split("@")[0]}
                       </p>
                       <p className="text-xs text-stone-500">{student.email}</p>
+                      {whoTheyAre(student) && (
+                        <p className="text-xs text-stone-400">{whoTheyAre(student)}</p>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       {student.college ? (
@@ -186,10 +205,10 @@ export default function StudentsPage() {
                             title={COLLEGES.find((c) => c.id === student.college)?.name}
                           >
                             {student.college}
-                            {student.semester && (
+                            {semesterLabel(student.semester) && (
                               <span className="text-stone-400">
                                 {" "}
-                                · {ordinal(student.semester)} semester
+                                · {semesterLabel(student.semester)}
                               </span>
                             )}
                           </p>

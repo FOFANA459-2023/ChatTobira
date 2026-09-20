@@ -420,7 +420,7 @@ export function Chat({
   }
 
   return (
-    <div className="mx-auto flex h-screen max-w-3xl flex-col">
+    <div className="mx-auto flex h-viewport max-w-3xl flex-col">
       <NavBar active="chat" authenticated={authenticated}>
         {isAdmin && (
           <Link

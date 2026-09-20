@@ -9,14 +9,27 @@ import { normalizeEmail } from "@/lib/email";
 import {
   APU_DOMAIN,
   cleanFullName,
+  cleanGenderDescription,
   emailProblem,
   fullNameProblem,
+  GENDERS,
+  genderProblem,
+  MAX_GENDER_DESCRIPTION,
   MIN_PASSWORD,
   passwordProblem,
+  STUDY_LEVELS,
+  studyLevelProblem,
 } from "@/lib/signup";
 import { createClient } from "@/lib/supabase/client";
 
-type Problems = Partial<Record<"fullName" | "email" | "password" | "confirm", string>>;
+type Problems = Partial<
+  Record<"fullName" | "email" | "gender" | "studyLevel" | "password" | "confirm", string>
+>;
+
+/** One button in a row of choices — the same control the welcome questions
+ * use, so the two forms a student meets on the way in look like one form. */
+const choiceClass =
+  "flex cursor-pointer items-center justify-center gap-2 rounded-lg border border-stone-300 px-3 py-2 text-sm transition-colors has-[:checked]:border-stone-900 has-[:checked]:bg-stone-900 has-[:checked]:font-medium has-[:checked]:text-white has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-stone-400";
 
 type Outcome =
   | { kind: "idle" }
@@ -30,6 +43,9 @@ type Outcome =
 export function SignupForm({ disabled = false }: { disabled?: boolean }) {
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
+  const [gender, setGender] = useState<string | null>(null);
+  const [genderDescription, setGenderDescription] = useState("");
+  const [studyLevel, setStudyLevel] = useState<string | null>(null);
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [problems, setProblems] = useState<Problems>({});
@@ -45,6 +61,10 @@ export function SignupForm({ disabled = false }: { disabled?: boolean }) {
       ? "The admin account signs in on the Admin page."
       : emailProblem(email);
     if (emailIssue) found.email = emailIssue;
+    const genderIssue = genderProblem(gender, genderDescription);
+    if (genderIssue) found.gender = genderIssue;
+    const levelIssue = studyLevelProblem(studyLevel);
+    if (levelIssue) found.studyLevel = levelIssue;
     const passwordIssue = passwordProblem(password);
     if (passwordIssue) found.password = passwordIssue;
     else if (password !== confirm) found.confirm = "The two passwords do not match.";
@@ -59,7 +79,16 @@ export function SignupForm({ disabled = false }: { disabled?: boolean }) {
         password,
         options: {
           emailRedirectTo: `${window.location.origin}/auth/confirm`,
-          data: { full_name: cleanFullName(fullName) },
+          // handle_new_user() reads these off raw_user_meta_data and refuses
+          // the insert if any is missing or not one of its listed answers.
+          // The write-in is sent only by the answer that has one.
+          data: {
+            full_name: cleanFullName(fullName),
+            gender,
+            gender_self_described:
+              gender === "other" ? cleanGenderDescription(genderDescription) : null,
+            study_level: studyLevel,
+          },
         },
       });
 
@@ -80,7 +109,7 @@ export function SignupForm({ disabled = false }: { disabled?: boolean }) {
           // rules apply rather than "database error".
           setOutcome({
             kind: "error",
-            text: `That account could not be created. Use your @${APU_DOMAIN} address and your full name as on your student ID.`,
+            text: `That account could not be created. Use your @${APU_DOMAIN} address, your full name as on your student ID, and answer every question above.`,
           });
         } else {
           setOutcome({ kind: "error", text: "Something went wrong on our side. Please try again." });
@@ -168,6 +197,79 @@ export function SignupForm({ disabled = false }: { disabled?: boolean }) {
           className={inputClass}
         />
       </Field>
+
+      <fieldset aria-describedby={problems.gender ? "gender-error" : undefined}>
+        <legend className="text-sm font-medium text-stone-800">Gender</legend>
+        <div className="mt-1.5 grid grid-cols-3 gap-2">
+          {GENDERS.map((option) => (
+            <label key={option.id} className={choiceClass}>
+              <input
+                type="radio"
+                name="gender"
+                value={option.id}
+                checked={gender === option.id}
+                onChange={() => {
+                  setGender(option.id);
+                  setProblems((current) => ({ ...current, gender: undefined }));
+                }}
+                disabled={busy}
+                className="sr-only"
+              />
+              {option.label}
+            </label>
+          ))}
+        </div>
+        {/* The write-in appears only once it is the answer being given, so
+            the form does not carry an empty box for the two answers that
+            have nothing to write in it. */}
+        {gender === "other" && (
+          <input
+            aria-label="How would you describe it?"
+            placeholder="How would you describe it?"
+            value={genderDescription}
+            onChange={(e) => {
+              setGenderDescription(e.target.value);
+              setProblems((current) => ({ ...current, gender: undefined }));
+            }}
+            disabled={busy}
+            maxLength={MAX_GENDER_DESCRIPTION}
+            className={`${inputClass} mt-2`}
+          />
+        )}
+        {problems.gender && (
+          <p id="gender-error" className="mt-1 text-xs text-red-700">
+            {problems.gender}
+          </p>
+        )}
+      </fieldset>
+
+      <fieldset aria-describedby={problems.studyLevel ? "study-level-error" : undefined}>
+        <legend className="text-sm font-medium text-stone-800">Program</legend>
+        <div className="mt-1.5 grid grid-cols-2 gap-2">
+          {STUDY_LEVELS.map((option) => (
+            <label key={option.id} className={choiceClass}>
+              <input
+                type="radio"
+                name="study-level"
+                value={option.id}
+                checked={studyLevel === option.id}
+                onChange={() => {
+                  setStudyLevel(option.id);
+                  setProblems((current) => ({ ...current, studyLevel: undefined }));
+                }}
+                disabled={busy}
+                className="sr-only"
+              />
+              {option.label}
+            </label>
+          ))}
+        </div>
+        {problems.studyLevel && (
+          <p id="study-level-error" className="mt-1 text-xs text-red-700">
+            {problems.studyLevel}
+          </p>
+        )}
+      </fieldset>
 
       <Field
         label="Password"
