@@ -3,7 +3,14 @@
 import { useState } from "react";
 
 import { primaryButtonClass } from "@/components/auth-card";
-import { COLLEGES, ordinal, profileProblems, REASONS, SEMESTERS, type ProfileAnswers } from "@/lib/signup";
+import {
+  COLLEGES,
+  GRADUATED,
+  profileProblems,
+  REASONS,
+  SEMESTERS,
+  type ProfileAnswers,
+} from "@/lib/signup";
 import { createClient } from "@/lib/supabase/client";
 
 const option =
@@ -13,7 +20,7 @@ const option =
  * required; the reasons allow several answers and need at least one. */
 export function ProfileForm() {
   const [college, setCollege] = useState<string | null>(null);
-  const [semester, setSemester] = useState<number | null>(null);
+  const [semester, setSemester] = useState<string | null>(null);
   const [reasons, setReasons] = useState<string[]>([]);
   const [problems, setProblems] = useState<ReturnType<typeof profileProblems>>({});
   const [busy, setBusy] = useState(false);
@@ -53,8 +60,18 @@ export function ProfileForm() {
       });
       if (error) throw error;
       // The onboarded flag lives in app_metadata; refresh so the session
-      // carries it, then a full load so the middleware lets the chat through.
-      await supabase.auth.refreshSession();
+      // carries it. A refresh that fails is not a failure to save: the
+      // answers are already stored, and the middleware calls getUser() on
+      // the next navigation, which fetches the same flag from the auth
+      // server anyway. Telling a student their answers did not save, and
+      // leaving them on this form, would be wrong on both counts.
+      try {
+        await supabase.auth.refreshSession();
+      } catch {
+        /* the navigation below refreshes it server-side */
+      }
+      // A full load rather than a router push, so the middleware runs and
+      // lets the now-onboarded student through to the chat.
       window.location.assign("/");
     } catch {
       setFailed(true);
@@ -66,7 +83,7 @@ export function ProfileForm() {
     <form onSubmit={submit} noValidate className="space-y-7">
       <fieldset aria-describedby={problems.college ? "college-error" : undefined}>
         <legend className="text-sm font-medium text-stone-800">
-          Your college <span className="text-red-700">*</span>
+          College <span className="text-red-700">*</span>
         </legend>
         <div className="mt-2 space-y-2">
           {COLLEGES.map((c) => (
@@ -99,27 +116,32 @@ export function ProfileForm() {
 
       <fieldset aria-describedby={problems.semester ? "semester-error" : undefined}>
         <legend className="text-sm font-medium text-stone-800">
-          Your semester <span className="text-red-700">*</span>
+          Semester <span className="text-red-700">*</span>
         </legend>
+        {/* Eight numbered semesters in a grid, and Graduated across the full
+            width under them — it is the one answer that is not a number, and
+            the word does not fit a quarter of a phone's width anyway. */}
         <div className="mt-2 grid grid-cols-4 gap-2">
           {SEMESTERS.map((s) => (
             <label
-              key={s}
-              className={`${option} justify-center border-stone-200 px-2 has-[:checked]:!bg-stone-900 has-[:checked]:font-medium has-[:checked]:text-white`}
+              key={s.id}
+              className={`${option} justify-center border-stone-200 px-2 has-[:checked]:!bg-stone-900 has-[:checked]:font-medium has-[:checked]:text-white ${
+                s.id === GRADUATED ? "col-span-4" : ""
+              }`}
             >
               <input
                 type="radio"
                 name="semester"
-                value={s}
-                checked={semester === s}
+                value={s.id}
+                checked={semester === s.id}
                 onChange={() => {
-                  setSemester(s);
+                  setSemester(s.id);
                   answered("semester");
                 }}
                 disabled={busy}
                 className="sr-only"
               />
-              {ordinal(s)}
+              {s.label}
             </label>
           ))}
         </div>

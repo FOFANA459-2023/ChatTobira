@@ -65,6 +65,48 @@ export function fullNameProblem(raw: string): string | null {
   return null;
 }
 
+/** Asked at signup, and required. 'other' is answered in the student's own
+ * words rather than by a fourth button. */
+export const GENDERS = [
+  { id: "female", label: "Female" },
+  { id: "male", label: "Male" },
+  { id: "other", label: "Other" },
+] as const;
+export type Gender = (typeof GENDERS)[number]["id"];
+
+/** Long enough for any answer someone writes about themselves, short enough
+ * that the column is not a free text field. Mirrored by the check constraint
+ * on profiles.gender_self_described. */
+export const MAX_GENDER_DESCRIPTION = 40;
+
+export const STUDY_LEVELS = [
+  { id: "undergraduate", label: "Undergraduate" },
+  { id: "graduate", label: "Graduate" },
+] as const;
+export type StudyLevel = (typeof STUDY_LEVELS)[number]["id"];
+
+/** Same treatment the full name gets: an IME's full-width space is a space. */
+export function cleanGenderDescription(raw: string): string {
+  return raw.normalize("NFKC").replace(/\s+/g, " ").trim();
+}
+
+/** Why this gender answer cannot be stored, or null when it can. The write-in
+ * is required by, and only by, the 'other' answer. */
+export function genderProblem(gender: string | null, selfDescribed: string): string | null {
+  if (!GENDERS.some((g) => g.id === gender)) return "Choose an option.";
+  if (gender !== "other") return null;
+  const described = cleanGenderDescription(selfDescribed);
+  if (described.length < 1) return "Type how you would describe it.";
+  if (described.length > MAX_GENDER_DESCRIPTION) {
+    return `Keep it to ${MAX_GENDER_DESCRIPTION} characters or fewer.`;
+  }
+  return null;
+}
+
+export function studyLevelProblem(level: string | null): string | null {
+  return STUDY_LEVELS.some((l) => l.id === level) ? null : "Choose an option.";
+}
+
 // ---------------------------------------------------------------------------
 // The welcome questions
 // ---------------------------------------------------------------------------
@@ -76,7 +118,30 @@ export const COLLEGES = [
 ] as const;
 export type College = (typeof COLLEGES)[number]["id"];
 
-export const SEMESTERS = [1, 2, 3, 4, 5, 6, 7, 8] as const;
+/** A student who has finished the degree has no semester number, so the
+ * answer is not always one — which is why profiles.semester is text. */
+export const GRADUATED = "graduated";
+
+export const SEMESTERS = [
+  { id: "1", label: "1st" },
+  { id: "2", label: "2nd" },
+  { id: "3", label: "3rd" },
+  { id: "4", label: "4th" },
+  { id: "5", label: "5th" },
+  { id: "6", label: "6th" },
+  { id: "7", label: "7th" },
+  { id: "8", label: "8th" },
+  { id: GRADUATED, label: "Graduated" },
+] as const;
+export type Semester = (typeof SEMESTERS)[number]["id"];
+
+/** How a stored semester reads on the admin roster: "3rd semester", or
+ * "Graduated" on its own, since "graduated semester" is not a thing. */
+export function semesterLabel(id: string | null | undefined): string | null {
+  const found = SEMESTERS.find((s) => s.id === id);
+  if (!found) return null;
+  return id === GRADUATED ? found.label : `${found.label} semester`;
+}
 
 export const REASONS = [
   { id: "japanese_class", label: "Japanese class" },
@@ -87,7 +152,7 @@ export type Reason = (typeof REASONS)[number]["id"];
 
 export interface ProfileAnswers {
   college: string | null;
-  semester: number | null;
+  semester: string | null;
   reasons: string[];
 }
 
@@ -98,7 +163,7 @@ export function profileProblems(answers: ProfileAnswers): Partial<Record<keyof P
   if (!COLLEGES.some((c) => c.id === answers.college)) {
     problems.college = "Choose your college.";
   }
-  if (!SEMESTERS.some((s) => s === answers.semester)) {
+  if (!SEMESTERS.some((s) => s.id === answers.semester)) {
     problems.semester = "Choose your semester.";
   }
   const valid = answers.reasons.filter((r) => REASONS.some((option) => option.id === r));
@@ -106,9 +171,4 @@ export function profileProblems(answers: ProfileAnswers): Partial<Record<keyof P
     problems.reasons = "Choose at least one reason.";
   }
   return problems;
-}
-
-export function ordinal(n: number): string {
-  const suffix = n === 1 ? "st" : n === 2 ? "nd" : n === 3 ? "rd" : "th";
-  return `${n}${suffix}`;
 }
