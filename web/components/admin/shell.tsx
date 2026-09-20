@@ -170,7 +170,7 @@ function Frame({
   children: ReactNode;
 }) {
   return (
-    <div className="min-h-screen bg-stone-50">
+    <div className="min-h-viewport bg-stone-50">
       <div className="border-b border-stone-200 bg-white">
         <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3">
           <Link href="/admin" className="font-semibold text-stone-900">

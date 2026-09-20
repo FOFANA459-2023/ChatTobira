@@ -19,7 +19,7 @@ export default async function WelcomePage() {
   const name = greetingName(user.user_metadata as Record<string, unknown> | undefined);
 
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex min-h-viewport flex-col">
       <NavBar />
       <main className="flex flex-1 items-center justify-center p-4 sm:p-6">
         <div className="w-full max-w-md rounded-2xl border border-stone-200 bg-white p-6 shadow-sm sm:p-8">

@@ -16,7 +16,7 @@ export function AuthCard({
   footer?: ReactNode;
 }) {
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex min-h-viewport flex-col">
       {/* These pages ARE the sign-in forms, so the navbar's own button is
           hidden; the page links remain the way back to the chat. */}
       <NavBar showAuth={false} />
