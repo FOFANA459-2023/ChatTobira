@@ -376,6 +376,30 @@ export const PRACTICE_SUBJECTS = [
   "意見を言う — giving an opinion",
 ] as const;
 
+/** The longest a practice subject may be. It is a phrase — "Topic 8
+ * vocabulary", 「〜ておく」, "ordering at a restaurant" — not an essay. */
+export const MAX_SUBJECT = 120;
+
+/** A student's own words, made safe to drop into a system prompt.
+ *
+ * The subject is the one part of the live tutor's instructions that a student
+ * writes, so it is treated as data rather than instruction: newlines and
+ * control characters go, because a prompt reads line by line and a subject
+ * that can open its own line can pose as a rule; runs of whitespace collapse;
+ * and the whole thing is cut to a phrase's length. What survives can still
+ * SAY anything, but it says it inside the sentence the mode wrote for it —
+ * and the worst a student can do with it is steer their own conversation,
+ * which is what the box is for.
+ */
+export function cleanSubject(raw: string): string {
+  return raw
+    .normalize("NFKC")
+    .replace(/[ -]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_SUBJECT);
+}
+
 /** How hard the tutor should make the Japanese.
  *
  * Read off the student's own profile level, because the difference between

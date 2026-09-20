@@ -9,6 +9,7 @@ import {
 } from "@/lib/allowance";
 import { LIVE_MODEL, LIVE_SILENCE_MS, LIVE_VOICE, liveSetup } from "@/lib/live-voice";
 import { greetingName } from "@/lib/name";
+import { cleanSubject } from "@/lib/speech";
 import { createClient } from "@/lib/supabase/server";
 import type { CourseLevel } from "@/lib/uploads";
 
@@ -16,6 +17,14 @@ export const maxDuration = 15;
 
 const BodySchema = z.object({
   language: z.enum(["ja", "en"]).default("ja"),
+  /** What kind of practice this is, from the speaking page. The chat's
+   * microphone sends nothing and gets a free conversation. */
+  mode: z.enum(["free", "topic", "roleplay", "grammar"]).default("free"),
+  /** What they chose to practise. Cleaned below rather than trusted: it is
+   * the one part of the tutor's instructions a student writes. */
+  subject: z.string().max(400).optional(),
+  /** Have the tutor take the first turn and greet the student by name. */
+  opening: z.boolean().default(false),
   history: z
     .array(z.object({ role: z.enum(["user", "assistant"]), text: z.string().max(4000) }))
     .max(40)
@@ -64,7 +73,8 @@ export async function POST(request: Request) {
   if (!parsed.success) {
     return Response.json({ error: "bad_request" }, { status: 400 });
   }
-  const { language, history, resume } = parsed.data;
+  const { language, history, resume, mode, opening } = parsed.data;
+  const subject = parsed.data.subject ? cleanSubject(parsed.data.subject) : undefined;
 
   const [spent, { data: profile }] = await Promise.all([
     spendAllowance(supabase, "voice", VOICE_SLICE_SECONDS),
@@ -90,6 +100,9 @@ export async function POST(request: Request) {
     silenceMs: Number(process.env.LIVE_SILENCE_MS ?? LIVE_SILENCE_MS),
     level: ((profile as { level?: string } | null)?.level ?? null) as CourseLevel | null,
     language,
+    mode,
+    subject,
+    opening,
     name: isAdminEmail(user.email)
       ? null
       : greetingName(user.user_metadata as Record<string, unknown> | undefined),

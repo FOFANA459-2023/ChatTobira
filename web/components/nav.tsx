@@ -8,6 +8,7 @@ import { createClient } from "@/lib/supabase/client";
 
 const PAGES = [
   { href: "/", label: "Chat", ja: "チャット" },
+  { href: "/speaking", label: "Speaking", ja: "会話" },
   { href: "/quiz?kind=grammar", label: "Grammar test", ja: "文法" },
   { href: "/quiz?kind=kanji", label: "Kanji test", ja: "漢字" },
 ] as const;
@@ -28,14 +29,21 @@ export function NavBar({
   showAuth = true,
   children,
 }: {
-  active?: "chat" | "grammar" | "kanji";
+  active?: "chat" | "speaking" | "grammar" | "kanji";
   authenticated?: boolean;
   showAuth?: boolean;
   children?: ReactNode;
 }) {
   const pathname = usePathname();
   const current =
-    active ?? (pathname === "/" ? "chat" : pathname.startsWith("/quiz") ? "grammar" : undefined);
+    active ??
+    (pathname === "/"
+      ? "chat"
+      : pathname.startsWith("/speaking")
+        ? "speaking"
+        : pathname.startsWith("/quiz")
+          ? "grammar"
+          : undefined);
 
   return (
     // On phones the tab strip takes its own full-width row (order-last +
@@ -87,7 +95,7 @@ export function NavBar({
 
       <nav className="order-last flex w-full gap-1 rounded-xl bg-stone-100 p-1 sm:order-none sm:w-auto">
         {PAGES.map((page, i) => {
-          const key = (["chat", "grammar", "kanji"] as const)[i];
+          const key = (["chat", "speaking", "grammar", "kanji"] as const)[i];
           const isActive = current === key;
           return (
             <Link
