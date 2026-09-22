@@ -58,6 +58,11 @@ const BodySchema = z.object({
   // Files the student attached to this turn. Their extracted text becomes
   // context; the files themselves never leave Storage.
   uploadIds: z.array(z.number().int().positive()).max(4).optional(),
+  // The student sent a file and wrote nothing. Their message is just the
+  // file's name, so the tutor is told there is no instruction to follow and
+  // the corpus is searched with what the file says rather than what it is
+  // called.
+  attachmentOnly: z.boolean().optional(),
   // Set when the turn arrived by voice. It changes the SHAPE of the reply —
   // a conversation partner rather than a tutor writing an explanation — and
   // nothing else: the same retrieval, the same conversation, the same
@@ -102,6 +107,7 @@ export async function POST(request: Request) {
     return Response.json({ error: "bad_request" }, { status: 400 });
   }
   const { messages, scope, uploadIds, speaking } = parsed.data;
+  const attachmentOnly = Boolean(parsed.data.attachmentOnly && uploadIds?.length);
   let { conversationId } = parsed.data;
 
   // Retrieval used to search on the last message alone, so "what about the
@@ -115,7 +121,7 @@ export async function POST(request: Request) {
   // turns with the request deleted.
   const conversation = conversationState(turns, { spoken: Boolean(speaking) });
   const language = languageModeFor(conversation.language, Boolean(speaking));
-  const query = resolveQuery(
+  let query = resolveQuery(
     turns.map((t) =>
       t.role === "user" ? { ...t, text: withoutLanguageRequest(t.text) } : t,
     ),
@@ -146,7 +152,9 @@ export async function POST(request: Request) {
   // corpus is for turns that reach outside it — and a follow-up that DOES
   // need the corpus still says so through its own intent, so this only ever
   // silences retrieval for "なるほど", "why?", "say that again".
-  const trivial = !intent.needsRetrieval;
+  // A file sent with no message always reaches for the corpus: its name
+  // classifies as nothing, but its contents are coursework.
+  let trivial = !intent.needsRetrieval && !attachmentOnly;
   // When the question arrived, so the stored turn keeps its real order even
   // though it is written after the answer has finished streaming.
   const askedAt = new Date().toISOString();
@@ -157,7 +165,8 @@ export async function POST(request: Request) {
   // paid on the highest-quota model in the stack.
   // Embedded on the RESOLVED query, so a follow-up searches the corpus for
   // what it is actually about rather than for the pronoun it was typed with.
-  const embedding = trivial
+  // A file sent on its own is embedded once its text is in hand, below.
+  const embedding = trivial || attachmentOnly
     ? Promise.resolve(null)
     : clock.time("embed", embedQuery(query.text).catch(() => null));
 
@@ -289,12 +298,34 @@ export async function POST(request: Request) {
     );
   };
 
-  const [persistedId, quotaVerdict, queryVector, attached] = await clock.time(
+  const [persistedId, quotaVerdict, earlyVector, attached] = await clock.time(
     "session",
     Promise.all([ensureConversation(), checkQuota(), embedding, fetchAttached()]),
   );
   conversationId = persistedId ?? conversationId;
   if (quotaVerdict) return quotaVerdict;
+
+  // Search the corpus with what the file says. Its opening lines — a
+  // worksheet's title, its instructions, its first questions — name the
+  // topic and the grammar far better than "IMG_2041.jpg" does.
+  let fileVector: number[] | null = null;
+  if (attachmentOnly) {
+    const fileText = attached
+      .map((upload) => upload.extracted)
+      .join(" ")
+      .replace(/[#*|>`_-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 800);
+    if (fileText) {
+      query = { ...query, text: fileText };
+      fileVector = await clock.time("embed", embedQuery(fileText).catch(() => null));
+    } else {
+      // Nothing readable came out of it: answer from the file alone.
+      trivial = true;
+    }
+  }
+  const queryVector = fileVector ?? earlyVector;
 
 
   // Which conversation's recent grounding to reuse. Available for trial
@@ -483,6 +514,7 @@ export async function POST(request: Request) {
     isFollowUp: query.isFollowUp,
     canPointToBook: citations.length > 0,
     hasUploads: attached.length > 0,
+    fileWithoutInstruction: attachmentOnly && attached.length > 0,
     hasPastPapers: context.some((chunk) => chunk.doc_type === "past_paper"),
     conversation,
     page: askedPage !== null ? { asked: askedPage, retrieved: pageInContext } : undefined,

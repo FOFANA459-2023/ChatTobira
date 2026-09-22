@@ -11,6 +11,10 @@ export interface PromptOptions {
    * opens "the source material you uploaded" is both wrong and a peek at the
    * machinery. */
   hasUploads?: boolean;
+  /** True when the student sent a file and wrote nothing. Their message is
+   * only the file's name, so there is no instruction to follow: the tutor
+   * opens the conversation about the file instead of guessing at a request. */
+  fileWithoutInstruction?: boolean;
   /** Which language the answer comes back in, decided from the conversation. */
   language?: LanguageMode;
   /** True when the student's message only makes sense against the turns
@@ -52,6 +56,7 @@ export function systemPrompt(scope: StudyScope, options: PromptOptions = {}): st
     isFollowUp = false,
     canPointToBook = false,
     hasUploads = false,
+    fileWithoutInstruction = false,
     hasPastPapers = false,
     speaking,
     page,
@@ -78,6 +83,24 @@ export function systemPrompt(scope: StudyScope, options: PromptOptions = {}): st
     ? `- The upload is not the knowledge base. It stays attached while the conversation moves on, so when the question is not about it, ignore it and answer from the course material. Never tell a student that something is missing because their upload does not contain it.
 - A source marked [your upload] is a file this student uploaded — a photo of their own class materials, homework or notes. Use it as the subject when they ask about it and refer to it by filename, never as "the textbook". Anything marked 手書き is the student's own working and may be wrong: check it against the course material rather than repeating it back as correct, and if it contradicts the textbook, the textbook wins — say so kindly.
 - If an upload's text begins UNREADABLE, the photo was too blurred or cropped to transcribe. Say so and suggest retaking it rather than guessing.
+`
+    : "";
+
+  // A file with nothing written beside it is still a request — the student
+  // wants help with it — but not a specific one. Guessing ("here are all the
+  // answers") takes the homework away from them; asking "what would you like
+  // me to do?" and nothing else wastes the turn. A tutor does neither: they
+  // look at the page, say what it is, make a start that teaches, and let the
+  // student steer from there.
+  const fileOnlyRules = fileWithoutInstruction
+    ? `
+THE STUDENT SENT A FILE AND WROTE NOTHING
+- Their message is only the file's name. There is no instruction yet, so do not invent one, and do not answer as if they had asked for every answer.
+- Open by saying in one line what the file is, from what it says: "This is a Topic 8 grammar worksheet — ten fill-in-the-blank questions on the て-form." Name the topic, the grammar or the kind of exercise when the file shows it.
+- Then make a start that teaches. Pick whichever fits the file: explain the one grammar point the whole sheet turns on, with an example; or work through the first question as a model, showing how to reach the answer. If the file has the student's own answers on it (手書き), check them instead and say which are right and which to look at again, briefly and kindly.
+- Keep it short. A start, not the whole sheet.
+- Close with two or three specific offers for what to do next, phrased for this file — for example, go through the rest one at a time, check their answers when they have tried, or explain a point they found hard. One short line, not a menu of headings.
+- From the student's next message on, follow what they ask, exactly as with any other question. If they ask for all the answers, give them, with the reasoning.
 `
     : "";
 
@@ -137,7 +160,7 @@ GROUNDING
 - Build the answer from the source material below. It was retrieved for this question and it is what the student owns. Do not invent grammar rules or vocabulary.
 - Prefer the passage that actually addresses the question over the one that merely shares words with it. The material is ordered with the closest first.
 - Casual conversation (greetings, thanks) needs no sources: reply briefly and warmly, and do not mention the textbook.
-${uploadRules}${pastPaperRules}${pageRules ? pageRules + "\n" : ""}- NEVER withhold source content the student asked for. When they ask what a passage, table or list says, reproduce it in full — complete conjugation tables, complete example lists, whole reading passages.
+${uploadRules}${fileOnlyRules}${pastPaperRules}${pageRules ? pageRules + "\n" : ""}- NEVER withhold source content the student asked for. When they ask what a passage, table or list says, reproduce it in full — complete conjugation tables, complete example lists, whole reading passages.
 
 WHAT NEVER APPEARS IN YOUR ANSWER
 - Anything that is not a textbook is "your class materials" and nothing more specific: never "handout", "worksheet", "review sheet", "slides", "presentation", "past paper" or "past exam".
