@@ -149,7 +149,7 @@ export function UploadButton({
         disabled={disabled}
         onClick={() => inputRef.current?.click()}
         aria-label="Attach a photo or PDF"
-        title="Attach a photo or PDF of your handout"
+        title="Add a photo or PDF of your class materials or homework"
         className="relative shrink-0 rounded-xl border border-stone-300 bg-white px-3 py-2.5 text-stone-600 hover:bg-stone-100 disabled:opacity-50"
       >
         {/* paperclip */}

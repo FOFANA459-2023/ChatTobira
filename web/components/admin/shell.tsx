@@ -6,7 +6,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { ADMIN_EMAIL, isAdminEmail } from "@/lib/admin";
 import { createClient } from "@/lib/supabase/client";
 
-export type AdminSection = "dashboard" | "students" | "documents";
+export type AdminSection = "dashboard" | "students" | "documents" | "uploads";
 
 type Session = "checking" | "signed_out" | "not_admin" | "admin";
 
@@ -14,6 +14,7 @@ const SECTIONS: { id: AdminSection; href: string; label: string; ja: string }[] 
   { id: "dashboard", href: "/admin", label: "Dashboard", ja: "ダッシュボード" },
   { id: "students", href: "/admin/students", label: "Students", ja: "学生" },
   { id: "documents", href: "/admin/documents", label: "Documents", ja: "教材" },
+  { id: "uploads", href: "/admin/uploads", label: "Uploads", ja: "アップロード" },
 ];
 
 /** The password gate and the navigation, shared by every admin page.

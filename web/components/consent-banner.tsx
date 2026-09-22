@@ -73,7 +73,8 @@ export function ConsentBanner() {
           </p>
           <p>
             Because ChatTobira provides access to copyright-protected APU
-            course materials, access is restricted to verified APU students.
+            textbooks and class materials, access is restricted to verified
+            APU students.
             Your personal information will not be used for purposes unrelated
             to operating and securing the platform.
           </p>

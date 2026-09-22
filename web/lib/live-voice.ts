@@ -182,7 +182,7 @@ export function liveSetup(options: LiveSetupOptions) {
           {
             name: LOOKUP_TOOL,
             description:
-              "Search the student's own course textbooks and class handouts. Use it for any question about grammar, vocabulary, kanji, readings or what their course teaches.",
+              "Search the student's own course textbooks and class materials. Use it for any question about grammar, vocabulary, kanji, readings or what their course teaches.",
             parameters: {
               type: "OBJECT",
               properties: {

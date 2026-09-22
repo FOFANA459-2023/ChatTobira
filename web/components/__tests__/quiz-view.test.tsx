@@ -267,6 +267,36 @@ describe("QuizView", () => {
     expect(screen.getByText(/Nothing to review from this paper/)).toBeInTheDocument();
   });
 
+  it("answers a bracket item only in the sentence, with no answer box under it", async () => {
+    // A bracket item is multiple_choice with choices, so it used to fall past
+    // the lettered list and the ○× buttons onto the free-text box: two ways
+    // to answer one question, and the box the more prominent of them.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: RequestInfo | URL, init?: RequestInit) =>
+        Promise.resolve(
+          new Response(JSON.stringify(init?.method === "POST" ? BRACKET_PAPER : BOOKS), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+      ),
+    );
+    window.scrollTo = vi.fn();
+    render(<QuizView initialKind="grammar" />);
+
+    fireEvent.change(await screen.findByLabelText(/Textbook/), { target: { value: "1" } });
+    fireEvent.click(screen.getByRole("button", { name: /Start the Grammar Practice Test/ }));
+
+    const option = await screen.findByRole("button", {
+      name: "べんきょうしなければなりません",
+    });
+    expect(screen.queryByPlaceholderText("こたえ")).not.toBeInTheDocument();
+
+    fireEvent.click(option);
+    expect(screen.getByText(/1 \/ 1 answered/)).toBeInTheDocument();
+  });
+
   it("lets a bracket of long options wrap instead of running off a phone", async () => {
     // The in-place choice used to be held on one line. With three conjugated
     // options that line measured 646px inside a 375px screen and took the

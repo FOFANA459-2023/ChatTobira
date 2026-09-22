@@ -12,6 +12,7 @@ import { conversationKey, recallContext, rememberContext } from "@/lib/recent-co
 import { pageSpellings } from "@/lib/pages";
 import { contextSizeFor } from "@/lib/intent";
 import { aspectOf } from "@/lib/topics";
+import { turnRows } from "@/lib/history";
 import { contextBlock, recentTurns, systemPrompt, type AttachedUpload } from "@/lib/prompt";
 import {
   ACCEPT_BUDGET_MS,
@@ -193,22 +194,38 @@ export async function POST(request: Request) {
     model: string,
   ): Promise<void> {
     if (!conversationId || !answer) return;
-    await supabase.from("messages").insert([
-      {
-        conversation_id: conversationId,
-        role: "user",
-        content: question,
-        created_at: askedAt,
-      },
-      {
-        conversation_id: conversationId,
-        role: "assistant",
-        content: answer,
+    // A file added to a chat belongs to it, so reopening the chat brings the
+    // file back. Only files not yet claimed: an upload stays with the chat it
+    // was first used in. Unchecked — before migration 0013 the column does
+    // not exist, and the turn must still be saved.
+    const linkUploads =
+      uploadIds && uploadIds.length > 0
+        ? Promise.resolve(
+            supabase
+              .from("uploads")
+              .update({ conversation_id: conversationId })
+              .in("id", uploadIds)
+              .is("conversation_id", null),
+          ).catch(() => undefined)
+        : undefined;
+    const { error: saveError } = await supabase.from("messages").insert(
+      turnRows({
+        conversationId,
+        question,
+        askedAt,
+        answer,
+        answeredAt: new Date().toISOString(),
         citations,
         model,
-        created_at: new Date().toISOString(),
-      },
-    ]);
+      }),
+    );
+    // Checked, and said out loud. It used to be neither, and every turn
+    // failed to save for as long as nobody looked: a chat that reopens empty
+    // is what a silently failed write looks like from the student's side.
+    if (saveError) {
+      console.error(`chat turn not saved to conversation ${conversationId}: ${saveError.message}`);
+    }
+    await linkUploads;
   }
 
   // Signed-in students read under their own RLS; trial visitors read through
@@ -278,6 +295,7 @@ export async function POST(request: Request) {
   );
   conversationId = persistedId ?? conversationId;
   if (quotaVerdict) return quotaVerdict;
+
 
   // Which conversation's recent grounding to reuse. Available for trial
   // visitors too, who have no conversation row for the id to come from.

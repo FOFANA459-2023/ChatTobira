@@ -792,7 +792,7 @@ function QuizItemView({
             </button>
           ))}
         </div>
-      ) : (
+      ) : form === "bracket" && choices.length > 0 ? null : ( // Answered in place above; a box here would be a second way in.
         <input
           value={given}
           onChange={(e) => !checked && onAnswer(e.target.value)}

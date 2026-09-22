@@ -31,11 +31,13 @@ const CreateSchema = z.object({
 
 const FinalizeSchema = z.object({
   id: z.number().int().positive(),
-  // "extract" reads the stored bytes into text (the default, run right after
-  // the browser finishes uploading). "share" is the student offering the
-  // file to the shared corpus, which only queues it for review — nothing a
-  // student does can put a document in front of the whole cohort.
-  action: z.enum(["extract", "share"]).default("extract"),
+  // "extract" reads the stored bytes into text, run right after the browser
+  // finishes uploading. There is no "share" any more: a student's file never
+  // moves toward the corpus by anything the student does. Every upload stays
+  // in the uploads bucket, apart from the knowledge base, until the admin
+  // downloads the lot from /admin/uploads, cleans it, and adds what is worth
+  // keeping through the ingest pipeline by hand.
+  action: z.enum(["extract"]).default("extract"),
 });
 
 async function requireUser() {
@@ -176,19 +178,6 @@ export async function PATCH(request: Request) {
     return Response.json({ error: "not_found" }, { status: 404 });
   }
 
-  if (parsed.data.action === "share") {
-    // Only a file that actually read cleanly can be offered: queueing a
-    // blurred photo wastes the admin's time and would enter the corpus as
-    // half a page if waved through.
-    if (upload.status !== "ready") {
-      return Response.json({ error: "not_ready" }, { status: 409 });
-    }
-    if (isUnreadable((upload.extracted as string) ?? "")) {
-      return Response.json({ error: "unreadable" }, { status: 409 });
-    }
-    await supabase.from("uploads").update({ status: "submitted" }).eq("id", upload.id);
-    return Response.json({ id: upload.id, status: "submitted" });
-  }
   if (upload.status !== "pending") {
     // Already extracted, or already promoted. Re-running would spend vision
     // quota to produce the same text.
@@ -270,12 +259,14 @@ export async function GET() {
   return Response.json({ uploads: data ?? [] });
 }
 
-/** Remove an upload: the object, then the row.
+/** Take an upload out of the chat it was added to. The file and its row
+ * stay.
  *
- * Storage first, because a row without an object is merely untidy while an
- * object without a row is unreachable and un-deletable through the UI. An
- * upload already in the corpus keeps its chunks — those belong to the
- * document now, and removing them is `ingest push`'s job, not a student's.
+ * Every student upload is kept for the admin, who collects them from
+ * /admin/uploads to grow the knowledge base; a student removing a file from
+ * a chat is saying "stop reading this here", not "destroy it". The client has
+ * already stopped sending it as context; this makes the removal survive a
+ * reload by unlinking it from the conversation.
  */
 export async function DELETE(request: Request) {
   const { supabase, user } = await requireUser();
@@ -288,22 +279,16 @@ export async function DELETE(request: Request) {
     return Response.json({ error: "bad_request" }, { status: 400 });
   }
 
-  const { data: upload } = await supabase
+  // RLS: only the caller's own row. Before migration 0013 there is no
+  // conversation_id to clear and nothing to persist — the file was never
+  // linked to a chat, so it already will not come back on reload.
+  const { data } = await supabase
     .from("uploads")
-    .select("id, storage_path")
+    .update({ conversation_id: null })
     .eq("id", parsed.data.id)
-    .single();
-  if (!upload) {
+    .select("id");
+  if (data && data.length === 0) {
     return Response.json({ error: "not_found" }, { status: 404 });
-  }
-
-  const service = serviceClient();
-  if (service) {
-    await service.storage.from(UPLOAD_BUCKET).remove([upload.storage_path as string]);
-  }
-  const { error } = await supabase.from("uploads").delete().eq("id", upload.id);
-  if (error) {
-    return Response.json({ error: "delete_failed" }, { status: 500 });
   }
   return Response.json({ ok: true });
 }
