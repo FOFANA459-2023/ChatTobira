@@ -1,5 +1,5 @@
 import { SpeakingPractice } from "@/components/speaking-practice";
-import { greetingName } from "@/lib/name";
+import { loadShell } from "@/lib/shell";
 import { createClient } from "@/lib/supabase/server";
 
 /** Speaking practice, on its own page.
@@ -15,16 +15,12 @@ import { createClient } from "@/lib/supabase/server";
  * The middleware sends a signed-out visitor to /login before this renders.
  */
 export default async function SpeakingPage() {
-  let firstName: string | null = null;
   let books: { id: number; title: string }[] = [];
+  // Who they are and their saved chats, for the greeting and the sidebar.
+  const shellPromise = loadShell();
 
   try {
     const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    firstName = greetingName(user?.user_metadata as Record<string, unknown> | undefined);
-
     // The same catalogue the practice papers are set from, so the two pages
     // cannot disagree about which books the student has.
     const { data } = await supabase
@@ -38,5 +34,13 @@ export default async function SpeakingPage() {
     // topic and talk. An empty list hides the book column rather than the page.
   }
 
-  return <SpeakingPractice firstName={firstName} books={books} />;
+  const shell = await shellPromise;
+  return (
+    <SpeakingPractice
+      firstName={shell.user?.name ?? null}
+      books={books}
+      user={shell.user}
+      conversations={shell.conversations}
+    />
+  );
 }

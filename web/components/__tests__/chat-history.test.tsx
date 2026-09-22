@@ -75,10 +75,12 @@ describe("chat sidebar", () => {
     expect(sidebar().getByText("Topic 8 kanji")).toBeInTheDocument();
   });
 
-  it("has no sidebar for a trial visitor, who has no account to keep chats in", () => {
+  it("gives a trial visitor the practice pages and a way to sign up, but no saved chats", () => {
     render(<Chat authenticated={false} />);
     expect(screen.queryByRole("navigation", { name: "Saved chats" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /New chat/ })).not.toBeInTheDocument();
+    const practice = within(screen.getByRole("navigation", { name: "Practice" }));
+    expect(practice.getByRole("link", { name: /Speaking/ })).toHaveAttribute("href", "/speaking");
+    expect(screen.getAllByRole("link", { name: "Sign up" })[0]).toHaveAttribute("href", "/signup");
   });
 
   it("opens a saved chat in place, and puts it in the address", async () => {

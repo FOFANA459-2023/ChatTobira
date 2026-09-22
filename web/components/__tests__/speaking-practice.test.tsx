@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SpeakingPractice } from "@/components/speaking-practice";
@@ -25,8 +25,12 @@ const stop = vi.fn();
 const interrupt = vi.fn();
 let active = false;
 
+let onTurn: ((turn: { user: string; assistant: string }) => void) | null = null;
+
 vi.mock("@/lib/use-live-voice", () => ({
-  useLiveConversation: () => ({
+  useLiveConversation: (options: { onTurn: (turn: { user: string; assistant: string }) => void }) => {
+    onTurn = options.onTurn;
+    return {
     active,
     phase: "idle" as const,
     level: 0,
@@ -37,7 +41,8 @@ vi.mock("@/lib/use-live-voice", () => ({
     start,
     stop,
     interrupt,
-  }),
+    };
+  },
 }));
 
 const BOOKS = [
@@ -106,5 +111,46 @@ describe("speaking practice", () => {
     active = true;
     render(<SpeakingPractice firstName={null} books={BOOKS} />);
     expect(screen.queryByRole("button", { name: "Start speaking" })).not.toBeInTheDocument();
+  });
+
+  it("saves every call as a chat of its own, lists it, and links to it afterwards", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+        void url;
+        bodies.push(JSON.parse(String(init?.body)));
+        // Slow enough that the second turn arrives before the first save
+        // answers — the case that would split one call into two chats.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return new Response(JSON.stringify({ conversationId: 81 }), { status: 200 });
+      }),
+    );
+    render(
+      <SpeakingPractice
+        firstName="Varlee"
+        books={BOOKS}
+        user={{ name: "Varlee", email: "v25@apu.ac.jp", isAdmin: false }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Start speaking" }));
+    onTurn!({ user: "", assistant: "Hi Varlee! What would you like to practise?" });
+    onTurn!({ user: "トピック8の練習をしたいです", assistant: "いいですね。" });
+
+    const link = await screen.findByRole("link", { name: "open it" });
+    expect(link).toHaveAttribute("href", "/?c=81");
+    // And it is under Recents straight away, not after a reload.
+    const recents = within(screen.getByRole("navigation", { name: "Saved chats" }));
+    expect(await recents.findByRole("link", { name: /^Speaking practice/ })).toHaveAttribute(
+      "href",
+      "/?c=81",
+    );
+    await waitFor(() => expect(bodies).toHaveLength(2));
+    // The first save creates the chat and names it; the second joins it.
+    expect(bodies[0].conversationId).toBeUndefined();
+    expect(String(bodies[0].title)).toMatch(/^Speaking practice \d+\/\d+ \d\d:\d\d$/);
+    expect(bodies[1].conversationId).toBe(81);
+    vi.unstubAllGlobals();
   });
 });
