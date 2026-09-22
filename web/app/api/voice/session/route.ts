@@ -3,6 +3,7 @@ import { z } from "zod";
 import { isAdminEmail } from "@/lib/admin";
 import {
   exhaustedMessage,
+  refundAllowance,
   spendAllowance,
   VOICE_HANDOVER_MS,
   VOICE_SLICE_SECONDS,
@@ -11,6 +12,7 @@ import { LIVE_MODEL, LIVE_SILENCE_MS, LIVE_VOICE, liveSetup } from "@/lib/live-v
 import { greetingName } from "@/lib/name";
 import { cleanSubject } from "@/lib/speech";
 import { createClient } from "@/lib/supabase/server";
+import { serviceClient } from "@/lib/supabase/service";
 import type { CourseLevel } from "@/lib/uploads";
 
 export const maxDuration = 15;
@@ -122,14 +124,22 @@ export async function POST(request: Request) {
     }),
   }).catch(() => null);
 
+  // The minute was charged before Google was asked. If no token comes back,
+  // nothing was bought: give it back, so a browser retrying a failed renewal
+  // does not spend a student's allowance on calls that never happened.
+  const tokenFailed = async () => {
+    const service = serviceClient();
+    if (service) await refundAllowance(service, user.id, "voice", VOICE_SLICE_SECONDS);
+    return Response.json({ error: "token_failed" }, { status: 502 });
+  };
   if (!response?.ok) {
     const detail = response ? await response.text().catch(() => "") : "unreachable";
     console.error(`live token failed: ${response?.status ?? "-"} ${detail.slice(0, 300)}`);
-    return Response.json({ error: "token_failed" }, { status: 502 });
+    return tokenFailed();
   }
-  const token = (await response.json()) as { name?: string };
+  const token = (await response.json().catch(() => ({}))) as { name?: string };
   if (!token.name) {
-    return Response.json({ error: "token_failed" }, { status: 502 });
+    return tokenFailed();
   }
 
   return Response.json(

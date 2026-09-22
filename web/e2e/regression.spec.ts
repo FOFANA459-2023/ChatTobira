@@ -78,16 +78,20 @@ test.describe("the app is styled", () => {
       .evaluate((el) => getComputedStyle(el).margin);
     expect(bodyMargin, "body kept the user-agent margin — no CSS applied").toBe("0px");
 
-    // The header is a real bar with a background, not a bare <div>.
-    const header = page.locator("header").first();
-    await expect(header).toBeVisible();
-    const headerBackground = await header.evaluate(
+    // The sidebar is a real column with its own paper background, not a bare
+    // <aside> stacked above the page. (On a phone the same test would find the
+    // top bar; this runs at desktop width, where the sidebar is the shell.)
+    const sidebar = page.locator("aside:visible").first();
+    await expect(sidebar).toBeVisible();
+    const sidebarBackground = await sidebar.evaluate(
       (el) => getComputedStyle(el).backgroundColor,
     );
     expect(
-      UNSTYLED_BACKGROUNDS.includes(headerBackground),
-      `header background is ${headerBackground} — the shell is unstyled`,
+      UNSTYLED_BACKGROUNDS.includes(sidebarBackground),
+      `sidebar background is ${sidebarBackground} — the shell is unstyled`,
     ).toBe(false);
+    const box = await sidebar.boundingBox();
+    expect(box!.width, "the sidebar is not laid out as a column").toBeLessThan(400);
 
     // The app sets its own typeface. Falling back to a serif is what the
     // broken render looked like.
@@ -117,21 +121,33 @@ test.describe("the app is styled", () => {
 });
 
 test.describe("the shell still navigates", () => {
-  test("the tabs are present and go where they say", async ({ page }) => {
+  test("the sidebar offers every kind of practice and a new chat", async ({ page }) => {
     await page.goto("/");
-    // Located by href inside the tab bar rather than by name. Each tab renders
-    // its English label beside a Japanese one — "Chat チャット" — so an exact
-    // name match is wrong, and a loose one collides with the "ChatTobira"
-    // wordmark, which is also a link to "/".
-    const tabs = page.locator("nav").first();
-    await expect(tabs.locator('a[href="/"]')).toBeVisible();
-    await expect(tabs.locator('a[href="/speaking"]')).toBeVisible();
-    await expect(tabs.locator('a[href="/quiz?kind=grammar"]')).toBeVisible();
-    await expect(tabs.locator('a[href="/quiz?kind=kanji"]')).toBeVisible();
+    // Located by href inside the practice list rather than by name: each item
+    // carries its Japanese label beside the English one — "Speaking 会話".
+    const practice = page.getByRole("navigation", { name: "Practice" });
+    await expect(practice.locator('a[href="/speaking"]')).toBeVisible();
+    await expect(practice.locator('a[href="/quiz?kind=grammar"]')).toBeVisible();
+    await expect(practice.locator('a[href="/quiz?kind=kanji"]')).toBeVisible();
+    await expect(page.getByRole("button", { name: /New chat/ }).first()).toBeVisible();
 
-    // The active tab marks itself for assistive technology, which is also how
-    // the student can see which one they are on.
-    await expect(tabs.locator('a[href="/"]')).toHaveAttribute("aria-current", "page");
+    // The page being practised marks itself for assistive technology, which
+    // is also how the student sees where they are.
+    await practice.locator('a[href="/quiz?kind=kanji"]').click();
+    await expect(page).toHaveURL(/kind=kanji/);
+    await expect(
+      page.getByRole("navigation", { name: "Practice" }).locator('a[href="/quiz?kind=kanji"]'),
+    ).toHaveAttribute("aria-current", "page");
+  });
+
+  test("on a phone the sidebar is a drawer behind the menu button", async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Open menu" }).click();
+    const drawer = page.getByRole("dialog", { name: "Menu" });
+    await expect(drawer.locator('a[href="/speaking"]')).toBeVisible();
+    await drawer.locator('a[href="/quiz?kind=grammar"]').click();
+    await expect(page).toHaveURL(/kind=grammar/);
   });
 
   test("the quiz picker offers a textbook and a way to start", async ({ page }) => {
@@ -163,7 +179,9 @@ test.describe("the shell still navigates", () => {
       test(`${path} does not scroll sideways at ${width}px`, async ({ page }) => {
         await page.setViewportSize({ width, height: 800 });
         await page.goto(path);
-        await expect(page.locator("nav").first()).toBeVisible();
+        // The app pages open the sidebar from a menu button in a top bar; the
+        // sign-in pages keep their own navbar. Either way, a way around.
+        await expect(page.locator("header:visible").first()).toBeVisible();
         const overflow = await page.evaluate(
           () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
         );

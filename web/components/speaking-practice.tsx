@@ -1,10 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
-import { NavBar } from "@/components/nav";
+import { AppShell } from "@/components/app-shell";
 import { VoiceSession } from "@/components/voice-session";
 import type { ConversationLanguage } from "@/lib/conversation";
+import type { ConversationSummary } from "@/lib/history";
+import type { ShellUser } from "@/lib/shell";
 import { useLiveConversation } from "@/lib/use-live-voice";
 
 interface Book {
@@ -34,10 +36,18 @@ const OPENING_LANGUAGE: ConversationLanguage = "en";
 export function SpeakingPractice({
   firstName,
   books,
+  user,
+  conversations: initialConversations = [],
 }: {
   firstName: string | null;
   books: Book[];
+  /** Who the sidebar belongs to. The page is signed-in only, so absent means
+   * a student known only by their first name. */
+  user?: ShellUser | null;
+  conversations?: ConversationSummary[];
 }) {
+  const shellUser: ShellUser | null =
+    user !== undefined ? user : { name: firstName, email: null, isAdmin: false };
   const [starting, setStarting] = useState(false);
   const [failed, setFailed] = useState(false);
   /** What was said, so the student can read back what they managed to say
@@ -46,8 +56,50 @@ export function SpeakingPractice({
    * the practice unreviewable. */
   const [turns, setTurns] = useState<{ user: string; assistant: string }[]>([]);
 
+  /** Each call is saved as a chat of its own, so it is listed under Recents
+   * and can be reopened and read back like any other. */
+  const [conversations, setConversations] = useState(initialConversations);
+  const [savedId, setSavedId] = useState<number | null>(null);
+  const conversationRef = useRef<number | undefined>(undefined);
+  const titleRef = useRef("Speaking practice");
+  /** Saves go out one at a time. Two turns saved at once would each find no
+   * conversation yet and each create one, splitting a call across two chats. */
+  const saving = useRef<Promise<void>>(Promise.resolve());
+
+  function save(turn: { user: string; assistant: string }) {
+    saving.current = saving.current.then(async () => {
+      try {
+        const response = await fetch("/api/voice/turn", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            conversationId: conversationRef.current,
+            user: turn.user,
+            assistant: turn.assistant,
+            title: titleRef.current,
+          }),
+        });
+        if (!response.ok) return;
+        const { conversationId } = (await response.json()) as { conversationId?: number };
+        if (!conversationId || conversationRef.current === conversationId) return;
+        conversationRef.current = conversationId;
+        setSavedId(conversationId);
+        setConversations((all) => [
+          { id: conversationId, title: titleRef.current, createdAt: new Date().toISOString() },
+          ...all.filter((c) => c.id !== conversationId),
+        ]);
+      } catch {
+        // The transcript is on screen either way; a lost save loses the
+        // record, never the conversation.
+      }
+    });
+  }
+
   const live = useLiveConversation({
-    onTurn: (turn) => setTurns((all) => [...all, turn]),
+    onTurn: (turn) => {
+      setTurns((all) => [...all, turn]);
+      save(turn);
+    },
   });
 
   /** Called straight from the button press: Safari will not let audio play
@@ -56,6 +108,10 @@ export function SpeakingPractice({
     setFailed(false);
     setStarting(true);
     setTurns([]);
+    // A new call is a new chat, named for when it happened.
+    conversationRef.current = undefined;
+    setSavedId(null);
+    titleRef.current = speakingTitle(new Date());
     void live
       .start({ language: OPENING_LANGUAGE, history: [], opening: true })
       .then((result) => {
@@ -89,8 +145,8 @@ export function SpeakingPractice({
   }
 
   return (
-    <div className="mx-auto flex min-h-viewport max-w-2xl flex-col">
-      <NavBar active="speaking" />
+    <AppShell page="speaking" user={shellUser} conversations={conversations}>
+    <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col">
 
       <div className="flex-1 px-4 py-8">
         <div className="text-center">
@@ -196,6 +252,15 @@ export function SpeakingPractice({
             <h2 className="text-sm font-medium text-stone-800">What you just said</h2>
             <p className="mt-0.5 text-xs text-stone-500">
               Your last conversation, as the tutor heard it.
+              {savedId !== null && (
+                <>
+                  {" "}Saved to your chats —{" "}
+                  <a href={`/?c=${savedId}`} className="underline hover:text-stone-800">
+                    open it
+                  </a>
+                  .
+                </>
+              )}
             </p>
             <div className="mt-3 space-y-3">
               {turns.map((turn, i) => (
@@ -223,7 +288,14 @@ export function SpeakingPractice({
         )}
       </div>
     </div>
+    </AppShell>
   );
+}
+
+/** "Speaking practice 9/22 14:05": which call it was, at a glance in the list. */
+export function speakingTitle(at: Date): string {
+  const time = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+  return `Speaking practice ${at.getMonth() + 1}/${at.getDate()} ${time}`;
 }
 
 function MicGlyph() {

@@ -5,7 +5,9 @@ import { useEffect, useState } from "react";
 
 import { Answer, RichText } from "@/components/answer";
 import { AuthPrompt } from "@/components/auth-card";
-import { NavBar } from "@/components/nav";
+import type { ConversationSummary } from "@/lib/history";
+import type { ShellUser } from "@/lib/shell";
+import { AppShell } from "@/components/app-shell";
 import {
   flattenItems,
   isCorrect,
@@ -79,10 +81,17 @@ function markLine(marks: number | undefined, items: number): string {
 export function QuizView({
   initialKind = "grammar",
   authenticated = true,
+  user,
+  conversations = [],
 }: {
   initialKind?: QuizKind;
   authenticated?: boolean;
+  /** Who the sidebar belongs to; derived from `authenticated` when absent. */
+  user?: ShellUser | null;
+  conversations?: ConversationSummary[];
 }) {
+  const shellUser: ShellUser | null =
+    user !== undefined ? user : authenticated ? { name: null, email: null, isAdmin: false } : null;
   const [kind, setKind] = useState<QuizKind>(initialKind);
   const [books, setBooks] = useState<Book[]>([]);
   const [bookId, setBookId] = useState<number | null>(null);
@@ -212,8 +221,8 @@ export function QuizView({
   const { correct, total } = quiz ? scoreQuiz(quiz, answers) : { correct: 0, total: 0 };
 
   return (
-    <div className="mx-auto flex min-h-viewport max-w-3xl flex-col">
-      <NavBar active={kind} authenticated={authenticated} />
+    <AppShell page={kind} user={shellUser} conversations={conversations}>
+    <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col">
       <div className="flex-1 px-4 py-6">
         {phase === "trial_exhausted" && (
           <div className="mx-auto mt-16 max-w-sm">
@@ -496,6 +505,7 @@ export function QuizView({
         )}
       </div>
     </div>
+    </AppShell>
   );
 }
 

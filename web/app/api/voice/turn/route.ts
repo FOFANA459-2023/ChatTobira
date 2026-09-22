@@ -8,6 +8,10 @@ const BodySchema = z.object({
   conversationId: z.number().int().positive().optional(),
   user: z.string().trim().max(4000),
   assistant: z.string().trim().max(8000),
+  // The name the chat gets when this turn is the one that creates it. The
+  // Speaking page names its calls; the chat's microphone joins a chat that
+  // usually exists already, and otherwise takes the first words as its title.
+  title: z.string().trim().min(1).max(80).optional(),
 });
 
 /** One spoken exchange from a live conversation, written to the same
@@ -31,13 +35,13 @@ export async function POST(request: Request) {
   if (!parsed.success || (!parsed.data.user && !parsed.data.assistant)) {
     return Response.json({ error: "bad_request" }, { status: 400 });
   }
-  const { user: said, assistant: replied } = parsed.data;
+  const { user: said, assistant: replied, title } = parsed.data;
   let { conversationId } = parsed.data;
 
   if (!conversationId) {
     const { data } = await supabase
       .from("conversations")
-      .insert({ user_id: user.id, scope: {}, title: (said || replied).slice(0, 60) })
+      .insert({ user_id: user.id, scope: {}, title: title ?? (said || replied).slice(0, 60) })
       .select("id")
       .single();
     conversationId = (data as { id: number } | null)?.id;

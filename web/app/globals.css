@@ -3,6 +3,14 @@
 @theme {
   --font-sans: "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic UI",
     "Meiryo", system-ui, sans-serif;
+  /* 朱 (shu), the vermilion of a shrine gate: the one accent colour. It marks
+     where the student is — the active page, their own initial — and nothing
+     else, so it never has to compete with itself. */
+  --color-shu: #c8553d;
+  --color-shu-soft: #f8e9e4;
+  /* The sidebar's paper: a shade warmer than the page, so the column reads
+     as a separate surface without a heavy border. */
+  --color-paper: #f4f1eb;
 }
 
 html {

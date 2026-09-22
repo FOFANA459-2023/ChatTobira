@@ -390,6 +390,97 @@ describe("metered by the minute", () => {
   });
 });
 
+describe("renewing the connection without hanging up", () => {
+  /** Session route answers, in order. "ok" hands out a token whose handover is
+   * due ~0.4s after it is minted; a number is that HTTP status. */
+  function renewals(answers: ("ok" | number)[]) {
+    let call = 0;
+    fetchMock.mockImplementation((url: string) => {
+      if (url !== "/api/voice/session") return jsonResponse({});
+      const answer = answers[Math.min(call, answers.length - 1)];
+      call += 1;
+      if (answer !== "ok") return jsonResponse({ error: "token_failed" }, answer);
+      return jsonResponse({
+        token: `tok ${call}`,
+        model: "gemini-3.8-live",
+        expiresAt: Date.now() + 8_400,
+        remainingSeconds: 540,
+      });
+    });
+  }
+  const sessionCalls = () => fetchMock.mock.calls.filter(([url]) => url === "/api/voice/session");
+
+  it("tries the renewal again when the token request fails, and the call carries on", async () => {
+    // The first renewal fails twice — a 502 from Google, then a timeout —
+    // and works on the third try. It used to hang up on the first.
+    renewals(["ok", 502, 0, "ok"]);
+    const { socket, result } = await connect();
+    await waitFor(() => expect(FakeSocket.all).toHaveLength(2), { timeout: 6000 });
+    expect(sessionCalls()).toHaveLength(4);
+    // The old connection carried the conversation the whole time.
+    expect(result.current.error).toBeNull();
+    expect(result.current.active).toBe(true);
+    const next = FakeSocket.all[1];
+    act(() => next.open());
+    act(() => next.receive({ setupComplete: {} }));
+    await waitFor(() => expect(socket.readyState).toBe(3));
+    act(() => FakeWorkletNode.created.at(-1)!.port.onmessage!({ data: new Float32Array(1920).fill(0.01) }));
+    expect(next.last("realtimeInput")).toBeDefined();
+  }, 10_000);
+
+  it("opens another connection when the new one fails to set up", async () => {
+    renewals(["ok"]);
+    const { socket, result } = await connect();
+    await waitFor(() => expect(FakeSocket.all).toHaveLength(2), { timeout: 3000 });
+    // Google closes the new connection before its setup completes.
+    act(() => FakeSocket.all[1].close(1011));
+    await waitFor(() => expect(FakeSocket.all).toHaveLength(3), { timeout: 3000 });
+    const third = FakeSocket.all[2];
+    act(() => third.open());
+    act(() => third.receive({ setupComplete: {} }));
+    await waitFor(() => expect(socket.readyState).toBe(3));
+    expect(result.current.active).toBe(true);
+    expect(result.current.error).toBeNull();
+  }, 10_000);
+
+  it("ends the call only when every attempt has failed, keeping what was said", async () => {
+    renewals(["ok", 502]);
+    const { socket, result, onTurn } = await connect();
+    act(() => socket.receive({ serverContent: { inputTranscription: { text: "もう一度" } } }));
+    // Five tries, with pauses of 0.5s, 1s, 2s and 4s between them.
+    await waitFor(() => expect(result.current.active).toBe(false), { timeout: 12_000 });
+    expect(sessionCalls()).toHaveLength(6);
+    expect(result.current.error).toBe("network");
+    expect(onTurn).toHaveBeenCalledWith({ user: "もう一度", assistant: "" });
+  }, 15_000);
+
+  it("renews again when the new connection drops before it takes over", async () => {
+    renewals(["ok"]);
+    const { socket, result } = await connect();
+    // The tutor is talking, so the switch waits for a quiet moment.
+    act(() =>
+      socket.receive({ serverContent: { modelTurn: { parts: [{ inlineData: { data: audioChunk(24000) } }] } } }),
+    );
+    await waitFor(() => expect(FakeSocket.all).toHaveLength(2), { timeout: 3000 });
+    const second = FakeSocket.all[1];
+    act(() => second.open());
+    act(() => second.receive({ setupComplete: {} }));
+    // It drops while waiting; then the tutor finishes.
+    act(() => second.close(1011));
+    act(() => sources[0].onended?.());
+    // The dead connection never takes over: the old one keeps the call until
+    // a working replacement is up. (Switching to the dead one closed it.)
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(socket.readyState).toBe(1);
+    await waitFor(() => expect(FakeSocket.all).toHaveLength(3), { timeout: 3000 });
+    const third = FakeSocket.all[2];
+    act(() => third.open());
+    act(() => third.receive({ setupComplete: {} }));
+    await waitFor(() => expect(socket.readyState).toBe(3));
+    expect(result.current.active).toBe(true);
+  }, 10_000);
+});
+
 describe("recovering a dropped connection", () => {
   it("resumes by handle when the old connection is already gone", async () => {
     const { socket } = await connect();

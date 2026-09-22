@@ -53,6 +53,7 @@ export default async function Home({
       firstName={firstName}
       isAdmin={isAdmin}
       authenticated={Boolean(user)}
+      user={user ? { name: firstName, email: user.email ?? null, isAdmin } : null}
       level={level}
       conversations={conversations}
       initial={initial}

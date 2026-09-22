@@ -2,19 +2,18 @@
 
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
-import Link from "next/link";
 import { Fragment, useEffect, useRef, useState } from "react";
 
 import { Answer } from "@/components/answer";
-import { ChatSidebar } from "@/components/chat-history";
+import { AppShell } from "@/components/app-shell";
 import { FeedbackButtons } from "@/components/feedback-buttons";
 import { AuthPrompt } from "@/components/auth-card";
 import { VoiceInput } from "@/components/voice-input";
 import { VoiceSession } from "@/components/voice-session";
-import { NavBar } from "@/components/nav";
 import { UploadButton } from "@/components/upload-button";
 import { conversationLanguage, type ConversationLanguage } from "@/lib/conversation";
 import type { ChatUpload, ConversationSummary } from "@/lib/history";
+import type { ShellUser } from "@/lib/shell";
 import type { Citation } from "@/lib/retrieval";
 import type { CourseLevel } from "@/lib/uploads";
 import { useAutoScroll } from "@/lib/use-autoscroll";
@@ -81,6 +80,7 @@ export function Chat({
   level = null,
   conversations: initialConversations = [],
   initial = null,
+  user,
 }: {
   firstName?: string | null;
   isAdmin?: boolean;
@@ -90,7 +90,15 @@ export function Chat({
   conversations?: ConversationSummary[];
   /** The chat to open with, when the address named one (/?c=12). */
   initial?: { id: number; messages: UIMessage[]; uploads: ChatUpload[] } | null;
+  /** Who the sidebar belongs to. Derived from the props above when absent. */
+  user?: ShellUser | null;
 }) {
+  const shellUser: ShellUser | null =
+    user !== undefined
+      ? user
+      : authenticated
+        ? { name: firstName ?? null, email: null, isAdmin }
+        : null;
   const [input, setInput] = useState("");
   // Voice is a way of taking a turn, not a mode the student configures. The
   // dropdown that used to ask whether this was free conversation, topic
@@ -132,7 +140,6 @@ export function Chat({
   const [conversations, setConversations] =
     useState<ConversationSummary[]>(initialConversations);
   const [opening, setOpening] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
   /** Chats already in hand, by id: the ones prefetched on hover and the ones
    * the student has left. Opening one of them costs no request at all. */
   type SavedChat = { id: number; messages: UIMessage[]; uploads: ChatUpload[] };
@@ -586,58 +593,22 @@ export function Chat({
   }
 
   return (
-    <div className="flex h-viewport">
-    {authenticated && (
-      <ChatSidebar
-        conversations={conversations}
-        currentId={currentId}
-        disabled={busy || opening || voiceLive}
-        mobileOpen={sidebarOpen}
-        onCloseMobile={() => setSidebarOpen(false)}
-        onOpen={(id) => void openConversation(id)}
-        onPrefetch={(id) => void fetchChat(id)}
-        onNew={newChat}
-        onRename={renameChat}
-        onDelete={deleteChat}
-      />
-    )}
-    <div className="mx-auto flex h-full min-w-0 max-w-3xl flex-1 flex-col">
-      <NavBar active="chat" authenticated={authenticated}>
-        {isAdmin && (
-          <Link
-            href="/admin"
-            className="rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-sm text-stone-700 hover:bg-stone-100"
-          >
-            Admin
-          </Link>
-        )}
-      </NavBar>
-
-      {/* On a phone the chats live behind this button; from md up they are
-          the column on the left. */}
-      {authenticated && !voiceLive && (
-        <div className="flex items-center justify-between border-b border-stone-200 bg-white px-3 py-1.5 md:hidden">
-          <button
-            type="button"
-            onClick={() => setSidebarOpen(true)}
-            className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm text-stone-600 hover:bg-stone-100"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
-              <path d="M4 6h16M4 12h16M4 18h10" />
-            </svg>
-            Chats
-          </button>
-          <button
-            type="button"
-            onClick={newChat}
-            disabled={busy || opening}
-            className="rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-sm text-stone-700 hover:bg-stone-100 disabled:opacity-50"
-          >
-            + New chat
-          </button>
-        </div>
-      )}
-
+    <AppShell
+      page="chat"
+      user={shellUser}
+      conversations={conversations}
+      fullHeight
+      chat={{
+        currentId,
+        disabled: busy || opening || voiceLive,
+        onOpen: (id) => void openConversation(id),
+        onPrefetch: (id) => void fetchChat(id),
+        onNew: newChat,
+        onRename: renameChat,
+        onDelete: deleteChat,
+      }}
+    >
+    <div className="mx-auto flex h-full min-h-0 w-full min-w-0 max-w-3xl flex-1 flex-col">
       {/* While a spoken conversation is running, voice takes the screen. The
           transcript is still being written underneath — every turn goes to the
           same conversation — and comes back whole when the student finishes. */}
@@ -850,7 +821,7 @@ export function Chat({
         </form>
       )}
     </div>
-    </div>
+    </AppShell>
   );
 }
 
