@@ -1,0 +1,72 @@
+name: Release PR
+
+# Keeps one pull request from dev into main open whenever dev has something
+# main does not, so a release is always one Merge button away in the Pull
+# requests tab.
+#
+# GitHub's own "Compare & pull request" banner only appears for about an hour
+# after a push and disappears for good once dismissed, which left finished
+# work sitting on dev with no obvious way to ship it. This makes the pull
+# request exist instead of relying on the banner being noticed.
+#
+# Merging it is still a person's decision: nothing here merges, approves or
+# deploys. The deploy job in ci.yml runs only on a push to main that came
+# from a merged pull request, exactly as before.
+#
+# One-time repository setting this needs: Settings -> Actions -> General ->
+# Workflow permissions -> tick "Allow GitHub Actions to create and approve
+# pull requests". Without it GitHub refuses the create call, and the run
+# fails saying so.
+on:
+  push:
+    branches: [dev]
+
+# Two quick pushes must not open two pull requests.
+concurrency:
+  group: release-pr
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  release-pr:
+    name: Open or update the dev -> main pull request
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open or update it
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          ahead=$(gh api "repos/$REPO/compare/main...dev" --jq '.ahead_by')
+          if [ "$ahead" -eq 0 ]; then
+            echo "dev has nothing main does not; no pull request needed."
+            exit 0
+          fi
+
+          # What the release carries: the first line of every commit on dev
+          # that main does not have, newest last, merge commits left out.
+          changes=$(gh api "repos/$REPO/compare/main...dev" \
+            --jq '.commits[] | select((.parents | length) == 1) | "- " + (.commit.message | split("\n")[0])')
+
+          body=$(printf '%s\n\n%s\n\n%s\n' \
+            "Everything on \`dev\` that is not yet on \`main\` ($ahead commits). Merging this deploys it to production once CI passes." \
+            "$changes" \
+            "Opened and kept up to date automatically on every push to \`dev\` (.github/workflows/release-pr.yml).")
+
+          existing=$(gh pr list --repo "$REPO" --base main --head dev --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --repo "$REPO" --body "$body"
+            echo "Updated pull request #$existing."
+            exit 0
+          fi
+
+          if ! gh pr create --repo "$REPO" --base main --head dev \
+                 --title "Release: dev -> main" --body "$body"; then
+            echo "::error::GitHub refused to open the pull request. Turn on Settings -> Actions -> General -> Workflow permissions -> 'Allow GitHub Actions to create and approve pull requests', then re-run this job."
+            exit 1
+          fi

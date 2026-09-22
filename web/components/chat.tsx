@@ -10,7 +10,7 @@ import { FeedbackButtons } from "@/components/feedback-buttons";
 import { AuthPrompt } from "@/components/auth-card";
 import { VoiceInput } from "@/components/voice-input";
 import { VoiceSession } from "@/components/voice-session";
-import { UploadButton } from "@/components/upload-button";
+import { UploadButton, type AttachedFile } from "@/components/upload-button";
 import { conversationLanguage, type ConversationLanguage } from "@/lib/conversation";
 import type { ChatUpload, ConversationSummary } from "@/lib/history";
 import type { ShellUser } from "@/lib/shell";
@@ -132,6 +132,21 @@ export function Chat({
   const [uploads, setUploads] = useState<ChatUpload[]>(initial?.uploads ?? []);
   const uploadsRef = useRef<ChatUpload[]>([]);
   uploadsRef.current = uploads;
+  /** Files picked but not sent yet. They wait in the composer, the way an
+   * attachment does in any messaging app, and go out WITH the question the
+   * student writes about them. A file dropped straight into the transcript
+   * could be asked about before it had been read, and the question then went
+   * out without it — the tutor answered as if nothing was attached. */
+  const [staged, setStaged] = useState<AttachedFile[]>([]);
+  const stagedReading = staged.some((f) => f.status === "uploading" || f.status === "reading");
+  const stagedReady = staged.filter((f) => f.status === "ready");
+  /** Set for the one request that carries a file with nothing written. */
+  const attachmentOnlyRef = useRef(false);
+  const takeAttachmentOnly = () => {
+    const only = attachmentOnlyRef.current;
+    attachmentOnlyRef.current = false;
+    return only || undefined;
+  };
   // Set by the first answer's metadata; later turns append to the same
   // conversation row so history and feedback attach correctly.
   const conversationRef = useRef<number | undefined>(initial?.id);
@@ -211,6 +226,9 @@ export function Chat({
           .filter((f) => f.status === "ready")
           .map((f) => f.id)
           .slice(-4),
+        // Read once and cleared: only the request that carried the file alone
+        // is flagged, never the student's next, written message.
+        attachmentOnly: takeAttachmentOnly(),
       }),
     }),
     onFinish: ({ message }) => {
@@ -562,8 +580,24 @@ export function Chat({
 
   function submit(event: React.FormEvent) {
     event.preventDefault();
-    const text = input.trim();
-    if (!text || busy) return;
+    const typed = input.trim();
+    if (busy || stagedReading) return;
+    if (!typed && stagedReady.length === 0) return;
+    // A file sent on its own goes out as just its name, flagged, so the tutor
+    // knows there is no instruction yet and opens the conversation about the
+    // file rather than answering a request nobody made.
+    const text = typed || stagedReady.map((f) => f.filename).join(", ");
+    attachmentOnlyRef.current = !typed;
+    if (stagedReady.length > 0) {
+      // The files join the transcript just above the question they came
+      // with, and join the chat's context from this turn on. Written to the
+      // ref as well as to state: the request body reads the ref, and it is
+      // built before React has rendered the new state.
+      const sent = stagedReady.map((f) => ({ ...f, after: messagesRef.current.length }));
+      uploadsRef.current = [...uploadsRef.current, ...sent];
+      setUploads(uploadsRef.current);
+      setStaged((all) => all.filter((f) => f.status !== "ready"));
+    }
     setInput("");
     // Sending is an unambiguous "I am done reading the old thing", so it
     // re-pins the view even if the student had scrolled up.
@@ -754,6 +788,26 @@ export function Chat({
           onSubmit={submit}
           className="border-t border-stone-200 bg-white px-4 py-3"
         >
+          {!voiceLive && staged.length > 0 && (
+            <ul aria-label="Attached files" className="mb-2 flex flex-wrap gap-2">
+              {staged.map((file) => (
+                <PendingFile
+                  key={file.id}
+                  file={file}
+                  onRemove={() => {
+                    setStaged((all) => all.filter((f) => f.id !== file.id));
+                    // Unsent, so there is no chat to take it out of; the file
+                    // itself is kept for the admin like every upload.
+                    void fetch("/api/upload", {
+                      method: "DELETE",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ id: file.id }),
+                    }).catch(() => {});
+                  }}
+                />
+              ))}
+            </ul>
+          )}
 
           <div className="flex gap-2">
           <input
@@ -787,13 +841,9 @@ export function Chat({
             <UploadButton
               defaultLevel={level}
               disabled={busy}
-              onAttached={(file) => {
-                setUploads((all) => [...all, { ...file, after: messagesRef.current.length }]);
-                // The file just landed at the bottom of the transcript.
-                requestAnimationFrame(() => scroll.scrollToBottom());
-              }}
+              onAttached={(file) => setStaged((all) => [...all, file])}
               onUpdate={(id, patch) =>
-                setUploads((all) => all.map((f) => (f.id === id ? { ...f, ...patch } : f)))
+                setStaged((all) => all.map((f) => (f.id === id ? { ...f, ...patch } : f)))
               }
             />
           )}
@@ -811,7 +861,8 @@ export function Chat({
           {!voiceLive && (
             <button
               type="submit"
-              disabled={busy || input.trim() === ""}
+              disabled={busy || stagedReading || (input.trim() === "" && stagedReady.length === 0)}
+              title={stagedReading ? "Wait until your file has been read" : undefined}
               className="shrink-0 rounded-xl bg-stone-900 px-5 py-2.5 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
             >
               {busy ? "…" : "Send"}
@@ -912,6 +963,48 @@ function UploadCard({
         ×
       </button>
     </div>
+  );
+}
+
+/** A file waiting in the composer to go out with the next question. */
+function PendingFile({ file, onRemove }: { file: AttachedFile; onRemove: () => void }) {
+  const reading = file.status === "uploading" || file.status === "reading";
+  const failed = file.status === "failed";
+  return (
+    <li
+      className={`flex max-w-full min-w-0 items-center gap-2 rounded-xl border px-2.5 py-1.5 text-xs ${
+        failed ? "border-red-200 bg-red-50 text-red-800" : "border-stone-200 bg-stone-50 text-stone-700"
+      }`}
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="shrink-0">
+        <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+        <path d="M14 3v5h5" />
+      </svg>
+      <span className="min-w-0 truncate font-medium">{file.filename}</span>
+      <span className={`shrink-0 ${failed ? "text-red-700" : "text-stone-500"}`}>
+        {file.status === "uploading"
+          ? "uploading…"
+          : file.status === "reading"
+            ? "reading…"
+            : failed
+              ? (file.detail ?? "could not be read")
+              : (file.detail ?? "ready")}
+      </span>
+      {reading && (
+        <span
+          aria-hidden="true"
+          className="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-stone-300 border-t-stone-600 motion-reduce:animate-none"
+        />
+      )}
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label={`Remove ${file.filename}`}
+        className="shrink-0 text-stone-400 hover:text-stone-700"
+      >
+        ×
+      </button>
+    </li>
   );
 }
 
