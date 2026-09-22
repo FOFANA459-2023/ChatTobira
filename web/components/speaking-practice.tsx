@@ -104,7 +104,7 @@ export function SpeakingPractice({
 
         <div className="mt-6 space-y-3 text-sm leading-relaxed text-stone-600">
           <p>
-            Talk out loud with a tutor that has read your course material. It answers in
+            Talk out loud with a tutor that has read your textbooks and class materials. It answers in
             about a second, and you can interrupt it the way you would a person.
           </p>
           <p>
@@ -147,7 +147,7 @@ export function SpeakingPractice({
                 <span className="font-medium text-stone-800">
                   Anything else you want to get better at saying.
                 </span>{" "}
-                Your weekend, your classes, a presentation you have coming up. Or nothing
+                Your weekend, your classes, a speech you have coming up. Or nothing
                 in particular: start talking and it will follow you.
               </p>
               <p className="mt-2 text-stone-400">

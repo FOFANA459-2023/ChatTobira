@@ -96,7 +96,7 @@ describe("chat pending state", () => {
   it("shows a thinking indicator as soon as the question is sent", async () => {
     chatState = { messages: [userMessage("what is the て form?")], status: "submitted" };
     render(<Chat authenticated firstName="Rin" />);
-    expect(await screen.findByRole("status")).toHaveTextContent(/looking through your course/i);
+    expect(await screen.findByRole("status")).toHaveTextContent(/looking through your textbooks and class materials/i);
   });
 
   it("keeps it up while the request is in flight with nothing back yet", () => {

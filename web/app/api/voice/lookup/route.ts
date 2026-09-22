@@ -57,13 +57,20 @@ export async function POST(request: Request) {
       seen.has(chunk.chunk_id) ? false : (seen.add(chunk.chunk_id), true),
     );
     const passages = selectContext(merged, { limit: PASSAGES }).map((chunk) => ({
-      source: chunk.book_page ? `${chunk.doc_title}, p.${chunk.book_page}` : chunk.doc_title,
+      // A textbook is named with its page so the tutor can send the student
+      // there. Anything else is "class materials" and nothing more: its file
+      // name would be read aloud as the name of a past paper or a handout.
+      source: chunk.is_citable
+        ? chunk.book_page
+          ? `${chunk.doc_title}, p.${chunk.book_page}`
+          : chunk.doc_title
+        : `class materials${typeof chunk.metadata?.topic === "string" ? `, Topic ${chunk.metadata.topic.replace(/^T/, "")}` : ""}`,
       text: chunk.content.replace(/\s+/g, " ").slice(0, PASSAGE_CHARS),
     }));
     return Response.json({ passages });
   } catch (error) {
     console.error("voice lookup failed:", error instanceof Error ? error.message : error);
     // The tutor still answers, from what it knows, rather than going silent.
-    return Response.json({ passages: [], note: "The course material could not be searched just now." });
+    return Response.json({ passages: [], note: "The textbooks and class materials could not be searched just now." });
   }
 }

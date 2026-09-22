@@ -1,18 +1,20 @@
 "use client";
 
 import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
+import { DefaultChatTransport, type UIMessage } from "ai";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 
 import { Answer } from "@/components/answer";
+import { ChatSidebar } from "@/components/chat-history";
 import { FeedbackButtons } from "@/components/feedback-buttons";
 import { AuthPrompt } from "@/components/auth-card";
 import { VoiceInput } from "@/components/voice-input";
 import { VoiceSession } from "@/components/voice-session";
 import { NavBar } from "@/components/nav";
-import { UploadButton, type AttachedFile } from "@/components/upload-button";
+import { UploadButton } from "@/components/upload-button";
 import { conversationLanguage, type ConversationLanguage } from "@/lib/conversation";
+import type { ChatUpload, ConversationSummary } from "@/lib/history";
 import type { Citation } from "@/lib/retrieval";
 import type { CourseLevel } from "@/lib/uploads";
 import { useAutoScroll } from "@/lib/use-autoscroll";
@@ -67,7 +69,7 @@ function Thinking() {
           />
         ))}
       </span>
-      {phase === 0 ? "Looking through your course material…" : "Writing your answer…"}
+      {phase === 0 ? "Looking through your textbooks and class materials…" : "Writing your answer…"}
     </div>
   );
 }
@@ -77,11 +79,17 @@ export function Chat({
   isAdmin = false,
   authenticated = true,
   level = null,
+  conversations: initialConversations = [],
+  initial = null,
 }: {
   firstName?: string | null;
   isAdmin?: boolean;
   authenticated?: boolean;
   level?: CourseLevel | null;
+  /** The student's saved chats, newest first. */
+  conversations?: ConversationSummary[];
+  /** The chat to open with, when the address named one (/?c=12). */
+  initial?: { id: number; messages: UIMessage[]; uploads: ChatUpload[] } | null;
 }) {
   const [input, setInput] = useState("");
   // Voice is a way of taking a turn, not a mode the student configures. The
@@ -109,14 +117,29 @@ export function Chat({
   // which reply is being fed: without it, the first token of the next answer
   // would be appended to the last one's queue.
   const spokenReplyId = useRef<string | null>(null);
-  // Files stay attached across turns: a student asks several questions about
-  // one worksheet, and re-picking it for each would be absurd.
-  const [attached, setAttached] = useState<AttachedFile[]>([]);
-  const attachedRef = useRef<AttachedFile[]>([]);
-  attachedRef.current = attached;
+  // Files are part of the chat: each sits in the transcript where it was
+  // added, and every later turn in the chat can still read it — a student
+  // asks several questions about one page, and re-adding it for each would
+  // be absurd.
+  const [uploads, setUploads] = useState<ChatUpload[]>(initial?.uploads ?? []);
+  const uploadsRef = useRef<ChatUpload[]>([]);
+  uploadsRef.current = uploads;
   // Set by the first answer's metadata; later turns append to the same
   // conversation row so history and feedback attach correctly.
-  const conversationRef = useRef<number | undefined>(undefined);
+  const conversationRef = useRef<number | undefined>(initial?.id);
+  // Mirrors conversationRef for rendering: which chat the history list marks.
+  const [currentId, setCurrentId] = useState<number | undefined>(initial?.id);
+  const [conversations, setConversations] =
+    useState<ConversationSummary[]>(initialConversations);
+  const [opening, setOpening] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  /** Chats already in hand, by id: the ones prefetched on hover and the ones
+   * the student has left. Opening one of them costs no request at all. */
+  type SavedChat = { id: number; messages: UIMessage[]; uploads: ChatUpload[] };
+  const chatCache = useRef(new Map<number, Promise<SavedChat | null>>());
+  // useChat keeps the callbacks of its first render, so what they read about
+  // the transcript has to come through a ref.
+  const messagesRef = useRef<UIMessage[]>(initial?.messages ?? []);
   // The last thing the microphone heard, shown on the voice screen so a
   // mishearing is catchable. One turn, not a transcript.
   const [heard, setHeard] = useState<string | null>(null);
@@ -140,7 +163,30 @@ export function Chat({
     },
   });
 
-  const { messages, sendMessage, setMessages, status, error } = useChat({
+  /** A chat has just been saved for the first time, or reopened: remember it,
+   * put it in the address so a reload comes back to it, and list it. */
+  function adoptConversation(id: number, title?: string) {
+    const isNew = conversationRef.current !== id;
+    conversationRef.current = id;
+    setCurrentId(id);
+    if (!isNew) return;
+    window.history.replaceState(null, "", `/?c=${id}`);
+    setConversations((all) =>
+      all.some((c) => c.id === id)
+        ? all
+        : [
+            {
+              id,
+              title: title?.trim().slice(0, 60) || "Untitled chat",
+              createdAt: new Date().toISOString(),
+            },
+            ...all,
+          ],
+    );
+  }
+
+  const { messages, sendMessage, setMessages, status, error, clearError } = useChat({
+    messages: initial?.messages,
     transport: new DefaultChatTransport({
       api: "/api/chat",
       // Read from a ref so the id set mid-conversation applies immediately.
@@ -152,15 +198,17 @@ export function Chat({
         // typed one in the same conversation.
         speaking: voiceLiveRef.current ? { mode: "free" as const, level } : undefined,
         // Only files that actually extracted carry context; one still
-        // uploading would just be an id the server finds nothing for.
-        uploadIds: attachedRef.current
+        // uploading would just be an id the server finds nothing for. The
+        // newest four, which is what the route accepts.
+        uploadIds: uploadsRef.current
           .filter((f) => f.status === "ready")
-          .map((f) => f.id),
+          .map((f) => f.id)
+          .slice(-4),
       }),
     }),
     onFinish: ({ message }) => {
       const meta = (message.metadata ?? {}) as MessageMeta;
-      if (meta.conversationId) conversationRef.current = meta.conversationId;
+      if (meta.conversationId) adoptConversation(meta.conversationId, firstQuestion(messagesRef.current));
       // The other half of the conversation. Only turns that arrived by voice
       // are spoken back, and a failure to speak is silent by design: the
       // answer is already on screen, and the useTextToSpeech fallback has
@@ -209,6 +257,103 @@ export function Chat({
       }
     },
   });
+
+  messagesRef.current = messages;
+
+  /** Fetch a saved chat once; every later ask for it shares the answer. */
+  function fetchChat(id: number): Promise<SavedChat | null> {
+    let pending = chatCache.current.get(id);
+    if (!pending) {
+      pending = fetch(`/api/conversations?id=${id}`)
+        .then((response) => (response.ok ? (response.json() as Promise<SavedChat>) : null))
+        .catch(() => null);
+      chatCache.current.set(id, pending);
+      // A failure is not remembered: the next ask tries again.
+      void pending.then((chat) => chat || chatCache.current.delete(id));
+    }
+    return pending;
+  }
+
+  /** Keep the chat being left exactly as it stands, so going back to it is
+   * instant and shows the turns just added. */
+  function stashCurrent() {
+    const id = conversationRef.current;
+    if (!id) return;
+    chatCache.current.set(
+      id,
+      Promise.resolve({ id, messages: messagesRef.current, uploads: uploadsRef.current }),
+    );
+  }
+
+  /** Open a saved chat in place of the current one. */
+  async function openConversation(id: number) {
+    setOpening(true);
+    stashCurrent();
+    try {
+      const chat = await fetchChat(id);
+      if (!chat) return; // the chat on screen stays; nothing half-loaded replaces it
+      tts.stop();
+      clearError();
+      setMessages(chat.messages);
+      setUploads(chat.uploads);
+      setSpokenTurns(new Set());
+      conversationRef.current = chat.id;
+      setCurrentId(chat.id);
+      window.history.replaceState(null, "", `/?c=${chat.id}`);
+      requestAnimationFrame(() => scroll.scrollToBottom());
+    } finally {
+      setOpening(false);
+    }
+  }
+
+  /** Start a clean chat. The old one is already saved and stays in the list. */
+  function newChat() {
+    stashCurrent();
+    tts.stop();
+    clearError();
+    setMessages([]);
+    setUploads([]);
+    setSpokenTurns(new Set());
+    setInput("");
+    conversationRef.current = undefined;
+    setCurrentId(undefined);
+    window.history.replaceState(null, "", "/");
+  }
+
+  function renameChat(id: number, title: string) {
+    const previous = conversations.find((c) => c.id === id)?.title;
+    setConversations((all) => all.map((c) => (c.id === id ? { ...c, title } : c)));
+    void fetch("/api/conversations", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, title }),
+    })
+      .then((response) => {
+        if (!response.ok) throw new Error(String(response.status));
+      })
+      .catch(() => {
+        // Put the old name back rather than show one that was never saved.
+        if (previous !== undefined) {
+          setConversations((all) => all.map((c) => (c.id === id ? { ...c, title: previous } : c)));
+        }
+      });
+  }
+
+  function deleteChat(id: number) {
+    const before = conversations;
+    setConversations((all) => all.filter((c) => c.id !== id));
+    chatCache.current.delete(id);
+    if (conversationRef.current === id) newChat();
+    void fetch("/api/conversations", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    })
+      .then((response) => {
+        if (!response.ok) throw new Error(String(response.status));
+      })
+      .catch(() => setConversations(before));
+  }
 
   /** The language this conversation is being held in.
    *
@@ -296,7 +441,7 @@ export function Chat({
       })
         .then((response) => (response.ok ? response.json() : null))
         .then((body: { conversationId?: number } | null) => {
-          if (body?.conversationId) conversationRef.current = body.conversationId;
+          if (body?.conversationId) adoptConversation(body.conversationId, user);
         })
         .catch(() => {
           /* the transcript is on screen either way */
@@ -419,8 +564,44 @@ export function Chat({
     void sendMessage({ text });
   }
 
+  /** The files that sit after the first `count` messages. A file placed past
+   * the end of the transcript sits at the end of it. */
+  function uploadCards(count: number) {
+    return uploads
+      .filter((file) => Math.min(file.after, messages.length) === count)
+      .map((file) => (
+        <UploadCard
+          key={`upload-${file.id}`}
+          file={file}
+          onRemove={() => {
+            setUploads((all) => all.filter((f) => f.id !== file.id));
+            void fetch("/api/upload", {
+              method: "DELETE",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id: file.id }),
+            });
+          }}
+        />
+      ));
+  }
+
   return (
-    <div className="mx-auto flex h-viewport max-w-3xl flex-col">
+    <div className="flex h-viewport">
+    {authenticated && (
+      <ChatSidebar
+        conversations={conversations}
+        currentId={currentId}
+        disabled={busy || opening || voiceLive}
+        mobileOpen={sidebarOpen}
+        onCloseMobile={() => setSidebarOpen(false)}
+        onOpen={(id) => void openConversation(id)}
+        onPrefetch={(id) => void fetchChat(id)}
+        onNew={newChat}
+        onRename={renameChat}
+        onDelete={deleteChat}
+      />
+    )}
+    <div className="mx-auto flex h-full min-w-0 max-w-3xl flex-1 flex-col">
       <NavBar active="chat" authenticated={authenticated}>
         {isAdmin && (
           <Link
@@ -431,6 +612,31 @@ export function Chat({
           </Link>
         )}
       </NavBar>
+
+      {/* On a phone the chats live behind this button; from md up they are
+          the column on the left. */}
+      {authenticated && !voiceLive && (
+        <div className="flex items-center justify-between border-b border-stone-200 bg-white px-3 py-1.5 md:hidden">
+          <button
+            type="button"
+            onClick={() => setSidebarOpen(true)}
+            className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm text-stone-600 hover:bg-stone-100"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+              <path d="M4 6h16M4 12h16M4 18h10" />
+            </svg>
+            Chats
+          </button>
+          <button
+            type="button"
+            onClick={newChat}
+            disabled={busy || opening}
+            className="rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-sm text-stone-700 hover:bg-stone-100 disabled:opacity-50"
+          >
+            + New chat
+          </button>
+        </div>
+      )}
 
       {/* While a spoken conversation is running, voice takes the screen. The
           transcript is still being written underneath — every turn goes to the
@@ -450,7 +656,7 @@ export function Chat({
         />
       ) : (
       <div ref={scroll.ref} className="relative flex-1 space-y-4 overflow-y-auto px-4 py-6">
-        {messages.length === 0 && (
+        {messages.length === 0 && uploads.length === 0 && (
           <div className="mx-auto mt-16 max-w-xl text-center text-stone-500">
             <p className="text-xl font-medium text-stone-700">
               {firstName
@@ -463,11 +669,12 @@ export function Chat({
                 : "ChatTobiraへようこそ"}
             </p>
             <p className="mt-4 text-sm leading-relaxed">
-              ChatTobira is built to assist students using textbooks, past
-              quizzes and examinations, and other course materials from
-              Ritsumeikan Asia Pacific University (APU). Because these
-              materials are copyright-protected, ChatTobira does not store or
-              retain your chat conversations on the platform.
+              ChatTobira is built to help you with your Japanese homework and
+              any question from Foundation 1 &amp; 2, Foundation 3, and
+              Intermediate grammar and kanji, as well as your other class
+              materials at Ritsumeikan Asia Pacific University (APU). Because
+              these materials are copyright-protected, ChatTobira is open only
+              to APU students.
             </p>
             <p className="mt-2 text-sm leading-relaxed">
               You are welcome to take notes or save your own study materials
@@ -482,11 +689,12 @@ export function Chat({
           </div>
         )}
 
-        {messages.map((message) => {
+        {uploadCards(0)}
+        {messages.map((message, index) => {
           const meta = (message.metadata ?? {}) as MessageMeta;
           return (
+            <Fragment key={message.id}>
             <div
-              key={message.id}
               className={
                 message.role === "user"
                   ? "ml-auto max-w-[85%] break-words rounded-2xl rounded-br-sm bg-stone-900 px-4 py-2.5 text-sm text-white"
@@ -533,6 +741,8 @@ export function Chat({
                 </div>
               )}
             </div>
+            {uploadCards(index + 1)}
+            </Fragment>
           );
         })}
 
@@ -573,69 +783,6 @@ export function Chat({
           onSubmit={submit}
           className="border-t border-stone-200 bg-white px-4 py-3"
         >
-          {!voiceLive && attached.length > 0 && (
-            <ul className="mb-2 flex flex-wrap gap-2">
-              {attached.map((file) => (
-                <li
-                  key={file.id}
-                  className={`flex max-w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs ${
-                    file.status === "failed"
-                      ? "border-red-200 bg-red-50 text-red-700"
-                      : "border-stone-200 bg-stone-50 text-stone-700"
-                  }`}
-                >
-                  <span className="truncate font-medium">{file.filename}</span>
-                  <span className="shrink-0 text-stone-500">
-                    {file.status === "uploading"
-                      ? "uploading…"
-                      : file.status === "reading"
-                        ? "reading…"
-                        : file.status === "failed"
-                          ? (file.detail ?? "failed")
-                          : (file.detail ?? "ready")}
-                  </span>
-                  {file.status === "ready" && (
-                    <button
-                      type="button"
-                      title="Offer this to your teacher for the shared library. It stays private until they approve it."
-                      onClick={() => {
-                        setAttached((all) =>
-                          all.map((f) =>
-                            f.id === file.id
-                              ? { ...f, detail: "sent to your teacher" }
-                              : f,
-                          ),
-                        );
-                        void fetch("/api/upload", {
-                          method: "PATCH",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({ id: file.id, action: "share" }),
-                        });
-                      }}
-                      className="shrink-0 text-stone-400 underline decoration-dotted hover:text-stone-700"
-                    >
-                      share
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    aria-label={`Remove ${file.filename}`}
-                    onClick={() => {
-                      setAttached((all) => all.filter((f) => f.id !== file.id));
-                      void fetch("/api/upload", {
-                        method: "DELETE",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ id: file.id }),
-                      });
-                    }}
-                    className="shrink-0 text-stone-400 hover:text-stone-700"
-                  >
-                    ×
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
 
           <div className="flex gap-2">
           <input
@@ -669,11 +816,13 @@ export function Chat({
             <UploadButton
               defaultLevel={level}
               disabled={busy}
-              onAttached={(file) => setAttached((all) => [...all, file])}
+              onAttached={(file) => {
+                setUploads((all) => [...all, { ...file, after: messagesRef.current.length }]);
+                // The file just landed at the bottom of the transcript.
+                requestAnimationFrame(() => scroll.scrollToBottom());
+              }}
               onUpdate={(id, patch) =>
-                setAttached((all) =>
-                  all.map((f) => (f.id === id ? { ...f, ...patch } : f)),
-                )
+                setUploads((all) => all.map((f) => (f.id === id ? { ...f, ...patch } : f)))
               }
             />
           )}
@@ -701,7 +850,18 @@ export function Chat({
         </form>
       )}
     </div>
+    </div>
   );
+}
+
+/** The first thing the student asked, which names a new chat in the list —
+ * the same sixty characters the server titles it with. */
+function firstQuestion(messages: UIMessage[]): string | undefined {
+  const first = messages.find((m) => m.role === "user");
+  return first?.parts
+    .filter((part): part is { type: "text"; text: string } => part.type === "text")
+    .map((part) => part.text)
+    .join(" ");
 }
 
 /** The server's own sentence for a spent allowance, which names the time it
@@ -714,6 +874,74 @@ function quotaMessage(raw: string): string {
     /* not JSON */
   }
   return "You have used your questions and practice tests for now. More are available within 5 hours.";
+}
+
+/** A file the student added, shown in the transcript as their own turn: the
+ * page is part of the conversation, not something parked beside it. */
+function UploadCard({
+  file,
+  onRemove,
+}: {
+  file: ChatUpload;
+  onRemove: () => void;
+}) {
+  const failed = file.status === "failed";
+  const state =
+    file.status === "uploading"
+      ? "Uploading…"
+      : file.status === "reading"
+        ? "Reading…"
+        : failed
+          ? (file.detail ?? "Could not be read")
+          : (file.detail ?? "Ready — ask about it");
+  return (
+    <div
+      className={`ml-auto flex w-fit max-w-[85%] min-w-0 items-center gap-3 rounded-2xl rounded-br-sm border px-3 py-2.5 text-sm shadow-sm ${
+        failed ? "border-red-200 bg-red-50 text-red-800" : "border-stone-200 bg-white text-stone-800"
+      }`}
+    >
+      <span
+        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
+          failed ? "bg-red-100 text-red-600" : "bg-stone-100 text-stone-500"
+        }`}
+        aria-hidden="true"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+          <path d="M14 3v5h5" />
+        </svg>
+      </span>
+      <span className="min-w-0">
+        {file.status === "ready" ? (
+          // Opens in a new tab, in the browser's own viewer: the view route
+          // hands back a short-lived link that Storage serves inline.
+          <a
+            href={`/api/upload/view?id=${file.id}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={`Open ${file.filename}`}
+            className="block truncate font-medium underline decoration-stone-300 underline-offset-2 hover:decoration-stone-700"
+          >
+            {file.filename}
+          </a>
+        ) : (
+          <span className="block truncate font-medium">{file.filename}</span>
+        )}
+        <span className={`block text-xs ${failed ? "text-red-700" : "text-stone-500"}`}>
+          {file.status === "ready" && !file.detail ? "Ready — tap to view, or ask about it" : state}
+        </span>
+      </span>
+      <button
+        type="button"
+        aria-label={`Remove ${file.filename} from this chat`}
+        title="Remove from this chat"
+        onClick={onRemove}
+        className="shrink-0 self-start text-stone-400 hover:text-stone-700"
+      >
+        ×
+      </button>
+    </div>
+  );
 }
 
 /** A small mic glyph for the "this turn was spoken" label. */
