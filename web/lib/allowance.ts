@@ -46,6 +46,40 @@ export async function spendAllowance(
     : { ok: false, exhausted: true, resetsAt: row.resets_at };
 }
 
+/** Give back what was spent for something that then never happened — a
+ * minute of conversation whose token Google did not issue.
+ *
+ * Service role only, and on purpose: `consume_allowance` refuses a negative
+ * amount, because a refund a student could call would be an unlimited
+ * allowance. The server refunds only what it spent in the same request. A
+ * read then a write rather than one statement, which PostgREST cannot express;
+ * the window is one student's, so there is nobody to race. Best effort: a
+ * refund that fails costs the student one minute, never the call. */
+export async function refundAllowance(
+  service: SupabaseClient,
+  userId: string,
+  kind: AllowanceKind,
+  amount: number,
+): Promise<void> {
+  try {
+    const { data } = await service
+      .from("usage_windows")
+      .select("used")
+      .eq("user_id", userId)
+      .eq("kind", kind)
+      .maybeSingle();
+    const used = (data as { used?: number } | null)?.used;
+    if (typeof used !== "number") return;
+    await service
+      .from("usage_windows")
+      .update({ used: Math.max(0, used - amount) })
+      .eq("user_id", userId)
+      .eq("kind", kind);
+  } catch {
+    /* the student loses a minute, not the call */
+  }
+}
+
 /** "3:40 PM" in Japan time — where every student using this app is. */
 export function resetTime(resetsAt: string | null | undefined): string | null {
   if (!resetsAt) return null;

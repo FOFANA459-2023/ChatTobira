@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { exhaustedMessage, resetTime, spendAllowance } from "../allowance";
+import { exhaustedMessage, refundAllowance, resetTime, spendAllowance } from "../allowance";
 import { formatLeft } from "@/components/voice-session";
 
 describe("resetTime", () => {
@@ -60,5 +60,44 @@ describe("formatLeft", () => {
     expect(formatLeft(485)).toBe("8:05");
     expect(formatLeft(0)).toBe("0:00");
     expect(formatLeft(-3)).toBe("0:00");
+  });
+});
+
+describe("refundAllowance", () => {
+  /** A service client over one usage_windows row. */
+  function service(used: number | null) {
+    const updates: { used: number }[] = [];
+    const filters: [string, unknown][] = [];
+    const chain = {
+      select: () => chain,
+      eq: (column: string, value: unknown) => {
+        filters.push([column, value]);
+        return chain;
+      },
+      maybeSingle: async () => ({ data: used === null ? null : { used } }),
+      update: (values: { used: number }) => {
+        updates.push(values);
+        return chain;
+      },
+    };
+    return { client: { from: () => chain } as never, updates, filters };
+  }
+
+  it("gives back the minute a failed token cost, for that student and kind only", async () => {
+    const { client, updates, filters } = service(240);
+    await refundAllowance(client, "user-1", "voice", 60);
+    expect(updates).toEqual([{ used: 180 }]);
+    expect(filters).toContainEqual(["user_id", "user-1"]);
+    expect(filters).toContainEqual(["kind", "voice"]);
+  });
+
+  it("never takes the count below zero, and does nothing without a window", async () => {
+    const low = service(30);
+    await refundAllowance(low.client, "user-1", "voice", 60);
+    expect(low.updates).toEqual([{ used: 0 }]);
+
+    const none = service(null);
+    await refundAllowance(none.client, "user-1", "voice", 60);
+    expect(none.updates).toEqual([]);
   });
 });

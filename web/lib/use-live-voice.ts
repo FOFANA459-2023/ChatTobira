@@ -236,6 +236,12 @@ const UNMETERED_SECONDS = 24 * 60 * 60;
 /** Hard stop for the handover: move to the next token by now even if the
  * student is mid-sentence, rather than let this one expire under them. */
 const HANDOVER_DEADLINE_MS = 700;
+/** How many times moving the call onto a new connection is tried before it
+ * gives up, and the first pause between tries (doubling after each): 0.5s,
+ * 1s, 2s, 4s — about eight seconds in all, the length of the overlap a
+ * minute's token already allows for its handover. */
+const RENEW_ATTEMPTS = 5;
+const RENEW_BACKOFF_MS = 500;
 /** Turns of conversation a new session is seeded with; the session route
  * accepts at most this many. */
 const MAX_HISTORY = 40;
@@ -581,41 +587,72 @@ export function useLiveConversation(options: {
     }
     const history = [...historyRef.current, ...pending].slice(-MAX_HISTORY);
     const practice = { mode: modeRef.current, subject: subjectRef.current };
-    const minted = await requestToken(
-      stillUp || !handleRef.current
-        ? { language: languageRef.current, history, ...practice }
-        : { language: languageRef.current, resume: handleRef.current, ...practice },
-    );
-    if (!activeRef.current) {
-      reconnectingRef.current = false;
-      return;
-    }
-    if (!minted.ok) {
-      reconnectingRef.current = false;
-      if (minted.status === 429) {
-        // Out of minutes. The minute in progress is paid for and carries on;
-        // the call ends when it does.
-        outOfTimeRef.current = true;
-        setNotice(minted.message ?? null);
-        if (socketRef.current?.readyState !== WebSocket.OPEN) {
-          flushExchange();
-          setError("quota");
-          teardown();
-        }
+
+    // One failed attempt used to end the call. A token request that timed
+    // out, a 502 from Google, a socket that did not finish its setup — each
+    // hung up on the student mid-conversation, once a minute gave it ten
+    // chances in a ten-minute call, and the minute they had already paid for
+    // was usually still running on the old connection. So a renewal is tried
+    // several times over, with a growing pause between, and the call only
+    // ends if every attempt fails. The old connection carries on meanwhile;
+    // once it is gone, what the student says is queued for the new one.
+    let useResume = !stillUp && Boolean(handleRef.current);
+    let minted: Extract<Minted, { ok: true }> | null = null;
+    let next: WebSocket | null = null;
+    for (let attempt = 0; attempt < RENEW_ATTEMPTS && !next; attempt += 1) {
+      if (attempt > 0) {
+        await new Promise((resolve) => setTimeout(resolve, RENEW_BACKOFF_MS * 2 ** (attempt - 1)));
+      }
+      if (!activeRef.current) {
+        reconnectingRef.current = false;
         return;
       }
-      setError("network");
-      teardown();
-      return;
+      const result = await requestToken(
+        useResume && handleRef.current
+          ? { language: languageRef.current, resume: handleRef.current, ...practice }
+          : { language: languageRef.current, history, ...practice },
+      );
+      if (!activeRef.current) {
+        reconnectingRef.current = false;
+        return;
+      }
+      if (!result.ok) {
+        if (result.status === 429) {
+          // Out of minutes. The minute in progress is paid for and carries
+          // on; the call ends when it does.
+          reconnectingRef.current = false;
+          outOfTimeRef.current = true;
+          setNotice(result.message ?? null);
+          if (socketRef.current?.readyState !== WebSocket.OPEN) {
+            flushExchange();
+            setError("quota");
+            teardown();
+          }
+          return;
+        }
+        // Signed out mid-call: no retry can fix that.
+        if (result.status === 401) break;
+        console.warn(`live voice renewal ${attempt + 1}/${RENEW_ATTEMPTS}: token ${result.status}`);
+        continue;
+      }
+      minted = result;
+      next = await openSocket(result.token, result.model, handleMessage, handleClose);
+      if (!activeRef.current) {
+        reconnectingRef.current = false;
+        next?.close(1000);
+        return;
+      }
+      if (!next) {
+        console.warn(`live voice renewal ${attempt + 1}/${RENEW_ATTEMPTS}: socket did not open`);
+        // A resumed session that will not set up is not worth a second try:
+        // start fresh from the transcript instead.
+        useResume = false;
+      }
     }
-    const next = await openSocket(minted.token, minted.model, handleMessage, handleClose);
-    if (!activeRef.current) {
+    if (!next || !minted) {
       reconnectingRef.current = false;
-      next?.close(1000);
-      return;
-    }
-    if (!next) {
-      reconnectingRef.current = false;
+      // Whatever the old connection still carries is kept on screen.
+      flushExchange();
       setError("network");
       teardown();
       return;
@@ -635,6 +672,13 @@ export function useLiveConversation(options: {
     reconnectingRef.current = false;
     if (!activeRef.current) {
       next.close(1000);
+      return;
+    }
+    // The new connection dropped while it waited for a quiet moment. Its
+    // close was ignored — it was not the live one yet — so switching to it now
+    // would leave the call silent. Renew again instead.
+    if (next.readyState !== WebSocket.OPEN) {
+      void reconnectRef.current();
       return;
     }
 
