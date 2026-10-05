@@ -12,11 +12,14 @@ function withCookies(cookie: string): Request {
 }
 
 describe("trial metering", () => {
-  it("offers three chat questions, one practice test, and its coaching", () => {
-    expect(TRIALS.chat.limit).toBe(3);
-    expect(TRIALS.quiz.limit).toBe(1);
-    // 2 feedbacks covers checking the free test and one retake of it.
-    expect(TRIALS.feedback.limit).toBe(2);
+  it("offers the relaxed pitch allowances", () => {
+    // TEMPORARY, 2026-10-05: raised for the school pitch. Normally 3, 1 and 2
+    // — see the block above TRIALS in lib/trial.ts. The tests below are
+    // written against the constants rather than the numbers, so they keep
+    // testing the metering itself when these are restored.
+    expect(TRIALS.chat.limit).toBe(100);
+    expect(TRIALS.quiz.limit).toBe(25);
+    expect(TRIALS.feedback.limit).toBe(50);
   });
 
   it("counts a visitor with no cookie as having spent nothing", () => {
@@ -34,11 +37,11 @@ describe("trial metering", () => {
   it("keeps the two trials independent", () => {
     // Sampling the chat must not consume the free practice test, and vice
     // versa: they are different tastes of the product.
-    const chatSpent = withCookies("tobira_trial=3");
+    const chatSpent = withCookies(`tobira_trial=${TRIALS.chat.limit}`);
     expect(trialExhausted(chatSpent, "chat")).toBe(true);
     expect(trialExhausted(chatSpent, "quiz")).toBe(false);
 
-    const quizSpent = withCookies("tobira_quiz_trial=1");
+    const quizSpent = withCookies(`tobira_quiz_trial=${TRIALS.quiz.limit}`);
     expect(trialExhausted(quizSpent, "quiz")).toBe(true);
     expect(trialExhausted(quizSpent, "chat")).toBe(false);
   });
@@ -57,9 +60,10 @@ describe("trial metering", () => {
   });
 
   it("counts a trial as exhausted only once the limit is reached", () => {
-    expect(trialExhausted(withCookies("tobira_trial=2"), "chat")).toBe(false);
-    expect(trialExhausted(withCookies("tobira_trial=3"), "chat")).toBe(true);
-    expect(trialExhausted(withCookies("tobira_trial=9"), "chat")).toBe(true);
+    const limit = TRIALS.chat.limit;
+    expect(trialExhausted(withCookies(`tobira_trial=${limit - 1}`), "chat")).toBe(false);
+    expect(trialExhausted(withCookies(`tobira_trial=${limit}`), "chat")).toBe(true);
+    expect(trialExhausted(withCookies(`tobira_trial=${limit + 6}`), "chat")).toBe(true);
   });
 
   it("issues a cookie the page cannot casually clear", () => {
