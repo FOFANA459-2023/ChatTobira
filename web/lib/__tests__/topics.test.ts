@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { aspectOf, printedForms, topicRefs } from "@/lib/topics";
+import {
+  aspectOf,
+  divisionPattern,
+  printedForms,
+  sectionForAspect,
+  topicRefs,
+} from "@/lib/topics";
 import {
   broadenQuery,
   isThinResult,
@@ -163,5 +169,145 @@ describe("rankTopicPages", () => {
       null,
     );
     expect(ranked[0].documents.is_citable).toBe(true);
+  });
+});
+
+describe("aspectOf — kanji and vocabulary named together", () => {
+  // The question that exposed this: "list topic 7 kanji vocab" was read as
+  // the aspect "vocabulary", so the pages chosen were the front half's word
+  // lists, which carry no kanji table — and the answer said Topic 7 has no
+  // kanji list printed on its pages. It has four pages of them.
+  it("reads a kanji vocabulary question as kanji", () => {
+    for (const text of [
+      "list topic 7 kanji vocab",
+      "topic 7 kanji vocabulary",
+      "topic 7 kanji vocab list",
+      "lesson 5 kanji vocabulary",
+      "漢字の語彙を教えて",
+    ]) {
+      expect(aspectOf(text)?.label).toBe("kanji");
+    }
+  });
+
+  it("still reads a plain vocabulary question as vocabulary", () => {
+    expect(aspectOf("list all the vocabularies for topic 14")?.label).toBe("vocabulary");
+    expect(aspectOf("topic 7 vocabulary")?.label).toBe("vocabulary");
+    expect(aspectOf("語彙を教えて")?.label).toBe("vocabulary");
+  });
+});
+
+describe("sectionForAspect", () => {
+  it("sends a kanji question to the kanji half and grammar to the front", () => {
+    expect(sectionForAspect(aspectOf("topic 7 kanji"))).toBe("kanji");
+    expect(sectionForAspect(aspectOf("topic 7 grammar"))).toBe("grammar");
+    expect(sectionForAspect(aspectOf("topic 7 reading"))).toBe("grammar");
+  });
+
+  it("leaves a plain vocabulary question to be decided on the words", () => {
+    // Both halves are honestly vocabulary: the front prints 新しい語彙 and the
+    // back is titled 漢字・語彙練習.
+    expect(sectionForAspect(aspectOf("topic 7 vocabulary"))).toBeNull();
+    expect(sectionForAspect(null)).toBeNull();
+  });
+});
+
+describe("divisionPattern", () => {
+  const matches = (ref: Parameters<typeof divisionPattern>[0], text: string) =>
+    new RegExp(divisionPattern(ref)).test(text);
+  const topic = (number: number) => ({ marker: `T${number}`, number, kind: "topic" as const });
+
+  it("matches every spelling the books print", () => {
+    for (const text of ["トピック 7 何が好きですか", "トピック7", "Topic 7 何が好きですか", "Topic7 はじめまして", "T7 G1"]) {
+      expect(matches(topic(7), text)).toBe(true);
+    }
+  });
+
+  it("does not let Topic 1 match Topic 10 through Topic 20", () => {
+    // Measured on the live corpus before the guard: 304 chunks matched the
+    // Topic 1 forms and 26 were Topic 1. On Foundation 3, which carries
+    // topics 11-20, not one chunk matching 「トピック 1」 was Topic 1.
+    for (const n of [10, 14, 17, 20]) {
+      expect(matches(topic(1), `トピック ${n} バッグを忘れてしまいました`)).toBe(false);
+      expect(matches(topic(1), `Topic ${n} どうしましたか`)).toBe(false);
+    }
+    expect(matches(topic(1), "トピック 1 はじめまして")).toBe(true);
+    expect(matches(topic(2), "Topic 20 プレゼンテーション")).toBe(false);
+  });
+
+  it("does not let the bare T-number match the tail of another token", () => {
+    expect(matches(topic(7), "NT7")).toBe(false);
+    expect(matches(topic(7), "〈NT〉で活動します")).toBe(false);
+  });
+
+  it("matches a lesson the way the Intermediate books print it", () => {
+    const lesson = { marker: "T5", number: 5, kind: "lesson" as const };
+    expect(matches(lesson, "第5課 先輩からのメッセージ")).toBe(true);
+    expect(matches(lesson, "第 5 課")).toBe(true);
+    expect(matches(lesson, "Lesson 5")).toBe(true);
+    expect(matches(lesson, "第15課")).toBe(false);
+  });
+});
+
+describe("rankTopicPages — choosing the half of the book that was asked for", () => {
+  const ref = { marker: "T7", number: 7, kind: "topic" as const };
+  const page = (content: string, section: "grammar" | "kanji") => ({
+    content,
+    document_id: 5,
+    documents: { is_citable: true },
+    section,
+  });
+
+  it("puts the kanji half first for a kanji question", () => {
+    // Both pages print the same running header and both are citable textbook
+    // pages, and the front half says "kanji" too — which is why counting the
+    // aspect's words alone used to rank them level, and the front half won on
+    // being earlier in the book.
+    const ranked = rankTopicPages(
+      [
+        page("Topic 7 何が好きですか\n# New vocabulary\n## Verbs\n…check the following kanji 漢字", "grammar"),
+        page("Topic 7 何が好きですか\n## I. Kanji Reading and Writing\n| 5 | 鳥 | とり |", "kanji"),
+      ],
+      ref,
+      aspectOf("list topic 7 kanji vocab"),
+      "kanji",
+    );
+    expect(ranked[0].section).toBe("kanji");
+  });
+
+  it("puts the front half first for a grammar question", () => {
+    const ranked = rankTopicPages(
+      [
+        page("Topic 7\n## Ⅱ. Katakana Words\n| チョコレート | chocolate |", "kanji"),
+        page("Topic 7 何が好きですか\n6. Noun + にします\nします usually means to do…", "grammar"),
+      ],
+      ref,
+      aspectOf("topic 7 grammar"),
+      "grammar",
+    );
+    expect(ranked[0].section).toBe("grammar");
+  });
+
+  it("ranks a contents page below the pages that teach the topic", () => {
+    const ranked = rankTopicPages(
+      [
+        page("# 目次 Contents\n## Topic 7 何が好きですか 94\n**Grammar**: 1. ～ませんか", "grammar"),
+        page("Topic 7 何が好きですか\n## I. Kanji Reading and Writing\n| 5 | 鳥 | とり |", "kanji"),
+      ],
+      ref,
+      aspectOf("topic 7 kanji"),
+      "kanji",
+    );
+    expect(ranked[0].section).toBe("kanji");
+    expect(ranked[1].content).toContain("目次");
+  });
+
+  it("is unchanged when nobody said which half", () => {
+    const ranked = rankTopicPages(
+      [page("Topic 7 notes", "kanji"), page("Topic 7 新しい語彙 vocabulary", "grammar")],
+      ref,
+      aspectOf("topic 7 vocabulary"),
+      null,
+    );
+    expect(ranked[0].content).toContain("語彙");
   });
 });

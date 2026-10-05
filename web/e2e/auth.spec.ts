@@ -1,5 +1,11 @@
 import { expect, test } from "@playwright/test";
 
+// The limits themselves, not a copy of them: these tests are about the gate,
+// and they must keep testing it when the numbers move. They moved on
+// 2026-10-05, relaxed for the school pitch, and a literal "spent" cookie
+// stopped being spent.
+import { TRIALS } from "../lib/trial";
+
 test("unauthenticated visitor gets the trial chat, not a redirect", async ({
   page,
 }) => {
@@ -98,7 +104,7 @@ test("quiz API requires sign-in once the free test is spent", async ({ request }
   // Its own test so the cookie jar starts empty and this header is the only
   // trial state in play.
   const response = await request.post("/api/quiz", {
-    headers: { cookie: "tobira_quiz_trial=1" },
+    headers: { cookie: `tobira_quiz_trial=${TRIALS.quiz.limit}` },
     data: { documentId: 1, kind: "grammar", count: 9 },
   });
   expect(response.status()).toBe(401);
@@ -109,7 +115,7 @@ test("the chat trial does not consume the quiz trial", async ({ request }) => {
   // Separate cookies on purpose: sampling one part of the product must not
   // silently spend the other.
   const response = await request.post("/api/quiz", {
-    headers: { cookie: "tobira_trial=3" },
+    headers: { cookie: `tobira_trial=${TRIALS.chat.limit}` },
     data: { documentId: 1, kind: "grammar", count: 9 },
   });
   expect(response.status()).not.toBe(401);

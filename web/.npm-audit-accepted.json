@@ -20,5 +20,11 @@
     "reason": "Transitive under @ai-sdk/deepseek. Production runs on Cloudflare Workers, where the platform's own fetch is used and undici is not in the request path; it is reachable only from Node during build and test. The fix is @ai-sdk/deepseek@3, a major upgrade whose API this app pins deliberately.",
     "fix": "@ai-sdk/deepseek@3.0.47 (semver-major)",
     "review": "2026-12-01"
+  },
+  "@fastify/busboy": {
+    "advisory": "Denial of Service via prototype-named multipart part header",
+    "reason": "undici's own multipart parser, one level further down the chain already accepted above: @ai-sdk/deepseek -> @ai-sdk/provider-utils -> undici -> @fastify/busboy. Its reachability is therefore a strict subset of undici's, which production does not reach at all — Cloudflare Workers uses the platform's own fetch, so undici is in the Node build and test path only. Beyond that, the advisory needs an attacker-controlled multipart RESPONSE to parse, and the only thing this dependency talks to is the DeepSeek API, which answers in JSON and SSE. Nothing in the app parses a multipart response from anywhere. Same fix as undici, the same semver-major @ai-sdk/deepseek@3, so it carries the same review date and the two come back together rather than one at a time.",
+    "fix": "@ai-sdk/deepseek@3.0.58 (semver-major)",
+    "review": "2026-12-01"
   }
 }

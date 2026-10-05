@@ -11,12 +11,25 @@
  * questions can still sit one practice test.
  */
 
+/* TEMPORARY — RELAXED FOR THE SCHOOL PITCH, 2026-10-05.
+ *
+ * The limits below are raised so that nobody demonstrating or evaluating the
+ * app runs into a wall mid-sentence. Nothing is removed: the cookies, the
+ * counting, the sign-up prompt and the wording all still work exactly as they
+ * did, and they still bite — just at numbers a demonstration cannot reach.
+ * They stay finite on purpose, so a loop or a crawler cannot spend the
+ * model free tiers overnight while this is in place.
+ *
+ * Normal values are noted against each line. Restore by reverting the commit
+ * this block arrived in, which also restores the signed-in allowance
+ * (supabase/migrations/0015_relax_quotas_for_pitch.sql).
+ */
 export const TRIALS = {
-  chat: { cookie: "tobira_trial", limit: 3 },
-  quiz: { cookie: "tobira_quiz_trial", limit: 1 },
+  chat: { cookie: "tobira_trial", limit: 100 }, // normally 3
+  quiz: { cookie: "tobira_quiz_trial", limit: 25 }, // normally 1
   // Post-test coaching accompanies the free test; 2 covers a retake of the
   // same paper without opening an unmetered model endpoint to anonymous use.
-  feedback: { cookie: "tobira_feedback_trial", limit: 2 },
+  feedback: { cookie: "tobira_feedback_trial", limit: 50 }, // normally 2
 } as const;
 
 export type TrialKind = keyof typeof TRIALS;

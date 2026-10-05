@@ -24,8 +24,14 @@ const TTL_MS = 10 * 60 * 1000;
  * and the second slot covers the one they just switched from. Two more slots
  * cover the past-paper exemplar pools, which are keyed by level rather than
  * by document and are read on every generation for that level — evicting one
- * to make room for a book would mean re-reading it on the next test. */
-const MAX_ENTRIES = 4;
+ * to make room for a book would mean re-reading it on the next test.
+ *
+ * The fifth is the section map (`sections`), which is read on every question
+ * naming a topic or a lesson. It is a handful of page numbers rather than a
+ * pool, so it is not sized like one and must not cost one: at four, a student
+ * who asked a question and then started a test paid for the book to be read
+ * again, because answering had evicted it. */
+const MAX_ENTRIES = 5;
 
 interface Entry<T> {
   value: T;

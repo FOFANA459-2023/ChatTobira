@@ -19,10 +19,10 @@ describe("resetTime", () => {
 describe("exhaustedMessage", () => {
   it("names the allowance and the time it comes back", () => {
     expect(exhaustedMessage("chat", "2026-09-20T06:40:00Z")).toBe(
-      "You have used your 20 questions and practice tests for now. More are available at 3:40 PM (Japan time).",
+      "You have used your 1000 questions and practice tests for now. More are available at 3:40 PM (Japan time).",
     );
     expect(exhaustedMessage("voice", "2026-09-20T06:40:00Z")).toBe(
-      "You have used your 10 minutes of conversation for now. More are available at 3:40 PM (Japan time).",
+      "You have used your 240 minutes of conversation for now. More are available at 3:40 PM (Japan time).",
     );
   });
 
