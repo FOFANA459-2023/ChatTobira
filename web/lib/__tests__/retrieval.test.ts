@@ -3,9 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   buildCitations,
   isSmallTalk,
+  retrieveByTopic,
   tokensForQuery,
   type RetrievedChunk,
 } from "../retrieval";
+import { clearPoolCache } from "@/lib/corpus-cache";
+import { aspectOf, divisionPattern, topicRefs } from "@/lib/topics";
 
 function chunk(overrides: Partial<RetrievedChunk>): RetrievedChunk {
   return {
@@ -109,5 +112,63 @@ describe("buildCitations", () => {
       ),
     );
     expect(citations).toHaveLength(4);
+  });
+});
+
+describe("retrieveByTopic — which arms a division question reaches for", () => {
+  /** Records every filter each arm applies, and serves no rows. */
+  function recorder() {
+    const queries: Record<string, unknown>[] = [];
+    const from = (table: string) => {
+      const ops: Record<string, unknown> = { table };
+      queries.push(ops);
+      const chain: Record<string, unknown> = {};
+      const record = (name: string) => (...args: unknown[]) => {
+        ops[name] = args.length === 1 ? args[0] : args;
+        return chain;
+      };
+      for (const method of ["select", "eq", "filter", "order", "contains", "in", "limit"]) {
+        chain[method] = record(method);
+      }
+      chain.then = (resolve: (value: { data: unknown[] }) => unknown) => resolve({ data: [] });
+      return chain;
+    };
+    return { queries, db: { from } as unknown as Parameters<typeof retrieveByTopic>[0] };
+  }
+
+  const arm = (queries: Record<string, unknown>[], key: string) =>
+    queries.find((q) => q.table === "chunks" && key in q);
+
+  it("asks for a topic's handouts from the Foundation course only", async () => {
+    clearPoolCache();
+    const { queries, db } = recorder();
+    await retrieveByTopic(db, topicRefs("topic 7 kanji"), aspectOf("topic 7 kanji"));
+    expect(arm(queries, "contains")?.in).toEqual(["documents.level", ["F2", "F3"]]);
+  });
+
+  it("asks for a lesson's handouts from the Intermediate course only", async () => {
+    // "Topic 7" and "Lesson 7" both reduce to the marker T7, and every
+    // handout in the corpus is Foundation — so an Intermediate student asking
+    // for Lesson 7 was handed Foundation Topic 7's grammar sheets.
+    clearPoolCache();
+    const { queries, db } = recorder();
+    await retrieveByTopic(db, topicRefs("lesson 7 kanji"), aspectOf("lesson 7 kanji"));
+    expect(arm(queries, "contains")?.in).toEqual(["documents.level", ["INT"]]);
+  });
+
+  it("looks for the division by what is printed, with both guards", async () => {
+    clearPoolCache();
+    const { queries, db } = recorder();
+    await retrieveByTopic(db, topicRefs("topic 1 kanji"), aspectOf("topic 1 kanji"));
+    // Both this arm and the section map filter on content; only this one
+    // takes a row budget.
+    const pages = queries.find(
+      (q) => q.table === "chunks" && "filter" in q && "limit" in q,
+    ) as { filter: unknown[]; limit: number } | undefined;
+    expect(pages?.filter[1]).toBe("imatch");
+    expect(pages?.filter[2]).toBe(divisionPattern({ marker: "T1", number: 1, kind: "topic" }));
+    // Above the 36 chunks the widest division in the corpus matches, so both
+    // halves of a book are read before anything is ranked away.
+    expect(pages?.limit).toBeGreaterThanOrEqual(80);
   });
 });

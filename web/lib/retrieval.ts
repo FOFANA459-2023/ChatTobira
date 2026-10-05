@@ -2,7 +2,15 @@ import TinySegmenter from "tiny-segmenter";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { pageSpellings, pageWindow, parsePageQuery, type PageQuery } from "./pages";
-import { printedForms, topicRefs, type Aspect, type TopicRef } from "./topics";
+import { loadSectionMap, sectionOf, type Section, type SectionMap } from "./sections";
+import {
+  divisionPattern,
+  printedForms,
+  sectionForAspect,
+  topicRefs,
+  type Aspect,
+  type TopicRef,
+} from "./topics";
 
 /** One retrieved chunk from match_chunks. */
 export interface RetrievedChunk {
@@ -659,34 +667,68 @@ export async function retrieveByTopic(
   const select =
     "id, document_id, pdf_page, book_page, content, metadata, documents!inner(title, doc_type, is_citable, topic, topics)";
 
-  const perRef = await Promise.all(
-    refs.map(async (ref) => {
-      const printed = printedForms(ref);
-      const [pages, handouts] = await Promise.all([
-        supabase
-          .from("chunks")
-          .select(select)
-          .or(printed.map((form) => `content.ilike.%${form}%`).join(","))
-          .limit(24)
-          .then(({ data }) => data ?? []),
-        supabase
-          .from("chunks")
-          .select(select)
-          .contains("documents.topics", [ref.marker])
-          .limit(8)
-          .then(({ data }) => data ?? []),
-      ]);
-      // The client types an embedded resource as an array; these rows are
-      // shaped by the select above and only read for ranking.
-      return rankTopicPages(
-        [...pages, ...handouts] as unknown as TopicPageRow[],
-        ref,
-        aspect,
-      ).slice(0, limit);
-    }),
+  // The section map runs alongside the row queries rather than before them:
+  // it is only needed to rank what comes back, and it is cached for the
+  // corpus TTL, so a cold isolate pays one small query in parallel and a
+  // warm one pays nothing.
+  const wanted = sectionForAspect(aspect);
+  const [sections, perRef] = await Promise.all([
+    loadSectionMap(supabase).catch(
+      () => ({ kanjiFrom: new Map(), allKanji: new Set() }) as SectionMap,
+    ),
+    Promise.all(
+      refs.map(async (ref) => {
+        // One boundary-guarded pattern instead of an ILIKE per spelling, so
+        // Topic 1 is Topic 1 and not Topic 10-20. See divisionPattern.
+        const [pages, handouts] = await Promise.all([
+          supabase
+            .from("chunks")
+            .select(select)
+            .filter("content", "imatch", divisionPattern(ref))
+            // Comfortably above the 36 chunks the widest division in the
+            // corpus matches, so both halves of a book are always read and
+            // nothing is dropped before it has been ranked.
+            .limit(80)
+            .then(({ data }) => data ?? []),
+          // Handouts, found by the topic their folder name gave them at
+          // ingest — and scoped to the course that numbers its divisions that
+          // way. "Topic 7" and "Lesson 7" both reduce to the marker T7, but
+          // they are divisions of different courses: topics are how the
+          // Foundation books count and lessons are how the Intermediate set
+          // counts, and the seventh of one has nothing to do with the seventh
+          // of the other. Every handout in the corpus is Foundation (F2/F3),
+          // so an Intermediate question asking for Lesson 7 was being handed
+          // Foundation Topic 7's grammar sheets and past papers. The
+          // Intermediate set carries its own kanji volume, which the arm
+          // above finds by what is printed on the page.
+          supabase
+            .from("chunks")
+            .select(select)
+            .contains("documents.topics", [ref.marker])
+            .in("documents.level", ref.kind === "lesson" ? ["INT"] : ["F2", "F3"])
+            .limit(8)
+            .then(({ data }) => data ?? []),
+        ]);
+        return [...pages, ...handouts];
+      }),
+    ),
+  ]);
+
+  // The client types an embedded resource as an array; these rows are
+  // shaped by the select above and only read for ranking.
+  const ranked = perRef.map((rows, i) =>
+    rankTopicPages(
+      (rows as unknown as TopicPageRow[]).map((row) => ({
+        ...row,
+        section: sectionOf(row.document_id ?? 0, row.pdf_page ?? null, sections),
+      })),
+      refs[i],
+      aspect,
+      wanted,
+    ).slice(0, limit),
   );
 
-  return perRef.flat().map((row) => toRetrieved(row));
+  return ranked.flat().map((row) => toRetrieved(row));
 }
 
 /** Of the pages carrying a division's header, the ones worth reading.
@@ -699,13 +741,27 @@ export async function retrieveByTopic(
  */
 export interface TopicPageRow {
   content: string;
+  document_id?: number;
+  pdf_page?: number | null;
   documents?: { is_citable?: boolean } | null;
+  /** Which half of its book the page is in, when the caller worked it out. */
+  section?: Section;
 }
+
+/** A contents page or an index, which names a topic without teaching it.
+ *
+ * These rank well on every other signal — the topic's header is right at the
+ * top, and they are textbook pages — and they are nearly useless as material:
+ * the contents page for Topic 7 is a line listing its grammar points and a
+ * page number. They used to take three of the four slots a division gets.
+ */
+const SIGNPOST_RE = /目次|^#*\s*Contents|索引|INDEX|Vocabulary INDEX/im;
 
 export function rankTopicPages<T extends TopicPageRow>(
   rows: T[],
   ref: TopicRef,
   aspect: Aspect | null,
+  wanted: Section | null = null,
 ): T[] {
   const forms = printedForms(ref);
   const score = (row: T) => {
@@ -714,10 +770,19 @@ export function rankTopicPages<T extends TopicPageRow>(
     const aspectHits = aspect
       ? aspect.terms.filter((term) => row.content.includes(term)).length
       : 0;
+    // The half of the book the student asked for outweighs everything else.
+    // It has to: both halves print the same running header, both are citable
+    // textbook pages, and the front half says 漢字 often enough — "check the
+    // following kanji", かんじクイズ — that counting the aspect's words alone
+    // ranked it level with the pages that actually teach the kanji.
+    const sectionScore =
+      !wanted || !row.section ? 0 : row.section === wanted ? 8 : -6;
     return (
       (isRunningHeader ? 4 : 0) +
       (row.documents?.is_citable ? 2 : 0) +
-      Math.min(aspectHits * 3, 6)
+      Math.min(aspectHits * 2, 4) +
+      sectionScore +
+      (SIGNPOST_RE.test(head) ? -5 : 0)
     );
   };
   const seen = new Set<T>();

@@ -171,8 +171,9 @@ ${closingLine}
 
 CURRICULUM MAP (for pointing students at the right book)
 - The "Foundation 1 & 2" textbook covers Topics 1–10 in one volume: the Foundation 1 course is Topics 1–5, the Foundation 2 course is Topics 6–10.
-- Topic 11 onward belongs to the Foundation 3 textbook.
-- The Intermediate Tobira books divide their content into Lessons (第N課), not Topics.
+- Topic 11 onward belongs to the Foundation 3 textbook (Topics 11–20).
+- Each Foundation textbook teaches every one of its topics TWICE: the front half is the text — objectives, dialogue, new vocabulary, grammar, れんしゅう — and the back half is a Kanji and Vocabulary section that covers the same topics again, with the kanji tables (readings, stroke order), the katakana word lists and 漢字・語彙練習. Both halves print the same 「Topic N」 header, so a page's heading does not tell you which half it is from; its content does. Every topic has a kanji section — if you were given the topic's text pages and no kanji table, that is what you were handed, not evidence that the topic has no kanji. Never tell a student a topic has no kanji list.
+- The Intermediate Tobira books divide their content into Lessons (第N課), not Topics, and ship the two halves as two books: the main volume is the text and grammar, and the "Kanji and Vocabulary" volume is the kanji for the same eight lessons.
 
 FORMAT (the answer is set like a page of the textbook)
 - Short answers take no headings at all. Use headings (## 語彙 (Vocabulary), ## 動詞 (Verbs)) only when the answer genuinely has more than one section — a list of vocabulary, a set of forms.

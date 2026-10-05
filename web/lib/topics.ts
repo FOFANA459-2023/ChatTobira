@@ -74,13 +74,25 @@ export interface Aspect {
 }
 
 const ASPECTS: { match: RegExp; aspect: Aspect }[] = [
-  {
-    match: /vocab|vocabular|word list|語彙|ごい|単語|たんご/i,
-    aspect: { label: "vocabulary", terms: ["語彙", "新しい語彙", "vocabulary", "単語"] },
-  },
+  // Kanji is tested BEFORE vocabulary, and the order is the whole point.
+  // "list the Topic 7 kanji vocab" names both, and the first pattern to match
+  // used to be the vocabulary one — so the student asking for the kanji got
+  // the aspect "vocabulary", whose terms (語彙, 新しい語彙) are printed over
+  // the front half's word lists. The answer came back built from the pages
+  // that have no kanji list on them, reporting that the topic has none.
+  //
+  // Kanji wins because it is the more specific ask and because the books
+  // agree: the section that teaches a topic's kanji is itself titled
+  // 「漢字・語彙練習」 — Kanji AND Vocabulary. A student who says both means
+  // that section. "vocabulary" alone still lands on vocabulary, which is the
+  // front half's 新しい語彙 and the right answer for it.
   {
     match: /kanji|漢字|reading of|読み方/i,
     aspect: { label: "kanji", terms: ["漢字", "kanji", "読み方"] },
+  },
+  {
+    match: /vocab|vocabular|word list|語彙|ごい|単語|たんご/i,
+    aspect: { label: "vocabulary", terms: ["語彙", "新しい語彙", "vocabulary", "単語"] },
   },
   {
     match: /grammar|文法|pattern|conjugat|活用/i,
@@ -94,4 +106,51 @@ const ASPECTS: { match: RegExp; aspect: Aspect }[] = [
 
 export function aspectOf(text: string): Aspect | null {
   return ASPECTS.find(({ match }) => match.test(text))?.aspect ?? null;
+}
+
+/** Which half of the book the student is asking for, when they said.
+ *
+ * Only kanji names a half unambiguously. "vocabulary" does not: the front
+ * half prints 新しい語彙 for every topic and the back half is titled
+ * 漢字・語彙練習, so both are honestly vocabulary and the ranking is left to
+ * decide on the words themselves. Grammar and reading are front-half asks —
+ * the back half has no grammar explanations and no 読み物.
+ */
+export function sectionForAspect(aspect: Aspect | null): "grammar" | "kanji" | null {
+  if (!aspect) return null;
+  if (aspect.label === "kanji") return "kanji";
+  if (aspect.label === "grammar" || aspect.label === "reading") return "grammar";
+  return null;
+}
+
+/** One POSIX pattern matching every spelling of a division, and nothing else.
+ *
+ * `printedForms` above is the list of spellings, and searching for each of
+ * them with ILIKE is what retrieval used to do. ILIKE has no word boundary,
+ * and the books number their topics past nine, so `%Topic 1%` also matched
+ * Topic 10 through Topic 20. Measured on the live corpus: 304 chunks matched
+ * the Topic 1 forms and 26 of them were Topic 1 — and on Foundation 3, which
+ * carries topics 11-20, every single chunk matching 「トピック 1」 belonged to
+ * a different topic. A student asking about Topic 1 was shown Topic 14.
+ *
+ * It also starved the kanji half twice over: the wrong-topic rows filled the
+ * row budget before the right ones were read. With the guards below the worst
+ * case across every division in the corpus is 36 candidate chunks, so the
+ * budget now holds all of them and the choice is made by ranking rather than
+ * by which page the database happened to reach first.
+ *
+ * Guards on both sides, written as character classes because Postgres
+ * regexes have no lookaround: a trailing non-digit so Topic 1 is not Topic
+ * 10, and a leading non-alphanumeric so the bare `T7` form is not the tail of
+ * some other token. The ` ?` also picks up the un-spaced 「Topic7」 and
+ * 「トピック7」 that the books use on their contents pages, which the spaced
+ * forms missed.
+ */
+export function divisionPattern(ref: TopicRef): string {
+  const { number } = ref;
+  const forms =
+    ref.kind === "lesson"
+      ? [`第 ?${number} ?課`, `Lesson ?${number}`, `レッスン ?${number}`]
+      : [`トピック ?${number}`, `Topic ?${number}`, `T${number}`];
+  return `(^|[^A-Za-z0-9])(${forms.join("|")})([^0-9]|$)`;
 }

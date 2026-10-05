@@ -25,17 +25,18 @@ describe("corpus pool cache", () => {
     expect(cachedPool(1, 11 * MINUTE)).toBeNull();
   });
 
-  it("holds four entries and evicts the least recently used", () => {
-    for (const n of [1, 2, 3, 4, 5]) rememberPool(n, String(n));
+  it("holds five entries and evicts the least recently used", () => {
+    // Two books, two past-paper pools, and the section map.
+    for (const n of [1, 2, 3, 4, 5, 6]) rememberPool(n, String(n));
     expect(cachedPool(1)).toBeNull();
     expect(cachedPool(2)).toBe("2");
-    expect(cachedPool(5)).toBe("5");
+    expect(cachedPool(6)).toBe("6");
   });
 
   it("counts a read as use, so the book being studied is not the one evicted", () => {
-    for (const n of [1, 2, 3, 4]) rememberPool(n, String(n));
+    for (const n of [1, 2, 3, 4, 5]) rememberPool(n, String(n));
     expect(cachedPool(1)).toBe("1"); // 1 is now the most recent
-    rememberPool(5, "5");
+    rememberPool(6, "6");
     expect(cachedPool(1)).toBe("1");
     expect(cachedPool(2)).toBeNull();
   });
