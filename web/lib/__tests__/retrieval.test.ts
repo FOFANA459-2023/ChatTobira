@@ -6,6 +6,7 @@ import {
   retrieveByTopic,
   tokensForQuery,
   type RetrievedChunk,
+  selectContext,
 } from "../retrieval";
 import { clearPoolCache } from "@/lib/corpus-cache";
 import { aspectOf, divisionPattern, topicRefs } from "@/lib/topics";
@@ -170,5 +171,50 @@ describe("retrieveByTopic — which arms a division question reaches for", () =>
     // Above the 36 chunks the widest division in the corpus matches, so both
     // halves of a book are read before anything is ranked away.
     expect(pages?.limit).toBeGreaterThanOrEqual(80);
+  });
+});
+
+describe("selectContext — a page the chunker split is still one page", () => {
+  const page = (id: number, pdf_page: number, content: string, wholePage = true) =>
+    chunk({ chunk_id: id, document_id: 30, pdf_page, book_page: String(pdf_page), content, wholePage, similarity: 0.8 });
+
+  it("keeps every chunk of a page a division owns", () => {
+    // Topic 12's vocabulary page is three chunks: 33 characters of the
+    // heading 「## 新しい語彙」, then 1,571 of the actual word list, then 48
+    // more. Only the first carries the running header, so only the first was
+    // ever matched — and the one-chunk-per-page rule then threw the other two
+    // away. The student asking for the topic's vocabulary got a heading.
+    const picked = selectContext(
+      [
+        page(1206, 32, "トピック 12 旅行します\n\n## 新しい語彙"),
+        page(1207, 32, "| Nouns | ウエイトレス | waitress | 旅館 | Japanese inn |"),
+        page(1208, 32, "| ～泊する | to stay ~ number of nights |"),
+      ],
+      { limit: 6, perDocument: 6 },
+    );
+    expect(picked).toHaveLength(3);
+    expect(picked.map((c) => c.content).join(" ")).toContain("ウエイトレス");
+  });
+
+  it("still shows an ordinary page once", () => {
+    const picked = selectContext(
+      [
+        chunk({ chunk_id: 1, document_id: 30, pdf_page: 40, book_page: "40", content: "a", similarity: 0.8 }),
+        chunk({ chunk_id: 2, document_id: 30, pdf_page: 40, book_page: "40", content: "b", similarity: 0.8 }),
+      ],
+      { limit: 6, perDocument: 6 },
+    );
+    expect(picked).toHaveLength(1);
+  });
+
+  it("counts pages rather than pieces, so one long table cannot crowd out the rest", () => {
+    const split = [
+      page(1, 10, "heading"), page(2, 10, "table part one"), page(3, 10, "table part two"),
+    ];
+    const others = [4, 5, 6].map((n) => page(n + 10, 20 + n, "another page " + n));
+    const picked = selectContext([...split, ...others], { limit: 4, perDocument: 9 });
+    const pages = new Set(picked.map((c) => c.pdf_page));
+    expect(pages.size).toBe(4);
+    expect(picked.filter((c) => c.pdf_page === 10)).toHaveLength(3);
   });
 });
