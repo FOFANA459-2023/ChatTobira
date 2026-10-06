@@ -31,6 +31,10 @@ export interface RetrievedChunk {
    * score, and it does not need one: the student asked about 〜てある and
    * this page prints 〜てある. */
   exact?: boolean;
+  /** Set when the chunk is one of several making up a page that a named
+   * division owns. The page goes in whole: the chunk holding a vocabulary
+   * table is not the chunk that prints the topic header above it. */
+  wholePage?: boolean;
   /** Set when the chunk came from a page the student named by number. It
    * exempts the chunk from the one-chunk-per-page and per-document rules
    * below, which exist to stop one book crowding out the rest and are the
@@ -382,16 +386,22 @@ export function selectContext(
   // the page so a four-chunk page does not squeeze out every other source.
   const ceiling = limit + pageChunks.length;
 
+  // `limit` counts PAGES, not chunks. A page split by the chunker is still
+  // one page of the book, and counting its pieces separately would let a
+  // single long vocabulary table crowd out six other topics.
   for (const chunk of pool) {
     if (chunk.fromPage) continue;
     const page = `${chunk.document_id}:${chunk.book_page ?? chunk.pdf_page}`;
-    if (seenPages.has(page)) continue;
-    const used = perDocumentCount.get(chunk.document_id) ?? 0;
-    if (used >= perDocument) continue;
-    seenPages.add(page);
-    perDocumentCount.set(chunk.document_id, used + 1);
+    const sibling = chunk.wholePage && seenPages.has(page);
+    if (seenPages.has(page) && !sibling) continue;
+    if (!sibling) {
+      const used = perDocumentCount.get(chunk.document_id) ?? 0;
+      if (used >= perDocument) continue;
+      if (seenPages.size >= ceiling) break;
+      seenPages.add(page);
+      perDocumentCount.set(chunk.document_id, used + 1);
+    }
     picked.push(chunk);
-    if (picked.length >= ceiling) break;
   }
 
   // Pages that print the pattern the student named lead, then the closest
@@ -459,6 +469,7 @@ function toRetrieved(row: unknown, fromPage = false): RetrievedChunk {
   const chunk = row as ChunkRow;
   return {
     ...(fromPage ? { fromPage: true } : {}),
+    ...((row as { wholePage?: boolean }).wholePage ? { wholePage: true } : {}),
     chunk_id: chunk.id,
     document_id: chunk.document_id,
     doc_title: chunk.documents?.title ?? "",
@@ -737,7 +748,68 @@ export async function retrieveByTopic(
     ).slice(0, limit),
   );
 
-  return ranked.flat().map((row) => toRetrieved(row));
+  // The header picks the PAGE; the page's own chunks are the material.
+  //
+  // A page longer than the chunker's 1,600 characters becomes several chunks,
+  // and only the first of them carries the running header — so a search for
+  // 「トピック 12」 finds the heading and never the table underneath it. Topic
+  // 12's vocabulary page is three chunks: 33 characters of 「## 新しい語彙」,
+  // then 1,571 characters of the actual word list, then 48 more. Matching on
+  // the header returned the 33, the one-chunk-per-page rule in selectContext
+  // discarded the rest, and the student asking for the topic's vocabulary got
+  // a heading and whatever stray words other pages happened to print — ten
+  // items where the book prints dozens, however many times they asked.
+  //
+  // So once ranking has chosen the pages, their siblings are fetched by page
+  // rather than by content, which is the only way to reach a chunk that never
+  // mentions the division it belongs to.
+  return (await withSiblings(supabase, ranked.flat(), select)).map((row) =>
+    toRetrieved(row),
+  );
+}
+
+/** Every chunk of every page these chunks came from, in reading order. */
+async function withSiblings(
+  supabase: SupabaseClient,
+  chosen: TopicPageRow[],
+  select: string,
+): Promise<TopicPageRow[]> {
+  const pages = new Map<string, { document_id: number; pdf_page: number }>();
+  for (const row of chosen) {
+    if (row.document_id === undefined || row.pdf_page === null || row.pdf_page === undefined) continue;
+    pages.set(`${row.document_id}:${row.pdf_page}`, {
+      document_id: row.document_id,
+      pdf_page: row.pdf_page,
+    });
+  }
+  if (pages.size === 0) return chosen;
+
+  const filter = [...pages.values()]
+    .map((p) => `and(document_id.eq.${p.document_id},pdf_page.eq.${p.pdf_page})`)
+    .join(",");
+  const { data } = await supabase
+    .from("chunks")
+    .select(select)
+    .or(filter)
+    .order("document_id")
+    .order("pdf_page")
+    // Chunk id is insertion order, which is reading order down the page: the
+    // table has to arrive under its own heading or it is a list of fragments.
+    .order("id");
+  const rows = (data ?? []) as unknown as TopicPageRow[];
+  if (rows.length === 0) return chosen;
+
+  // Keep the pages in the order ranking put them in — the first page is the
+  // one the question was most about — and each page whole inside that.
+  const order = new Map([...pages.keys()].map((key, i) => [key, i]));
+  return rows
+    .map((row) => ({ ...row, wholePage: true }))
+    .sort(
+      (a, b) =>
+        (order.get(`${a.document_id}:${a.pdf_page}`) ?? 0) -
+          (order.get(`${b.document_id}:${b.pdf_page}`) ?? 0) ||
+        (a.id ?? 0) - (b.id ?? 0),
+    );
 }
 
 /** Of the pages carrying a division's header, the ones worth reading.
@@ -755,6 +827,11 @@ export interface TopicPageRow {
   documents?: { is_citable?: boolean } | null;
   /** Which half of its book the page is in, when the caller worked it out. */
   section?: Section;
+  /** Set when the row arrived as part of a whole page rather than because it
+   * matched: a continuation chunk carries no running header of its own. */
+  wholePage?: boolean;
+  /** Insertion order, which is reading order down the page. */
+  id?: number;
 }
 
 /** A contents page or an index, which names a topic without teaching it.

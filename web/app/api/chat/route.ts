@@ -15,7 +15,7 @@ import { aspectOf, wantsEverything } from "@/lib/topics";
 import { turnRows } from "@/lib/history";
 import { contextBlock, recentTurns, systemPrompt, type AttachedUpload } from "@/lib/prompt";
 import {
-  ACCEPT_BUDGET_MS,
+  acceptBudgetMs,
   estimateTokens,
   noteProviderFailure,
   noteProviderSuccess,
@@ -639,7 +639,7 @@ export async function POST(request: Request) {
   // that refuses. See ACCEPT_BUDGET_MS: a stalled provider used to hold the
   // whole turn until the route's own 60s ceiling killed it, and the student
   // got nothing where a fallback would have got them an answer.
-  const budget = speaking ? ACCEPT_BUDGET_MS.spoken : ACCEPT_BUDGET_MS.typed;
+  const budget = acceptBudgetMs(Boolean(speaking), promptTokens);
 
   for (const tier of tiers) {
     const controller = new AbortController();

@@ -153,6 +153,43 @@ export function canTakePrompt(name: string, tokens: number): boolean {
 // prevent rather than cause.
 export const ACCEPT_BUDGET_MS = { spoken: 6_000, typed: 12_000, structured: 40_000 } as const;
 
+/** The typed budget, stretched for a prompt large enough to need it.
+ *
+ * 12 seconds was measured against the prompts this app built when every
+ * typed turn carried six passages. A question naming a span of topics now
+ * carries thirty, and time to FIRST TOKEN grows with the prompt — the model
+ * has to read it before it can start. Measured on the same question twice:
+ * 9.0s accepted, and on a second run 12.0s did not, so the cascade declined
+ * the tier that was about to answer, declined the next one for the same
+ * reason, and returned a 502 the student read as "Something went wrong
+ * answering that". Intermittently, which is the worst way to have it.
+ *
+ * So the budget follows the prompt. Below the threshold nothing moves, which
+ * keeps every ordinary question on exactly the timing that was measured for
+ * it; above it, roughly a second per extra 2,000 tokens. The ceiling is set
+ * so that two tiers can each be tried inside the route's own 60s maxDuration
+ * and still leave the student an answer rather than a timeout — a large
+ * prompt only has two eligible tiers anyway, Groq's input ceiling having
+ * already excluded it.
+ */
+const TYPED_BUDGET_FROM_TOKENS = 8_000;
+const TYPED_BUDGET_CEILING_MS = 26_000;
+
+export function acceptBudgetMs(speaking: boolean, promptTokens: number): number {
+  if (speaking) return ACCEPT_BUDGET_MS.spoken;
+  // A second per extra thousand tokens. Deliberately generous: the tier that
+  // timed out at 12s was observed answering the same question in 9s a run
+  // earlier, so the margin between "about to answer" and "declined" was tenths
+  // of a second, and a budget that merely covers the measured case re-creates
+  // the intermittency it was meant to remove. The ceiling keeps two tiers
+  // inside the route's 60s either way.
+  const over = Math.max(0, promptTokens - TYPED_BUDGET_FROM_TOKENS);
+  return Math.min(
+    ACCEPT_BUDGET_MS.typed + Math.ceil(over / 1_000) * 1_000,
+    TYPED_BUDGET_CEILING_MS,
+  );
+}
+
 /** Reject if `work` has not settled within `ms`.
  *
  * The loser of the race is not cancelled by this — cancelling is the caller's
