@@ -11,6 +11,7 @@ import { AuthPrompt } from "@/components/auth-card";
 import { VoiceInput } from "@/components/voice-input";
 import { VoiceSession } from "@/components/voice-session";
 import { UploadButton, type AttachedFile } from "@/components/upload-button";
+import { TRIALS } from "@/lib/trial";
 import { conversationLanguage, type ConversationLanguage } from "@/lib/conversation";
 import type { ChatUpload, ConversationSummary } from "@/lib/history";
 import type { ShellUser } from "@/lib/shell";
@@ -687,8 +688,8 @@ export function Chat({
             </p>
             {!authenticated && (
               <p className="mt-3 text-xs text-stone-400">
-                You can try 3 questions free — after that, create a free
-                account with your APU email.
+                You can try {TRIALS.chat.limit} questions free — after that,
+                create a free account with your APU email.
               </p>
             )}
           </div>

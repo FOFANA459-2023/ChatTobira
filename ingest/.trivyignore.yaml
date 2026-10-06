@@ -1,0 +1,52 @@
+# Accepted vulnerabilities in the ingest image, with reasons and an expiry
+# date. Same bargain as web/.trivyignore.yaml: an exception with no end date
+# is just a silenced alarm, so this file stays short and each entry says why.
+
+vulnerabilities:
+  # perl-base 5.36.0-7+deb12u3. Seven findings, one critical and six high,
+  # and the same answer to all of them: THERE IS NOTHING TO INSTALL YET.
+  #
+  # Trivy reports them as fixed in 5.36.0-7+deb12u4 because its database
+  # records the version a fix is destined for, which the Debian security
+  # tracker publishes before the package reaches the archive. Asked directly
+  # on 2026-10-06, Debian's own ftp-master still offers exactly one version of
+  # perl for bookworm, and it is +deb12u3. The base stage already runs
+  # `apt-get upgrade -y` on every build with the layer cache disabled for it
+  # (no-cache-filters: base in ci.yml), so the moment u4 is published this
+  # image takes it without anybody doing anything — and until then no change
+  # to the Dockerfile can install a package that does not exist.
+  #
+  # Not reachable the way these need to be. perl is not something this
+  # pipeline runs: the entrypoint is the Python CLI, and perl is here because
+  # LibreOffice and the base image brought it. Every one of these needs perl
+  # to be fed hostile input — a crafted regular expression, a crafted tar or
+  # gzip stream, a crafted Storable blob — and the only files that reach this
+  # image are the course's own PDFs and slides, converted by soffice, under a
+  # user that is not root.
+  #
+  # The expiry is deliberately short: a published perl security update is a
+  # matter of days to weeks, and this should fail again rather than be
+  # forgotten if it is not.
+  - id: CVE-2026-13221 # Perl: incorrect regular expression processing
+    statement: &perl-base |
+      perl-base, fixed version not yet published to Debian bookworm — see the
+      note at the top of this file. Revisit when apt can see 5.36.0-7+deb12u4.
+    expiredAt: 2026-10-27
+  - id: CVE-2026-42496 # perl-Archive-Tar: path traversal
+    statement: *perl-base
+    expiredAt: 2026-10-27
+  - id: CVE-2026-8376 # Perl: heap buffer overflow compiling a regex
+    statement: *perl-base
+    expiredAt: 2026-10-27
+  - id: CVE-2026-42497 # perl-Archive-Tar: arbitrary file write
+    statement: *perl-base
+    expiredAt: 2026-10-27
+  - id: CVE-2026-48962 # perl-IO-Compress: arbitrary code execution
+    statement: *perl-base
+    expiredAt: 2026-10-27
+  - id: CVE-2026-57432 # Perl: information disclosure via integer overflow
+    statement: *perl-base
+    expiredAt: 2026-10-27
+  - id: CVE-2026-57433 # Storable: denial of service via signed integer issue
+    statement: *perl-base
+    expiredAt: 2026-10-27

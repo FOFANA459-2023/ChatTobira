@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 
 import { Answer, RichText } from "@/components/answer";
 import { AuthPrompt } from "@/components/auth-card";
+import { TRIALS } from "@/lib/trial";
 import type { ConversationSummary } from "@/lib/history";
 import type { ShellUser } from "@/lib/shell";
 import { AppShell } from "@/components/app-shell";
@@ -320,8 +321,9 @@ export function QuizView({
             )}
             {!authenticated && (
               <p className="mt-3 text-center text-xs text-stone-400">
-                You can sit 1 practice test free — after that, create a free
-                account with your APU email.
+                You can sit {TRIALS.quiz.limit} practice test
+                {(TRIALS.quiz.limit as number) === 1 ? "" : "s"} free — after that, create
+                a free account with your APU email.
               </p>
             )}
             <p className="mt-4 text-center">

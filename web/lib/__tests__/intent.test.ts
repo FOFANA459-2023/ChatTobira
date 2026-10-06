@@ -102,3 +102,35 @@ describe("how much course material a turn carries", () => {
     expect(contextSizeFor("small_talk", false)).toBe(0);
   });
 });
+
+describe("contextSizeFor — the budget follows what was asked for", () => {
+  it("gives a general question room for the breadth it needs", () => {
+    expect(contextSizeFor("course_question", false)).toBe(8);
+  });
+
+  it("grows with the number of divisions named", () => {
+    // Seven topics sharing six slots is what left the model with three pages
+    // of a seven-topic question and nothing to build the rest from.
+    const one = contextSizeFor("course_question", false, { divisions: 1 });
+    const seven = contextSizeFor("course_question", false, { divisions: 7 });
+    expect(seven).toBeGreaterThan(one);
+    expect(one).toBeGreaterThan(contextSizeFor("course_question", false));
+  });
+
+  it("grows again when they asked for all of it", () => {
+    expect(
+      contextSizeFor("course_question", false, { divisions: 7, exhaustive: true }),
+    ).toBeGreaterThan(contextSizeFor("course_question", false, { divisions: 7 }));
+  });
+
+  it("has a ceiling, because the prompt does", () => {
+    expect(
+      contextSizeFor("course_question", false, { divisions: 30, exhaustive: true }),
+    ).toBeLessThanOrEqual(36);
+  });
+
+  it("leaves a spoken turn small, where latency is the whole product", () => {
+    expect(contextSizeFor("course_question", true, { divisions: 7, exhaustive: true })).toBe(2);
+    expect(contextSizeFor("small_talk", false, { divisions: 7 })).toBe(0);
+  });
+});

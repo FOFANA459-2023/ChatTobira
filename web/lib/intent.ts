@@ -107,8 +107,40 @@ export function classifyTurn(text: string, speaking = false): IntentVerdict {
  * vocabulary and grammar in range of what the student has been taught, which
  * is all the grounding a conversation needs.
  */
-export function contextSizeFor(intent: TurnIntent, speaking: boolean): number {
+/** What the turn is asking the corpus for, where six passages is not it. */
+export interface ContextDemand {
+  /** How many course divisions the student named. A span of seven topics is
+   * seven topics' worth of pages, not one question's worth. */
+  divisions?: number;
+  /** They asked for ALL of something, so a representative sample is a wrong
+   * answer rather than a short one. */
+  exhaustive?: boolean;
+}
+
+export function contextSizeFor(
+  intent: TurnIntent,
+  speaking: boolean,
+  demand: ContextDemand = {},
+): number {
   if (intent === "small_talk") return 0;
   if (speaking) return 2;
-  return 6;
+
+  // Six is right for one question about one grammar point, and it was applied
+  // to every typed turn including "list all the Topic 11 to 17 verbs". Seven
+  // topics share the six slots, three of which one book may fill, so the
+  // model saw three pages and wrote the rest from memory. The budget has to
+  // follow what was asked for.
+  // A general question — "what is the difference between は and が" — names no
+  // division, so the whole corpus is the scope and breadth is what helps. Six
+  // was the number, and six was never what arrived: at 1,600 characters a
+  // passage against the old 8,000-character ceiling, the block ran out after
+  // five and the sixth was dropped silently. Eight now, and they all fit.
+  const divisions = Math.max(demand.divisions ?? 0, 0);
+  if (divisions === 0) return demand.exhaustive ? 14 : 8;
+
+  // Four pages per division is about what a topic's vocabulary or grammar
+  // actually runs to, doubled when they asked for the complete list. The
+  // ceiling is what the prompt's character budget can hold anyway.
+  const perDivision = demand.exhaustive ? 5 : 3;
+  return Math.min(6 + divisions * perDivision, 36);
 }

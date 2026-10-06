@@ -31,9 +31,54 @@ function toNumber(digits: string): number {
   return Number(digits.replace(/[０-９]/g, (d) => String("０１２３４５６７８９".indexOf(d))));
 }
 
-/** Every division the text names, newest mention first. */
+/** "Topic 11 to 17" — a span, not a mention of eleven.
+ *
+ * A student revising for an exam asks for a range, and the range is the
+ * commonest thing they ask for. Read one number at a time, "list all topic 11
+ * to 17 verbs" searched Topic 11 and nothing else: six sevenths of what was
+ * asked for was never looked up, the handful of Topic 11 pages that came back
+ * could not fill a list, and the model filled the rest in from its own
+ * Japanese — 始める, 終わる, 飲む — which is exactly the invented vocabulary
+ * the grounding rules exist to prevent. It took four more turns to get an
+ * answer that came from the book.
+ *
+ * Every connector the students actually type, including the Japanese ones and
+ * the en dash a phone keyboard produces for a typed hyphen.
+ */
+const DIVISION_WORD = "(?:topics?|トピック|unit|lessons?|レッスン|第)";
+const RANGE_RE = new RegExp(
+  // "topic 11 to 17", and equally "topic 11 to topic 17" and 「第2課から第6課」,
+  // which name the division again at the far end of the range — the second
+  // 第 is not optional in Japanese, so a pattern that only allowed a bare
+  // number there read 第2課から第6課 as two separate lessons and skipped 3, 4
+  // and 5.
+  `${DIVISION_WORD}\\s*[#:]?\\s*([0-9０-９]{1,2})\\s*(?:課)?\\s*` +
+    `(?:-|–|—|~|〜|～|to|through|thru|until|から)\\s*` +
+    `${DIVISION_WORD}?\\s*([0-9０-９]{1,2})`,
+  "gi",
+);
+
+/** A range may not quietly become a corpus-wide sweep. Ten divisions is every
+ * topic in a Foundation book, which is the widest thing a student can
+ * reasonably be revising at once. */
+const MAX_SPAN = 10;
+
+/** Every division the text names, newest mention first. A span counts as all
+ * of the divisions inside it, and is not subject to `limit` — the student
+ * asked for seven topics on purpose, where seven separate mentions in one
+ * message is usually a message about something else. */
 export function topicRefs(text: string, limit = 3): TopicRef[] {
   const found: TopicRef[] = [];
+  const spanned: TopicRef[] = [];
+
+  for (const match of text.matchAll(RANGE_RE)) {
+    const from = toNumber(match[1]);
+    const to = toNumber(match[2]);
+    if (to <= from || to - from >= MAX_SPAN) continue;
+    // The books number lessons with 第N課 and topics every other way.
+    const kind = /lesson|レッスン|第/i.test(match[0]) ? "lesson" : "topic";
+    for (let n = from; n <= to; n++) spanned.push({ marker: `T${n}`, number: n, kind });
+  }
 
   for (const match of text.matchAll(TOPIC_RE)) {
     const digits = match[1] ?? match[2];
@@ -45,15 +90,19 @@ export function topicRefs(text: string, limit = 3): TopicRef[] {
   }
 
   const seen = new Set<string>();
-  return found
-    .filter((ref) => ref.number >= 1 && ref.number <= 30)
-    .filter((ref) => {
-      const key = `${ref.kind}:${ref.number}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .slice(0, limit);
+  const keep = (refs: TopicRef[]) =>
+    refs
+      .filter((ref) => ref.number >= 1 && ref.number <= 30)
+      .filter((ref) => {
+        const key = `${ref.kind}:${ref.number}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+
+  // The span first, so its ends claim their numbers before the loose matches
+  // above read them again as two separate mentions.
+  return [...keep(spanned), ...keep(found).slice(0, limit)];
 }
 
 /** How that division appears on a page, in every spelling the corpus uses. */
@@ -104,8 +153,35 @@ const ASPECTS: { match: RegExp; aspect: Aspect }[] = [
   },
 ];
 
+/** Asking for furigana is a request about TYPESETTING, not about the kanji
+ * section.
+ *
+ * "List all topic 11 to 17 verbs and their te forms, add furigana to their
+ * kanji" is a question about verbs. The word kanji appears in it only to say
+ * how the answer should be set, and reading it as the aspect sent retrieval
+ * to the back half of the book — the stroke-order tables — for a student who
+ * wanted the verb list in the front. The clause is removed before the aspect
+ * is read; it has already done its job by the time anything is retrieved,
+ * because the prompt handles furigana on its own.
+ */
+const TYPESETTING_RE =
+  /\b(?:with|add|include|put|show|using)\b[^.!?]{0,40}?\b(?:furigana|furagana|hiragana reading|readings?|romaji)\b[^.!?]*|ふりがな[をつけ付い]*[てた]?[くだ下さ]*さい?|振り仮名/gi;
+
 export function aspectOf(text: string): Aspect | null {
-  return ASPECTS.find(({ match }) => match.test(text))?.aspect ?? null;
+  const asked = text.replace(TYPESETTING_RE, " ");
+  return ASPECTS.find(({ match }) => match.test(asked))?.aspect ?? null;
+}
+
+/** The student wants everything there is, not a helpful sample.
+ *
+ * "List ALL the topic 11 to 17 verbs" and "give me three examples" are
+ * different jobs, and the context budget that is right for the second starves
+ * the first. This is what tells them apart.
+ */
+export function wantsEverything(text: string): boolean {
+  return /\b(?:all|every|complete|full|entire|exhaustive|whole)\b|\blists?\b|全部|すべて|ぜんぶ|一覧|全て/i.test(
+    text,
+  );
 }
 
 /** Which half of the book the student is asking for, when they said.

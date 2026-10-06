@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { placeUploads, toUIMessages, turnRows } from "../history";
+import { recentTurns } from "../prompt";
 
 describe("turnRows", () => {
   it("gives the question and the answer the same columns, so one bulk insert cannot null a NOT NULL one", () => {
@@ -90,5 +91,39 @@ describe("placeUploads", () => {
       expect.objectContaining({ id: 20, status: "failed", detail: "Too blurry to read." }),
       expect.objectContaining({ id: 21, status: "ready", detail: undefined }),
     ]);
+  });
+});
+
+describe("recentTurns — bounded by size as well as by count", () => {
+  const turn = (id: number, chars: number) => ({ id, text: "x".repeat(chars) });
+
+  it("keeps ordinary turns by count", () => {
+    const messages = Array.from({ length: 30 }, (_, i) => turn(i, 200));
+    const kept = recentTurns(messages);
+    expect(kept.length).toBe(16);
+    expect(kept.at(-1)?.id).toBe(29);
+  });
+
+  it("drops older turns when one answer is enormous", () => {
+    // A sixty-row verb table is a legitimate answer and a large one. Sixteen
+    // of them is a prompt made of the app re-reading itself, which crowds out
+    // the course material that makes the next answer right.
+    const messages = Array.from({ length: 16 }, (_, i) => turn(i, 20_000));
+    const kept = recentTurns(messages);
+    expect(kept.length).toBeLessThan(16);
+    expect(kept.at(-1)?.id).toBe(15);
+  });
+
+  it("never drops the turn the follow-up is about", () => {
+    // Even when every turn on its own blows the budget.
+    const messages = Array.from({ length: 10 }, (_, i) => turn(i, 500_000));
+    const kept = recentTurns(messages);
+    expect(kept.length).toBe(4);
+    expect(kept.at(-1)?.id).toBe(9);
+  });
+
+  it("returns a short conversation untouched", () => {
+    const messages = [turn(1, 50), turn(2, 50)];
+    expect(recentTurns(messages)).toEqual(messages);
   });
 });
