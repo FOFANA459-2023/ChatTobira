@@ -45,8 +45,18 @@ function toNumber(digits: string): number {
  * Every connector the students actually type, including the Japanese ones and
  * the en dash a phone keyboard produces for a typed hyphen.
  */
-const RANGE_RE =
-  /(?:topics?|トピック|unit|lessons?|レッスン|第)\s*[#:]?\s*([0-9０-９]{1,2})\s*(?:課)?\s*(?:-|–|—|~|〜|～|to|through|thru|until|から)\s*([0-9０-９]{1,2})/gi;
+const DIVISION_WORD = "(?:topics?|トピック|unit|lessons?|レッスン|第)";
+const RANGE_RE = new RegExp(
+  // "topic 11 to 17", and equally "topic 11 to topic 17" and 「第2課から第6課」,
+  // which name the division again at the far end of the range — the second
+  // 第 is not optional in Japanese, so a pattern that only allowed a bare
+  // number there read 第2課から第6課 as two separate lessons and skipped 3, 4
+  // and 5.
+  `${DIVISION_WORD}\\s*[#:]?\\s*([0-9０-９]{1,2})\\s*(?:課)?\\s*` +
+    `(?:-|–|—|~|〜|～|to|through|thru|until|から)\\s*` +
+    `${DIVISION_WORD}?\\s*([0-9０-９]{1,2})`,
+  "gi",
+);
 
 /** A range may not quietly become a corpus-wide sweep. Ten divisions is every
  * topic in a Foundation book, which is the widest thing a student can

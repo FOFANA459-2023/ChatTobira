@@ -338,6 +338,27 @@ describe("topicRefs — a span of topics", () => {
     }
   });
 
+  it("reads every range in the course, not just the one that was reported", () => {
+    // Swept against the live corpus across both Foundation books and the
+    // Intermediate set: every range below retrieves pages for every division
+    // inside it, including the ones that cross from Foundation 1 & 2 into
+    // Foundation 3 at Topic 10/11.
+    const span = (a: number, b: number) =>
+      Array.from({ length: b - a + 1 }, (_, i) => `T${a + i}`);
+    for (const [a, b] of [[1, 5], [2, 4], [6, 10], [8, 13], [9, 12], [10, 11], [11, 17], [15, 20], [7, 14]]) {
+      expect(markers(`list all topic ${a} to ${b} verbs`)).toEqual(span(a, b));
+    }
+  });
+
+  it("reads the division named again at the far end of the range", () => {
+    // 「第2課から第6課」 repeats 第 before the second number, and Japanese does
+    // not let it be dropped. Read as a bare number, this was two lessons with
+    // 3, 4 and 5 missing between them.
+    expect(markers("第2課から第6課の語彙")).toEqual(["T2", "T3", "T4", "T5", "T6"]);
+    expect(markers("topic 11 to topic 14")).toEqual(["T11", "T12", "T13", "T14"]);
+    expect(markers("lesson 3 to lesson 5")).toEqual(["T3", "T4", "T5"]);
+  });
+
   it("keeps a lesson range a lesson range", () => {
     const refs = topicRefs("lesson 3 to 6 kanji");
     expect(refs.map((r) => r.marker)).toEqual(["T3", "T4", "T5", "T6"]);

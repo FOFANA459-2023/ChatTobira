@@ -104,8 +104,8 @@ describe("how much course material a turn carries", () => {
 });
 
 describe("contextSizeFor — the budget follows what was asked for", () => {
-  it("gives one question about one grammar point the six it always had", () => {
-    expect(contextSizeFor("course_question", false)).toBe(6);
+  it("gives a general question room for the breadth it needs", () => {
+    expect(contextSizeFor("course_question", false)).toBe(8);
   });
 
   it("grows with the number of divisions named", () => {
@@ -114,7 +114,7 @@ describe("contextSizeFor — the budget follows what was asked for", () => {
     const one = contextSizeFor("course_question", false, { divisions: 1 });
     const seven = contextSizeFor("course_question", false, { divisions: 7 });
     expect(seven).toBeGreaterThan(one);
-    expect(one).toBeGreaterThan(6);
+    expect(one).toBeGreaterThan(contextSizeFor("course_question", false));
   });
 
   it("grows again when they asked for all of it", () => {

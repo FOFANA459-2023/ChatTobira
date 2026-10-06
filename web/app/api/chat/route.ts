@@ -369,6 +369,22 @@ export async function POST(request: Request) {
     const divisions = query.topics;
     const aspect = aspectOf(query.text);
 
+    // How many pages of EACH division to bring back. Four was a fixed cap,
+    // and for a question naming one topic it was the binding one: the context
+    // budget allowed eleven passages and the arm only ever offered four, so
+    // "list all the Topic 7 vocabulary" was answered from a quarter of the
+    // room it had. Divided among the divisions named, because a seven-topic
+    // range wants breadth across them rather than depth in the first.
+    const perDivision = Math.max(
+      4,
+      Math.ceil(
+        contextSizeFor(intent.intent, Boolean(speaking), {
+          divisions: divisions.length,
+          exhaustive: wantsEverything(query.text),
+        }) / Math.max(divisions.length, 1),
+      ),
+    );
+
     // The page arm. Runs alongside the ranked ones rather than instead of
     // them: a student who names a page usually wants something explained
     // from it, and the explanation may live elsewhere in the book.
@@ -393,7 +409,7 @@ export async function POST(request: Request) {
       // Best-effort: the ranked arms are the answer's backbone, and a failure
       // in a supplementary arm should cost a page, not the reply.
       retrieveExact(db, patterns).catch(() => [] as RetrievedChunk[]),
-      retrieveByTopic(db, divisions, aspect).catch(() => [] as RetrievedChunk[]),
+      retrieveByTopic(db, divisions, aspect, perDivision).catch(() => [] as RetrievedChunk[]),
       retrieveByPage(db, pageQuery, scope).catch(() => [] as RetrievedChunk[]),
       ]),
     );
@@ -476,7 +492,10 @@ export async function POST(request: Request) {
   const context = selectContext(chunks, {
     limit: contextLimit,
     // One book legitimately owns a division-scoped answer; see selectContext.
-    perDocument: demand.divisions > 0 ? Math.max(4, contextLimit) : 3,
+    // One book owns a division-scoped answer, and "every te-form verb in
+    // Foundation 3" is just as much a one-book question without naming a
+    // topic at all; only a general question benefits from the spread.
+    perDocument: demand.divisions > 0 ? Math.max(4, contextLimit) : demand.exhaustive ? 8 : 3,
   });
   const citations = buildCitations(context);
 

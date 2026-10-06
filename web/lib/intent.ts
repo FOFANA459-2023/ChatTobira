@@ -130,8 +130,13 @@ export function contextSizeFor(
   // topics share the six slots, three of which one book may fill, so the
   // model saw three pages and wrote the rest from memory. The budget has to
   // follow what was asked for.
+  // A general question — "what is the difference between は and が" — names no
+  // division, so the whole corpus is the scope and breadth is what helps. Six
+  // was the number, and six was never what arrived: at 1,600 characters a
+  // passage against the old 8,000-character ceiling, the block ran out after
+  // five and the sixth was dropped silently. Eight now, and they all fit.
   const divisions = Math.max(demand.divisions ?? 0, 0);
-  if (divisions === 0) return demand.exhaustive ? 10 : 6;
+  if (divisions === 0) return demand.exhaustive ? 14 : 8;
 
   // Four pages per division is about what a topic's vocabulary or grammar
   // actually runs to, doubled when they asked for the complete list. The

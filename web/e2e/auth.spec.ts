@@ -12,13 +12,17 @@ test("unauthenticated visitor gets the trial chat, not a redirect", async ({
   await page.goto("/");
   await expect(page).toHaveURL(/\/$/);
   await expect(page.getByPlaceholder(/ask in Japanese or English/)).toBeVisible();
-  await expect(page.getByText(/3 questions free/)).toBeVisible();
+  await expect(
+    page.getByText(new RegExp(`${TRIALS.chat.limit} questions free`)),
+  ).toBeVisible();
 });
 
 test("quiz page is open to trial visitors, like the chat", async ({ page }) => {
   await page.goto("/quiz");
   await expect(page).toHaveURL(/\/quiz/);
-  await expect(page.getByText(/1 practice test free/)).toBeVisible();
+  await expect(
+    page.getByText(new RegExp(`${TRIALS.quiz.limit} practice tests? free`)),
+  ).toBeVisible();
 });
 
 test("login page signs in with an APU email and password", async ({ page }) => {
