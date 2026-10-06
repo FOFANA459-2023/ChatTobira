@@ -10,6 +10,8 @@ import {
   noteProviderSuccess,
   resetProviderHealth,
   withDeadline,
+  acceptBudgetMs,
+  estimateTokens,
 } from "@/lib/providers";
 
 /** An AI SDK APICallError carries the upstream status on `statusCode`. */
@@ -184,5 +186,57 @@ describe("a tier that never answers", () => {
     // Someone is standing there waiting in silence for a spoken reply.
     expect(ACCEPT_BUDGET_MS.spoken).toBeLessThan(ACCEPT_BUDGET_MS.typed);
     expect(ACCEPT_BUDGET_MS.typed).toBeLessThan(ACCEPT_BUDGET_MS.structured);
+  });
+});
+
+describe("acceptBudgetMs — how long a tier gets to accept", () => {
+  it("leaves an ordinary typed turn on the timing that was measured for it", () => {
+    expect(acceptBudgetMs(false, 2_000)).toBe(ACCEPT_BUDGET_MS.typed);
+    expect(acceptBudgetMs(false, 8_000)).toBe(ACCEPT_BUDGET_MS.typed);
+  });
+
+  it("stretches for a prompt big enough to need it", () => {
+    // The tier that timed out at 12s on a ~16,000-token prompt had answered
+    // the same question in 9s a run earlier, and both of the only two tiers a
+    // prompt that size is eligible for declined — which the student read as
+    // "Something went wrong answering that", intermittently.
+    expect(acceptBudgetMs(false, 16_000)).toBeGreaterThan(ACCEPT_BUDGET_MS.typed);
+    expect(acceptBudgetMs(false, 20_000)).toBeGreaterThan(acceptBudgetMs(false, 16_000));
+  });
+
+  it("stays inside the route's own deadline with a tier to spare", () => {
+    // maxDuration is 60s and a prompt this size has two eligible tiers, Groq
+    // being excluded by its input ceiling. Both must fit.
+    const biggest = acceptBudgetMs(false, 500_000);
+    expect(biggest * 2).toBeLessThan(60_000);
+  });
+
+  it("never stretches a spoken turn, where latency is the product", () => {
+    expect(acceptBudgetMs(true, 60_000)).toBe(ACCEPT_BUDGET_MS.spoken);
+  });
+});
+
+describe("acceptBudgetMs is coupled to the prompts this app actually builds", () => {
+  // The regression this guards: the context budgets were raised so that a
+  // question naming a span of topics carries thirty passages instead of six,
+  // and the acceptance budget was left at the 12 seconds measured when it
+  // carried six. Both of the only two tiers eligible for a prompt that size
+  // then declined it on time, and the student got a 502 — intermittently,
+  // because the same question had accepted in 9s a run earlier.
+  //
+  // Raise a context budget again without raising this and the test fails
+  // here, which is the whole point of it.
+  const worstCasePromptTokens = estimateTokens(
+    // The largest block contextBlock will emit, plus an upload sharing it,
+    // plus the conversation history that rides along beside them.
+    "x".repeat(28_000 + 16_000 + 24_000),
+  );
+
+  it("gives the biggest prompt the app builds room to be accepted", () => {
+    expect(acceptBudgetMs(false, worstCasePromptTokens)).toBeGreaterThanOrEqual(20_000);
+  });
+
+  it("still fits two tiers inside the route's 60s maxDuration", () => {
+    expect(acceptBudgetMs(false, worstCasePromptTokens) * 2).toBeLessThan(60_000);
   });
 });
