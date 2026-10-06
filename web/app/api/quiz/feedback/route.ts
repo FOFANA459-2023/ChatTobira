@@ -1,6 +1,5 @@
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { createGroq } from "@ai-sdk/groq";
 import { generateText } from "ai";
 import { z } from "zod";
 
@@ -106,7 +105,6 @@ Score: ${score.correct}/${score.total}.
 Results:
 ${lines.join("\n")}`;
 
-  const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
   const google = createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY });
 
   // Plain text, so the chat model works here — no structured-output caveat.
@@ -119,9 +117,11 @@ ${lines.join("\n")}`;
   // stopped offering gemini-3.5-flash-lite — its primary model, and the
   // largest latency win in the stack — because an optional paragraph of
   // post-test encouragement could not be written.
-  const tiers = [
-    { key: "feedback-groq", model: groq(process.env.CHAT_MODEL ?? "openai/gpt-oss-120b") },
-  ];
+  // Groq led this list and has been dropped with the rest of them: it is the
+  // only free tier in the stack, metered per minute across the deployment,
+  // and coaching fires right after a test when a class may be finishing one
+  // together. See the note above PREFERENCE in lib/router.ts.
+  const tiers: { key: string; model: ReturnType<typeof google> }[] = [];
   if (process.env.DEEPSEEK_API_KEY) {
     const deepseek = createDeepSeek({ apiKey: process.env.DEEPSEEK_API_KEY });
     tiers.push({

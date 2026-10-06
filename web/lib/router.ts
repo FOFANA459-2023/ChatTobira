@@ -193,10 +193,21 @@ interface Slot {
  * first tier is not a safety net, it is a guaranteed wasted round trip. The
  * emptiness it guarded against is handled directly in `routeModels` instead.
  */
+// GROQ IS NOT IN ANY OF THESE, and its absence is a billing decision rather
+// than a measured one. Groq is the only tier here on a free plan; Gemini and
+// DeepSeek are both paid for, and a free tier metered per minute ACROSS THE
+// WHOLE DEPLOYMENT is the one that fails in front of a room — two classmates
+// asking at once is enough. The provider, its client and its token ceiling
+// all remain, so putting a slot back is one line if the plan changes.
+//
+// Groq is still the speech-to-text in /api/transcribe. That is Whisper, not
+// an answer model, and neither paid provider here replaces it.
 const PREFERENCE: Record<ModelTask, Slot[]> = {
-  // Groq still leads on the clock — 0.62s against flash-lite's 0.77s — and a
-  // spoken prompt is small by design, so it is the one job that reliably fits
-  // inside the free tier's shared input budget.
+  // Groq led this one on the clock, 0.62s against flash-lite's 0.77s, and
+  // this is the tier that loses most by dropping it: a spoken prompt is small
+  // by design and was the one job that reliably fit inside the free tier.
+  // 150ms of a spoken turn is a real cost and it is the price of not having a
+  // shared per-minute budget run out mid-sentence during a demonstration.
   //
   // What changed is second place. DeepSeek sat there at 1.33s and is now
   // behind flash-lite at 0.77s, which is worth having: second place is not a
@@ -204,7 +215,6 @@ const PREFERENCE: Record<ModelTask, Slot[]> = {
   // Two classmates speaking at once is enough to push the second one down a
   // tier, and that student now waits 0.77s instead of 1.33s.
   voice_turn: [
-    { key: "groq", provider: "groq", model: "qwen/qwen3.8-27b" },
     { key: "google", provider: "google", model: "gemini-3.5-flash-lite" },
     { key: "deepseek", provider: "deepseek", model: "deepseek-v4-flash" },
   ],
@@ -218,17 +228,15 @@ const PREFERENCE: Record<ModelTask, Slot[]> = {
   // 0.94s where DeepSeek takes 5.22s. Nothing about the prompt changed; the
   // key did.
   //
-  // Groq stays second rather than first. It is marginally faster on the small
-  // prompts it can take, but `canTakePrompt` skips it for most real questions
-  // anyway, and putting a tier that usually cannot answer ahead of one that
-  // always can buys a wasted round trip far more often than a saved 150ms.
+  // Groq used to sit second here and lost nothing by leaving: `canTakePrompt`
+  // skipped it on most real questions anyway, its 6,500-token ceiling being
+  // well under what a grounded answer costs.
   //
   // DeepSeek stays last and stays valuable: uncapped, cheap, and the tier that
   // absorbs an oversized prompt on a day when the Google key is rate-limited.
   // It is demoted from primary, not dropped.
   chat_answer: [
     { key: "google", provider: "google", model: "gemini-3.5-flash-lite" },
-    { key: "groq", provider: "groq", model: "qwen/qwen3.8-27b" },
     { key: "deepseek", provider: "deepseek", model: "deepseek-v4-flash" },
   ],
 
@@ -307,7 +315,6 @@ const PREFERENCE: Record<ModelTask, Slot[]> = {
       retries: "google-fast",
     },
     { key: "google-pro", provider: "google", model: "gemini-pro-latest", thinkingBudget: 128 },
-    { key: "groq", provider: "groq", model: "openai/gpt-oss-120b" },
   ],
 };
 
