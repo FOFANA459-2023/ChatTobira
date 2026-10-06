@@ -262,8 +262,8 @@ const PREFERENCE: Record<ModelTask, Slot[]> = {
   // Groq is absent rather than last: these prompts are ten thousand tokens
   // and up, and canTakePrompt would skip it on every one of them.
   chat_deep: [
+    { key: "google", provider: "google", model: "gemini-3.8-flash", thinkingBudget: 0 },
     { key: "deepseek", provider: "deepseek", model: "deepseek-v4-flash" },
-    { key: "google", provider: "google", model: "gemini-3.8-flash" },
   ],
 
   // A paper is not interactive — the student pressed "New Test" and the app

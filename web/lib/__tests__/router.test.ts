@@ -181,30 +181,37 @@ describe("health and configuration", () => {
 });
 
 describe("who answers a question that is a lesson", () => {
-  it("puts DeepSeek first, because it is the one that writes the lesson", () => {
-    // Measured on "list all the vocab for topic 12", same prompt and pages:
-    // flash-lite returns a flat A-to-Z glossary and drops every teaching rule;
-    // deepseek-v4-flash writes the lesson on every run; gemini-3.8-flash
-    // writes it too but declined at 15s and again at 28s, having held the
-    // request the whole time — which in a cascade is the same as not writing
-    // it, and costs the student those 28 seconds first.
-    expect(keys("chat_deep", { promptTokens: 11_000 })).toEqual(["deepseek", "google"]);
+  it("puts the capped Gemini first, with DeepSeek behind it", () => {
+    // DeepSeek led this list for one commit, on the finding that
+    // gemini-3.8-flash declined at 15s and again at 28s. That finding was
+    // real and its cause was not the model: the slot had no thinkingBudget,
+    // so 3.8-flash was reasoning without a cap, exactly as it does when the
+    // paper cascade leaves it uncapped. Capped at 0 — chat has no schema to
+    // satisfy, which is the only thing 0 ever broke — the same question on
+    // the same pages comes back in 12.0s against DeepSeek's 14.3s and 22.8s,
+    // with the opening line and two teaching notes rather than one.
+    expect(keys("chat_deep", { promptTokens: 11_000 })).toEqual(["google", "deepseek"]);
   });
 
-  it("keeps Gemini behind it rather than dropping it", () => {
-    // Its answer is good; it is its willingness to start that is unreliable.
-    // On a day DeepSeek is slow it is still worth having.
-    expect(keys("chat_deep", { promptTokens: 11_000 })).toContain("google");
-  });
-
-  it("asks the deep tier for a stronger model than the fast one", () => {
+  it("caps reasoning on the deep tier, which is what makes it the fast one", () => {
     const [deep] = routeModels("chat_deep", { promptTokens: 11_000 });
-    const [fast] = routeModels("chat_answer", { promptTokens: 5_000 });
-    expect(deep.model).not.toBe(fast.model);
-    expect(fast.model).toContain("flash-lite");
+    expect(deep.thinkingBudget).toBe(0);
+  });
+
+  it("keeps DeepSeek behind it rather than dropping it", () => {
+    // It writes the richest answer of the three and is the tier that still
+    // answers on a day the Google key is rate-limited.
+    expect(keys("chat_deep", { promptTokens: 11_000 })).toContain("deepseek");
   });
 
   it("still answers when DeepSeek has no key, from Gemini alone", () => {
     expect(keys("chat_deep", { promptTokens: 11_000, hasDeepSeek: false })).toEqual(["google"]);
+  });
+
+  it("asks the deep tier for a different model from the fast one", () => {
+    const [deep] = routeModels("chat_deep", { promptTokens: 11_000 });
+    const [fast] = routeModels("chat_answer", { promptTokens: 5_000 });
+    expect(deep.model).not.toBe(fast.model);
+    expect(fast.model).toContain("flash-lite");
   });
 });
