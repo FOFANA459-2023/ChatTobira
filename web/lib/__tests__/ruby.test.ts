@@ -95,3 +95,36 @@ describe("splitRuby — readings that annotate nothing", () => {
     expect(splitRuby("あります（ある）")).toEqual([{ base: "あります（ある）" }]);
   });
 });
+
+describe("readings as the vocabulary tables actually write them", () => {
+  const ruby = (text: string) =>
+    splitRuby(text)
+      .map((part) => (part.reading ? `${part.base}[${part.reading}]` : part.base))
+      .join("");
+
+  it("reads a half-width bracket, which is all the word lists use", () => {
+    // Topic 12's vocabulary page carries 43 readings and every one of them is
+    // half-width: not one 《 》 or （ ） among them. While the tables were
+    // unreachable this never showed; once a topic's vocabulary page reached
+    // the prompt whole, every reading rendered as literal brackets.
+    expect(ruby("駅前(えきまえ)")).toBe("駅前[えきまえ]");
+    expect(ruby("旅館(りょかん)")).toBe("旅館[りょかん]");
+    expect(ruby("会議(かいぎ)")).toBe("会議[かいぎ]");
+  });
+
+  it("keeps a word the book gives two readings for", () => {
+    expect(ruby("～泊(はく／ぱく)")).toBe("～泊[はく／ぱく]");
+  });
+
+  it("still reads the forms it always did", () => {
+    expect(ruby("旅行《りょこう》")).toBe("旅行[りょこう]");
+    expect(ruby("旅行（りょこう）")).toBe("旅行[りょこう]");
+  });
+
+  it("leaves a bracket that annotates nothing alone", () => {
+    // An exercise sheet prints "(a) (ホテルに) 泊まります". The kana in the
+    // second bracket is not a reading of anything to its left, and inventing
+    // one would put ruby over the wrong word.
+    expect(ruby("(a) (ホテルに) ")).toContain("(ホテルに)");
+  });
+});

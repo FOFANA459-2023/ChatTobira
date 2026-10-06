@@ -8,9 +8,27 @@
 
 const KANJI_RE = /[一-鿿々〆ヶ]/;
 const KANA_RE = /[ぁ-ゖァ-ヶー]/;
-/** A reading in either bracket style. The prompt asks for （ ）, but the
- * transcribed corpus writes 《 》 and models imitate what they read. */
-const READING_RE = /（([ぁ-ゖァ-ヶー]+)）|《([ぁ-ゖァ-ヶー]+)》/g;
+/** A reading in any bracket style the corpus uses.
+ *
+ * The prompt asks for （ ）, the prose pages write 《 》, and models imitate
+ * what they read — so both were handled. The vocabulary TABLES write a third
+ * form and nothing read it: 駅前(えきまえ) with HALF-WIDTH brackets, 43 of
+ * them on the Topic 12 word list alone and not one 《 》 or （ ） among them.
+ * While those tables were unreachable it did not show; the moment a topic's
+ * vocabulary page reached the prompt whole, answers came back built from
+ * them and every reading rendered as literal brackets.
+ *
+ * The slash is in the class for 〜泊(はく／ぱく), where the book prints two
+ * readings for one word and splitting them would be inventing a distinction
+ * the page does not make.
+ *
+ * Half-width brackets are the loosest of the three — "(ホテルに)" in an
+ * exercise is not a reading — and `baseStart` is what keeps that safe: it
+ * returns -1 when nothing to the left of the bracket is a word, and the
+ * brackets stay the literal text they are.
+ */
+const READING_RE =
+  /（([ぁ-ゖァ-ヶー／]+)）|《([ぁ-ゖァ-ヶー／]+)》|\(([ぁ-ゖァ-ヶー／]+)\)/g;
 
 /** How far left of the bracket a word may reach. Longer than any single word
  * in this corpus, and it keeps a stray bracket from scanning a whole line. */
@@ -102,7 +120,7 @@ export function splitRuby(text: string): RubySegment[] {
   };
 
   for (const match of text.matchAll(READING_RE)) {
-    const reading = match[1] ?? match[2];
+    const reading = match[1] ?? match[2] ?? match[3];
     const bracket = match.index;
 
     // A reading that merely repeats the kana word in front of it — 〜ておく
