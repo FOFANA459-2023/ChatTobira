@@ -12,21 +12,21 @@ const keys = (task: Parameters<typeof routeModels>[0], options = {}) =>
   routeModels(task, options).map((tier) => tier.key);
 
 describe("who answers a spoken turn", () => {
-  it("asks the fastest tier first, because someone is waiting in silence", () => {
-    // Measured: groq 0.62s, flash-lite 0.77s, deepseek 1.33s on the same
-    // short turn.
-    expect(keys("voice_turn", { promptTokens: 1200 })).toEqual(["groq", "google", "deepseek"]);
+  it("asks the fastest PAID tier first, because someone is waiting in silence", () => {
+    // Measured: groq 0.62s, flash-lite 0.77s, deepseek 1.33s on the same short
+    // turn. Groq won it and has been dropped anyway — it is the only free tier
+    // in the stack and its budget is metered per minute across the whole
+    // deployment, which is the thing that runs out in front of a room. This
+    // tier pays 150ms for that, knowingly.
+    expect(keys("voice_turn", { promptTokens: 1200 })).toEqual(["google", "deepseek"]);
   });
 
-  it("puts Gemini ahead of DeepSeek for second place, which is a real place", () => {
-    // Groq's ceiling is metered per MINUTE across the whole deployment, so
-    // two classmates speaking at once is enough to push the second one down a
-    // tier. That student now waits 0.77s instead of 1.33s.
+  it("keeps DeepSeek behind it, because second place is a real place", () => {
     const [, second] = keys("voice_turn", { promptTokens: 1200 });
-    expect(second).toBe("google");
+    expect(second).toBe("deepseek");
   });
 
-  it("still falls past Groq when a spoken turn somehow gets large", () => {
+  it("answers a spoken turn that somehow gets large from the same two", () => {
     expect(keys("voice_turn", { promptTokens: 9000 })).toEqual(["google", "deepseek"]);
   });
 });
@@ -36,14 +36,12 @@ describe("who answers a typed question", () => {
     // The change the app is judged on. On the same ~4,600-token prompt:
     // flash-lite 0.94s against deepseek-v4-flash 5.22s. DeepSeek led this
     // list only while the Google key was rationed to twenty requests a day.
-    expect(keys("chat_answer", { promptTokens: 5000 })).toEqual([
-      "google",
-      "groq",
-      "deepseek",
-    ]);
+    expect(keys("chat_answer", { promptTokens: 5000 })).toEqual(["google", "deepseek"]);
   });
 
-  it("does not offer Groq a prompt it will refuse with a 413", () => {
+  it("offers the same two however large the prompt is", () => {
+    // Nothing left in this cascade has an input ceiling worth modelling; the
+    // tier that did was Groq, at 6,500 tokens, and it is gone.
     expect(keys("chat_answer", { promptTokens: 8300 })).toEqual(["google", "deepseek"]);
   });
 
@@ -65,7 +63,6 @@ describe("who builds a practice paper", () => {
       "google-fast",
       "google-fast-retry",
       "google-pro",
-      "groq",
     ]);
   });
 
@@ -106,7 +103,7 @@ describe("who builds a practice paper", () => {
 describe("health and configuration", () => {
   it("skips a tier that has proven dead this isolate", () => {
     noteProviderFailure("deepseek", { statusCode: 402 });
-    expect(keys("chat_answer", { promptTokens: 3000 })).toEqual(["google", "groq"]);
+    expect(keys("chat_answer", { promptTokens: 3000 })).toEqual(["google"]);
   });
 
   it("drops a dead Gemini tier without taking the one behind it", () => {
@@ -117,15 +114,11 @@ describe("health and configuration", () => {
     expect(keys("structured", { promptTokens: 3000 })).toEqual([
       "google-fast",
       "google-fast-retry",
-      "groq",
     ]);
   });
 
   it("skips DeepSeek entirely when the deployment has no key", () => {
-    expect(keys("chat_answer", { promptTokens: 3000, hasDeepSeek: false })).toEqual([
-      "google",
-      "groq",
-    ]);
+    expect(keys("chat_answer", { promptTokens: 3000, hasDeepSeek: false })).toEqual(["google"]);
   });
 
   it("never returns an empty chain, however bad things get", () => {
@@ -138,12 +131,14 @@ describe("health and configuration", () => {
     noteProviderFailure("google", { statusCode: 401 });
     noteProviderFailure("deepseek", { statusCode: 402 });
     const tiers = routeModels("chat_answer", { promptTokens: 3000 });
-    expect(tiers.map((t) => t.key)).toEqual(["groq"]);
+    expect(tiers.map((t) => t.key)).toEqual(["deepseek"]);
   });
 
   it("will not fall back onto a tier the prompt cannot fit", () => {
-    // Even at the bottom of a bad day, handing Groq a prompt it has already
-    // said it cannot take is not a last-ditch attempt, it is a 413.
+    // Nothing in the cascade has a ceiling now that Groq is gone, so the
+    // fallback is simply the bottom tier. The guard this asserts is kept for
+    // the day a ceiling-bearing tier comes back: the last resort still has to
+    // be a tier that can actually take the prompt.
     noteProviderFailure("google", { statusCode: 401 });
     noteProviderFailure("deepseek", { statusCode: 402 });
     const tiers = routeModels("chat_answer", { promptTokens: 9000 });
@@ -153,14 +148,14 @@ describe("health and configuration", () => {
   it("lets a deploy move a tier to another model without a code change", () => {
     const tiers = routeModels("voice_turn", {
       promptTokens: 500,
-      models: { groq: "qwen/qwen3.6-27b" },
+      models: { google: "gemini-3.6-flash" },
     });
     expect(tiers[0]).toEqual({
-      provider: "groq",
-      key: "groq",
-      model: "qwen/qwen3.6-27b",
+      provider: "google",
+      key: "google",
+      model: "gemini-3.6-flash",
       thinkingBudget: undefined,
-      config: "groq",
+      config: "google",
     });
     // Unnamed tiers keep their defaults.
     expect(tiers.find((t) => t.key === "deepseek")?.model).toBe("deepseek-v4-flash");
@@ -182,5 +177,41 @@ describe("health and configuration", () => {
     expect(routeReason("chat_answer", tiers, 8300)).toBe(
       "route chat_answer ~8300tok → google,deepseek",
     );
+  });
+});
+
+describe("who answers a question that is a lesson", () => {
+  it("puts the capped Gemini first, with DeepSeek behind it", () => {
+    // DeepSeek led this list for one commit, on the finding that
+    // gemini-3.8-flash declined at 15s and again at 28s. That finding was
+    // real and its cause was not the model: the slot had no thinkingBudget,
+    // so 3.8-flash was reasoning without a cap, exactly as it does when the
+    // paper cascade leaves it uncapped. Capped at 0 — chat has no schema to
+    // satisfy, which is the only thing 0 ever broke — the same question on
+    // the same pages comes back in 12.0s against DeepSeek's 14.3s and 22.8s,
+    // with the opening line and two teaching notes rather than one.
+    expect(keys("chat_deep", { promptTokens: 11_000 })).toEqual(["google", "deepseek"]);
+  });
+
+  it("caps reasoning on the deep tier, which is what makes it the fast one", () => {
+    const [deep] = routeModels("chat_deep", { promptTokens: 11_000 });
+    expect(deep.thinkingBudget).toBe(0);
+  });
+
+  it("keeps DeepSeek behind it rather than dropping it", () => {
+    // It writes the richest answer of the three and is the tier that still
+    // answers on a day the Google key is rate-limited.
+    expect(keys("chat_deep", { promptTokens: 11_000 })).toContain("deepseek");
+  });
+
+  it("still answers when DeepSeek has no key, from Gemini alone", () => {
+    expect(keys("chat_deep", { promptTokens: 11_000, hasDeepSeek: false })).toEqual(["google"]);
+  });
+
+  it("asks the deep tier for a different model from the fast one", () => {
+    const [deep] = routeModels("chat_deep", { promptTokens: 11_000 });
+    const [fast] = routeModels("chat_answer", { promptTokens: 5_000 });
+    expect(deep.model).not.toBe(fast.model);
+    expect(fast.model).toContain("flash-lite");
   });
 });

@@ -151,18 +151,33 @@ export function canTakePrompt(name: string, tokens: number): boolean {
 // off mid-paper on the two runs that took longer than that and fallen back to
 // a worse paper for no reason, which is the failure this constant exists to
 // prevent rather than cause.
-export const ACCEPT_BUDGET_MS = { spoken: 6_000, typed: 12_000, structured: 40_000 } as const;
+export const ACCEPT_BUDGET_MS = {
+  spoken: 6_000,
+  typed: 12_000,
+  /** A list or a range, answered by the teaching model. Two tiers of this
+   * still fit inside the chat route's 60s, with the second one tight. */
+  deep: 28_000,
+  structured: 40_000,
+} as const;
 
 /** The typed budget, stretched for a prompt large enough to need it.
  *
- * 12 seconds was measured against the prompts this app built when every
- * typed turn carried six passages. A question naming a span of topics now
- * carries thirty, and time to FIRST TOKEN grows with the prompt — the model
- * has to read it before it can start. Measured on the same question twice:
- * 9.0s accepted, and on a second run 12.0s did not, so the cascade declined
- * the tier that was about to answer, declined the next one for the same
- * reason, and returned a 502 the student read as "Something went wrong
- * answering that". Intermittently, which is the worst way to have it.
+ * Every number below was measured while the route's acceptance check was
+ * `await attempt.warnings`, which the AI SDK documents as consuming the
+ * stream — so they are times to the LAST token, not the first, and the
+ * budgets were sized against whole generations. The check now waits on the
+ * first chunk of a teed stream and acceptance costs about a second, so these
+ * budgets are far larger than acceptance needs. They are kept at that size
+ * deliberately: a ceiling is only ever reached by a tier that has genuinely
+ * stalled, which is the case it exists for, and cutting them to the new
+ * measurements would re-introduce the 502s for no gain.
+ *
+ * The history, because it explains the shape: 12 seconds was set against the
+ * prompts this app built when every typed turn carried six passages. A
+ * question naming a span of topics carries thirty. On the same question
+ * twice, 9.0s finished and 12.0s did not, so the cascade declined the tier
+ * that was about to answer, declined the next for the same reason, and
+ * returned a 502 the student read as "Something went wrong answering that".
  *
  * So the budget follows the prompt. Below the threshold nothing moves, which
  * keeps every ordinary question on exactly the timing that was measured for
@@ -175,8 +190,17 @@ export const ACCEPT_BUDGET_MS = { spoken: 6_000, typed: 12_000, structured: 40_0
 const TYPED_BUDGET_FROM_TOKENS = 8_000;
 const TYPED_BUDGET_CEILING_MS = 26_000;
 
-export function acceptBudgetMs(speaking: boolean, promptTokens: number): number {
+export function acceptBudgetMs(
+  speaking: boolean,
+  promptTokens: number,
+  deep = false,
+): number {
   if (speaking) return ACCEPT_BUDGET_MS.spoken;
+  // A lesson is written by a slower model on purpose, and generation runs
+  // long after acceptance — around 11 seconds of streaming on a topic's whole
+  // vocabulary. This headroom covers a tier that stalls before writing any of
+  // it, rather than one that is merely writing a lot.
+  if (deep) return ACCEPT_BUDGET_MS.deep;
   // A second per extra thousand tokens. Deliberately generous: the tier that
   // timed out at 12s was observed answering the same question in 9s a run
   // earlier, so the margin between "about to answer" and "declined" was tenths

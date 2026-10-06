@@ -1,7 +1,13 @@
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createGroq } from "@ai-sdk/groq";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { convertToModelMessages, streamText, type UIMessage } from "ai";
+import {
+  convertToModelMessages,
+  createUIMessageStreamResponse,
+  streamText,
+  type UIMessage,
+  type UIMessageChunk,
+} from "ai";
 import { z } from "zod";
 
 import { exhaustedMessage, spendAllowance } from "@/lib/allowance";
@@ -45,6 +51,13 @@ import {
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/server";
 
 export const maxDuration = 60;
+
+/** The options `toUIMessageStream` takes, named so they can be built once per
+ * tier instead of inline — the metadata has to name the model that answered,
+ * and which model that is, is only known inside the cascade. */
+type StreamOptions = NonNullable<
+  Parameters<ReturnType<typeof streamText>["toUIMessageStream"]>[0]
+>;
 
 const BodySchema = z.object({
   messages: z.array(z.custom<UIMessage>()),
@@ -587,7 +600,13 @@ export async function POST(request: Request) {
   // spoken one wants the fastest tier because a student is waiting in silence
   // for it, and the typed one wants the tier that can actually hold six
   // passages of textbook. See lib/router.ts for the measurements.
-  const route = routeModels(speaking ? "voice_turn" : "chat_answer", {
+  // A list, or a span of topics: the questions whose answers are a lesson
+  // rather than a sentence, and the ones flash-lite flattens.
+  const deepAnswer =
+    !speaking && (wantsEverything(query.text) || query.topics.length > 0);
+
+  const task = speaking ? "voice_turn" : deepAnswer ? "chat_deep" : "chat_answer";
+  const route = routeModels(task, {
     promptTokens,
     hasDeepSeek: Boolean(process.env.DEEPSEEK_API_KEY),
     // Keyed by tier, not by provider. Chat has one Google tier so the two
@@ -595,7 +614,21 @@ export async function POST(request: Request) {
     models: {
       groq: process.env.CHAT_MODEL,
       deepseek: process.env.DEEPSEEK_MODEL,
-      google: process.env.FALLBACK_MODEL,
+      // Two Gemini models do the chat job, and which one depends on what was
+      // asked. flash-lite answers a short question in four seconds, and it is
+      // the right tier for "what is the difference between に and で".
+      //
+      // It is the wrong tier for "list all the vocab for topic 12". Measured
+      // on that question, with the same prompt and the same pages: flash-lite
+      // returns the words as one flat A-to-Z glossary and drops every
+      // instruction about teaching them — the book's own grouping, the line
+      // saying what the topic is for, the note on how a counter attaches.
+      // Asked three times with those rules made progressively more explicit,
+      // it dropped them three times. gemini-3.8-flash follows them, and so
+      // does deepseek-v4-flash behind it; both take around 27 seconds where
+      // flash-lite takes six. That is the trade, and it is only worth making
+      // on the questions that need it.
+      google: deepAnswer ? process.env.CHAT_DEEP_MODEL : process.env.FALLBACK_MODEL,
     },
   });
 
@@ -633,57 +666,9 @@ export async function POST(request: Request) {
     });
   }
 
-  let result: ReturnType<typeof streamText> | undefined;
-  let modelUsed = "";
-  // A tier that neither accepts nor refuses gets the same treatment as one
-  // that refuses. See ACCEPT_BUDGET_MS: a stalled provider used to hold the
-  // whole turn until the route's own 60s ceiling killed it, and the student
-  // got nothing where a fallback would have got them an answer.
-  const budget = acceptBudgetMs(Boolean(speaking), promptTokens);
-
-  for (const tier of tiers) {
-    const controller = new AbortController();
-    const attempt = tier.start(controller.signal);
-    const tierFrom = Date.now();
-    try {
-      // Resolves once the provider accepts the request; rejects on 429/5xx
-      // before any tokens stream, which is exactly the fallback window.
-      await withDeadline(attempt.warnings, budget, "tier_timeout");
-      clock.mark(`model:${tier.key}`);
-      noteProviderSuccess(tier.key);
-      result = attempt;
-      modelUsed = tier.label;
-      break;
-    } catch (error) {
-      // Rate limit or outage: try the next tier, retry this one next request.
-      // Unfunded or revoked: stop offering it until the isolate recycles.
-      // Timed out: abort it, or the abandoned stream keeps running — and on a
-      // metered provider an abandoned stream is still a paid one.
-      controller.abort();
-      console.error(
-        `chat tier ${tier.label} declined after ${Date.now() - tierFrom}ms:`,
-        error instanceof Error ? error.message : error,
-      );
-      noteProviderFailure(tier.key, error);
-    }
-  }
-
-  if (!result) {
-    return Response.json({ error: "all_models_unavailable" }, { status: 502 });
-  }
-
-  // One line per turn, slowest stage first. This is the whole of the
-  // performance instrumentation: the answer streams from here, so the time
-  // recorded is the time until the student sees a first word.
-  console.info(
-    clock.format(
-      `turn ${conversation.modality}/${conversation.act}/${intent.intent} (${conversation.because}) ` +
-        `${routeReason(speaking ? "voice_turn" : "chat_answer", route, promptTokens)} via ${modelUsed}`,
-    ),
-  );
-
-  return result.toUIMessageStreamResponse({
-    headers: setCookie ? { "Set-Cookie": setCookie } : undefined,
+  /** What the client gets with the answer, built per tier because the
+   * metadata names the model that wrote it. */
+  const streamOptions = (label: string): StreamOptions => ({
     messageMetadata: ({ part }) => {
       if (part.type === "finish") {
         // The conversation's language rides out with the answer so the voice
@@ -691,7 +676,7 @@ export async function POST(request: Request) {
         // not silently start a new conversation in a different one.
         return {
           citations,
-          model: modelUsed,
+          model: label,
           conversationId,
           language: conversation.language.language,
           languageLocked: conversation.language.locked,
@@ -704,7 +689,7 @@ export async function POST(request: Request) {
         .map((p) => p.text)
         .join("");
       if (!answer) return;
-      await persistTurn(answer, citations, modelUsed);
+      await persistTurn(answer, citations, label);
       // Cache fire-and-forget: a failed write must not break the reply.
       // Small talk is never cached — it has no embedding and no reuse value.
       if (vectorLiteral && db && cacheable) {
@@ -722,6 +707,83 @@ export async function POST(request: Request) {
       }
     },
   });
+
+  let answerStream: ReadableStream<UIMessageChunk> | undefined;
+  let modelUsed = "";
+  // A tier that neither accepts nor refuses gets the same treatment as one
+  // that refuses. See ACCEPT_BUDGET_MS: a stalled provider used to hold the
+  // whole turn until the route's own 60s ceiling killed it, and the student
+  // got nothing where a fallback would have got them an answer.
+  const budget = acceptBudgetMs(Boolean(speaking), promptTokens, deepAnswer);
+
+  for (const tier of tiers) {
+    const controller = new AbortController();
+    const attempt = tier.start(controller.signal);
+    const tierFrom = Date.now();
+    try {
+      // Wait for the FIRST CHUNK, not for the answer.
+      //
+      // This used to await `attempt.warnings`, which reads as "has the
+      // provider accepted?" and is documented, three lines into the AI SDK's
+      // types, as "Automatically consumes the stream". It does exactly that:
+      // the await did not return until the whole answer had been generated,
+      // and only then was the stream handed to the client — which arrived
+      // complete, all at once, after a spinner. Every number this route has
+      // ever logged as "the time until the student sees a first word" was in
+      // fact the time to the LAST word, and streaming, which the app has had
+      // all along, has never once been visible to a student.
+      //
+      // Teeing is what fixes it. One branch is read exactly far enough to
+      // know the provider has started answering — which is the same signal
+      // the cascade wanted, available far earlier — and then cancelled.
+      // Cancelling one branch of a tee does not disturb the other, so the
+      // client's branch still carries the first chunk and everything after
+      // it, from the moment it exists.
+      const ui = attempt.toUIMessageStream(streamOptions(tier.label));
+      const [probe, out] = ui.tee();
+      const reader = probe.getReader();
+      await withDeadline(reader.read(), budget, "tier_timeout");
+      void reader.cancel();
+      clock.mark(`model:${tier.key}`);
+      noteProviderSuccess(tier.key);
+      answerStream = out;
+      modelUsed = tier.label;
+      break;
+    } catch (error) {
+      // Rate limit or outage: try the next tier, retry this one next request.
+      // Unfunded or revoked: stop offering it until the isolate recycles.
+      // Timed out: abort it, or the abandoned stream keeps running — and on a
+      // metered provider an abandoned stream is still a paid one.
+      controller.abort();
+      console.error(
+        `chat tier ${tier.label} declined after ${Date.now() - tierFrom}ms:`,
+        error instanceof Error ? error.message : error,
+      );
+      noteProviderFailure(tier.key, error);
+    }
+  }
+
+  if (!answerStream) {
+    return Response.json({ error: "all_models_unavailable" }, { status: 502 });
+  }
+
+  // One line per turn, slowest stage first. This is the whole of the
+  // performance instrumentation, and it is now true: the timer stops at the
+  // first chunk, which is the moment the student sees a first word. It used
+  // to stop at the last one, because the await above consumed the stream.
+  console.info(
+    clock.format(
+      `turn ${conversation.modality}/${conversation.act}/${intent.intent} (${conversation.because}) ` +
+        `${routeReason(task, route, promptTokens)} via ${modelUsed}`,
+    ),
+  );
+
+  // The stream the probe branch left untouched, from its first chunk on.
+  return createUIMessageStreamResponse({
+    stream: answerStream,
+    headers: setCookie ? { "Set-Cookie": setCookie } : undefined,
+  });
+
 }
 
 /** Serve a cache hit in the same UI-message-stream shape as a live answer. */
