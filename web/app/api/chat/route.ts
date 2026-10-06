@@ -587,7 +587,13 @@ export async function POST(request: Request) {
   // spoken one wants the fastest tier because a student is waiting in silence
   // for it, and the typed one wants the tier that can actually hold six
   // passages of textbook. See lib/router.ts for the measurements.
-  const route = routeModels(speaking ? "voice_turn" : "chat_answer", {
+  // A list, or a span of topics: the questions whose answers are a lesson
+  // rather than a sentence, and the ones flash-lite flattens.
+  const deepAnswer =
+    !speaking && (wantsEverything(query.text) || query.topics.length > 0);
+
+  const task = speaking ? "voice_turn" : deepAnswer ? "chat_deep" : "chat_answer";
+  const route = routeModels(task, {
     promptTokens,
     hasDeepSeek: Boolean(process.env.DEEPSEEK_API_KEY),
     // Keyed by tier, not by provider. Chat has one Google tier so the two
@@ -595,7 +601,21 @@ export async function POST(request: Request) {
     models: {
       groq: process.env.CHAT_MODEL,
       deepseek: process.env.DEEPSEEK_MODEL,
-      google: process.env.FALLBACK_MODEL,
+      // Two Gemini models do the chat job, and which one depends on what was
+      // asked. flash-lite answers a short question in four seconds, and it is
+      // the right tier for "what is the difference between に and で".
+      //
+      // It is the wrong tier for "list all the vocab for topic 12". Measured
+      // on that question, with the same prompt and the same pages: flash-lite
+      // returns the words as one flat A-to-Z glossary and drops every
+      // instruction about teaching them — the book's own grouping, the line
+      // saying what the topic is for, the note on how a counter attaches.
+      // Asked three times with those rules made progressively more explicit,
+      // it dropped them three times. gemini-3.8-flash follows them, and so
+      // does deepseek-v4-flash behind it; both take around 27 seconds where
+      // flash-lite takes six. That is the trade, and it is only worth making
+      // on the questions that need it.
+      google: deepAnswer ? process.env.CHAT_DEEP_MODEL : process.env.FALLBACK_MODEL,
     },
   });
 
@@ -639,7 +659,7 @@ export async function POST(request: Request) {
   // that refuses. See ACCEPT_BUDGET_MS: a stalled provider used to hold the
   // whole turn until the route's own 60s ceiling killed it, and the student
   // got nothing where a fallback would have got them an answer.
-  const budget = acceptBudgetMs(Boolean(speaking), promptTokens);
+  const budget = acceptBudgetMs(Boolean(speaking), promptTokens, deepAnswer);
 
   for (const tier of tiers) {
     const controller = new AbortController();
@@ -678,7 +698,7 @@ export async function POST(request: Request) {
   console.info(
     clock.format(
       `turn ${conversation.modality}/${conversation.act}/${intent.intent} (${conversation.because}) ` +
-        `${routeReason(speaking ? "voice_turn" : "chat_answer", route, promptTokens)} via ${modelUsed}`,
+        `${routeReason(task, route, promptTokens)} via ${modelUsed}`,
     ),
   );
 

@@ -151,7 +151,14 @@ export function canTakePrompt(name: string, tokens: number): boolean {
 // off mid-paper on the two runs that took longer than that and fallen back to
 // a worse paper for no reason, which is the failure this constant exists to
 // prevent rather than cause.
-export const ACCEPT_BUDGET_MS = { spoken: 6_000, typed: 12_000, structured: 40_000 } as const;
+export const ACCEPT_BUDGET_MS = {
+  spoken: 6_000,
+  typed: 12_000,
+  /** A list or a range, answered by the teaching model. Two tiers of this
+   * still fit inside the chat route's 60s, with the second one tight. */
+  deep: 28_000,
+  structured: 40_000,
+} as const;
 
 /** The typed budget, stretched for a prompt large enough to need it.
  *
@@ -175,8 +182,19 @@ export const ACCEPT_BUDGET_MS = { spoken: 6_000, typed: 12_000, structured: 40_0
 const TYPED_BUDGET_FROM_TOKENS = 8_000;
 const TYPED_BUDGET_CEILING_MS = 26_000;
 
-export function acceptBudgetMs(speaking: boolean, promptTokens: number): number {
+export function acceptBudgetMs(
+  speaking: boolean,
+  promptTokens: number,
+  deep = false,
+): number {
   if (speaking) return ACCEPT_BUDGET_MS.spoken;
+  // A question answered by the teaching model is answered by a slower model
+  // on purpose. Measured on "list all the vocab for topic 12": flash-lite
+  // accepts inside 12s and writes a glossary; gemini-3.8-flash and
+  // deepseek-v4-flash both write the lesson and both need around 27 seconds
+  // end to end. Declining them on a budget cut for the fast model is how the
+  // fast model keeps winning a job it does badly.
+  if (deep) return ACCEPT_BUDGET_MS.deep;
   // A second per extra thousand tokens. Deliberately generous: the tier that
   // timed out at 12s was observed answering the same question in 9s a run
   // earlier, so the margin between "about to answer" and "declined" was tenths
