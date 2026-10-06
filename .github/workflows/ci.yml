@@ -271,12 +271,16 @@ jobs:
           test "$(docker run --rm --entrypoint id chattobira-ingest:ci -u)" != "0"
           echo "Runs unprivileged."
 
+      # Accepted findings live in ingest/.trivyignore.yaml, each with a
+      # reason and an expiry date so it comes back for review rather than
+      # being silenced forever — the same bargain the web image makes.
       - name: Scan for known vulnerabilities
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: chattobira-ingest:ci
           severity: HIGH,CRITICAL
           ignore-unfixed: true
+          trivyignores: ingest/.trivyignore.yaml
           exit-code: "1"
 
   docker-web:
