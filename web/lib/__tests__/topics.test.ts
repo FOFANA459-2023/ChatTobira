@@ -5,6 +5,7 @@ import {
   divisionPattern,
   printedForms,
   sectionForAspect,
+  wantsEverything,
   topicRefs,
 } from "@/lib/topics";
 import {
@@ -309,5 +310,75 @@ describe("rankTopicPages — choosing the half of the book that was asked for", 
       null,
     );
     expect(ranked[0].content).toContain("語彙");
+  });
+});
+
+describe("topicRefs — a span of topics", () => {
+  const markers = (text: string) => topicRefs(text).map((r) => r.marker);
+
+  it("reads a range as every division inside it", () => {
+    // "list all topic 11 to 17 verbs" used to search Topic 11 and stop. Six
+    // sevenths of the question was never looked up, and the model filled the
+    // gap from its own Japanese rather than from the book.
+    expect(markers("list all topic 11 to 17 verbs and their te forms")).toEqual([
+      "T11", "T12", "T13", "T14", "T15", "T16", "T17",
+    ]);
+  });
+
+  it("reads every connector the students type", () => {
+    for (const text of [
+      "topic 11-14",
+      "topic 11 – 14",
+      "topics 11 through 14",
+      "topic 11 to 14",
+      "トピック11〜14",
+      "トピック11から14",
+    ]) {
+      expect(markers(text)).toEqual(["T11", "T12", "T13", "T14"]);
+    }
+  });
+
+  it("keeps a lesson range a lesson range", () => {
+    const refs = topicRefs("lesson 3 to 6 kanji");
+    expect(refs.map((r) => r.marker)).toEqual(["T3", "T4", "T5", "T6"]);
+    expect(refs.every((r) => r.kind === "lesson")).toBe(true);
+  });
+
+  it("refuses a span wide enough to be the whole corpus", () => {
+    // Ten divisions is every topic in a Foundation book. Past that it is not
+    // a revision scope, and sweeping thirty topics into one prompt answers
+    // nothing well.
+    expect(markers("topic 1 to 30 everything")).toEqual(["T1"]);
+  });
+
+  it("still reads separate mentions separately", () => {
+    expect(markers("I studied topic 3 and topic 9 last week")).toEqual(["T3", "T9"]);
+    expect(markers("topic 14")).toEqual(["T14"]);
+  });
+});
+
+describe("aspectOf — a request about typesetting is not a request for kanji", () => {
+  it("ignores a furigana instruction when choosing the aspect", () => {
+    // The word kanji is in this question only to say how to set the answer.
+    // Read as the aspect, it sent a verb-list question to the stroke-order
+    // tables in the back half of the book.
+    expect(aspectOf("list all topic 11 to 17 verbs and their te forms. add furagana to their kanji")).toBeNull();
+    expect(aspectOf("topic 7 vocabulary with furigana")?.label).toBe("vocabulary");
+    expect(aspectOf("ふりがなをつけてください。トピック7の語彙")?.label).toBe("vocabulary");
+  });
+
+  it("still hears an actual kanji question", () => {
+    expect(aspectOf("topic 7 kanji")?.label).toBe("kanji");
+    expect(aspectOf("list the kanji for lesson 5")?.label).toBe("kanji");
+  });
+});
+
+describe("wantsEverything", () => {
+  it("tells a complete list apart from a couple of examples", () => {
+    expect(wantsEverything("list all topic 11 to 17 verbs")).toBe(true);
+    expect(wantsEverything("every verb in topic 12")).toBe(true);
+    expect(wantsEverything("トピック12の語彙を全部")).toBe(true);
+    expect(wantsEverything("give me an example of 〜ておく")).toBe(false);
+    expect(wantsEverything("what is the difference between に and で?")).toBe(false);
   });
 });

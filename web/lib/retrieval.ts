@@ -343,6 +343,15 @@ export const CONTEXT_MIN_SIMILARITY = Number(process.env.CONTEXT_MIN_SIMILARITY 
  * The floor never starves the prompt. If nothing clears it, the best two
  * candidates go in anyway and the model is told the material is thin, which
  * produces "the course material does not cover this" instead of silence.
+ *
+ * `perDocument` is the rule that has to move when the student names a
+ * division. "Never let one book crowd out the rest" is right for a general
+ * grammar question, which several books may answer, and it is exactly wrong
+ * for "list the Topic 11 to 17 verbs": that answer lives in ONE book by
+ * definition, and a cap of three pages of it meant the model was handed three
+ * pages of a seven-topic question and invented the remainder. The caller
+ * raises it when the question is scoped to divisions, because only the caller
+ * knows that it is.
  */
 export function selectContext(
   chunks: RetrievedChunk[],

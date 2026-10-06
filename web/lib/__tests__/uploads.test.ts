@@ -148,8 +148,28 @@ describe("contextBlock with an attached upload", () => {
       [chunk("TEXTBOOK_MARKER")],
       [{ filename: "huge.pdf", extracted: "x".repeat(50_000) }],
     );
-    expect(block.length).toBeLessThan(12_000);
+    // Bounded, and the textbook still survives beside it — which is the part
+    // that matters. The bound itself moved when the budgets were re-sized for
+    // the tier that actually answers: a four-page handout used to lose three
+    // of its pages before the model saw them.
+    expect(block.length).toBeLessThan(20_000);
     expect(block).toContain("TEXTBOOK_MARKER");
+  });
+
+  it("carries a multi-page handout whole", () => {
+    // A scanned A4 page of Japanese transcribes to roughly 1,500-3,000
+    // characters. Four pages used to arrive as two-thirds of page one, and
+    // the student got two lines back about a paper the app had barely read.
+    const fourPages = Array.from(
+      { length: 4 },
+      (_, i) => `PAGE_${i + 1}_START ${"あ".repeat(2_000)} PAGE_${i + 1}_END`,
+    ).join(" ");
+    const block = contextBlock([chunk("TEXTBOOK_MARKER")], [
+      { filename: "review.pdf", extracted: fourPages },
+    ]);
+    for (const marker of ["PAGE_1_END", "PAGE_2_END", "PAGE_3_END", "PAGE_4_END"]) {
+      expect(block).toContain(marker);
+    }
   });
 
   it("still answers from an upload when retrieval found nothing", () => {

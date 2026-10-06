@@ -11,7 +11,7 @@ import { routeModels, routeReason } from "@/lib/router";
 import { conversationKey, recallContext, rememberContext } from "@/lib/recent-context";
 import { pageSpellings } from "@/lib/pages";
 import { contextSizeFor } from "@/lib/intent";
-import { aspectOf } from "@/lib/topics";
+import { aspectOf, wantsEverything } from "@/lib/topics";
 import { turnRows } from "@/lib/history";
 import { contextBlock, recentTurns, systemPrompt, type AttachedUpload } from "@/lib/prompt";
 import {
@@ -465,8 +465,18 @@ export async function POST(request: Request) {
   // first. Citations come from that same set rather than from every
   // candidate — a page the answer was never built from is not a page the
   // answer can honestly offer to send the student to.
+  // How much the question actually asked for. A span of topics and a request
+  // for ALL of something both mean the answer is a list the student will
+  // check against their book, and a list cut short is worse than slow.
+  const demand = {
+    divisions: query.topics.length,
+    exhaustive: wantsEverything(query.text),
+  };
+  const contextLimit = contextSizeFor(intent.intent, Boolean(speaking), demand);
   const context = selectContext(chunks, {
-    limit: contextSizeFor(intent.intent, Boolean(speaking)),
+    limit: contextLimit,
+    // One book legitimately owns a division-scoped answer; see selectContext.
+    perDocument: demand.divisions > 0 ? Math.max(4, contextLimit) : 3,
   });
   const citations = buildCitations(context);
 

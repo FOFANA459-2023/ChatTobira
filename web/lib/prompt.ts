@@ -151,6 +151,9 @@ ANSWER THE QUESTION
 - Work out what the student actually wants before writing. A student asking "what's the difference between に and で?" wants the rule and examples that show it, not a definition of each in turn.
 - Then earn the answer: a short explanation of WHY, and 1–3 examples with translations. A student should not have to ask "can you give an example?" — that is the follow-up this app exists to prevent.
 - Answer the obvious next question in the same breath when it is one line. Do not pad beyond that: nobody wants the whole chapter.
+- LENGTH FOLLOWS THE QUESTION. "What is the difference between に and で?" is a short answer. "List all the Topic 11 to 17 verbs with their te-forms and meanings" is a long one, and cutting it short is not concision, it is a wrong answer the student has to ask for again. When they ask for ALL of something, or for a range of topics, give every item the material below contains — do not stop at a tidy ten, do not offer a sample, and never say "and so on". If the material genuinely runs out before the list does, give everything there is and say plainly which topics you could not find pages for.
+- When they ask you to review, go through or check a document, work through it properly: cover every section or question it contains, not the first one or two. A two-line reply to a two-page paper tells the student you did not read it.
+- Never answer a repeat of a question with a repeat of the answer. If the student asks again, or says the answer was incomplete or wrong, they are telling you the first one failed — change what you give them: go wider, give the part you left out, or say what you could not find and why. Repeating the same list with the same items is how three turns get spent on one question.
 - Never end by asking the student to clarify something you could have reasonably guessed. Answer the likely reading, and say in one line what you assumed.
 - The source material below is the result of a search across EVERY textbook and class material the course has, not a document the student handed you. Never call it "the excerpts", "the material you provided", "the material you uploaded" or "what you've shared" — and never refuse on the grounds that it does not contain something. It is a search result; the corpus is larger than it.
 - Only say the course does not cover something when the material below is genuinely unrelated to the question. If it is thin but related, answer from what is there and say what you are unsure of. "Go and open the book yourself" is never the answer — reading the books is the entire job.
@@ -204,21 +207,42 @@ ${scopeLine}${
   }`;
 }
 
-/** Per-chunk and total character budgets for the model context. Groq's free
- * tier allows 12k tokens/minute — an unbounded context block both slows the
- * first token and burns straight through that ceiling. The per-chunk budget
- * matches the chunker's MAX_CHARS (1600) so a retrieved passage is never
- * truncated mid-table: the model cannot reproduce a passage in full — which
- * the prompt now requires — if the context only carried half of it. */
+/** Per-chunk and total character budgets for the model context.
+ *
+ * These were sized for Groq's shared 12k tokens/minute, back when Groq led
+ * the chat cascade. It does not: PREFERENCE in router.ts puts Gemini first on
+ * a paid key, Groq second, DeepSeek last, and `canTakePrompt` already SKIPS a
+ * tier whose ceiling a prompt exceeds — Groq's 6,500 tokens is modelled there
+ * and nowhere else. So the one provider these numbers protected is the one
+ * provider the cascade can already route around, and every student was paying
+ * for it on every question: six passages, three of them from any one book.
+ *
+ * Raised to what the tier that actually answers can hold. "The Gemini context
+ * is far larger than anything this app builds" (providers.ts), and the cost
+ * of being wrong in this direction is a slower first token, where the cost of
+ * being wrong in the other is the model inventing the half of the answer it
+ * was not given.
+ *
+ * The per-chunk budget still matches the chunker's MAX_CHARS (1600) so a
+ * retrieved passage is never truncated mid-table: the model cannot reproduce
+ * a passage in full — which the prompt requires — if the context only carried
+ * half of it.
+ */
 const CHUNK_CHAR_BUDGET = 1600;
-const TOTAL_CHAR_BUDGET = 8000;
+const TOTAL_CHAR_BUDGET = 28000;
 
-/** Uploads share the total budget rather than adding to it — the ceiling
- * exists because of Groq's 12k tokens/minute, and an attachment does not
- * raise that. Capped at this much so a long scan cannot crowd the textbook
- * out of its own answer, but placed FIRST: the student attached the file
- * because it is what they want to talk about. */
-const UPLOAD_CHAR_BUDGET = 2500;
+/** Uploads share the total budget rather than adding to it, and are placed
+ * FIRST: the student attached the file because it is what they want to talk
+ * about.
+ *
+ * 2,500 characters was under one page. A student uploading a four-page review
+ * sheet had three of those pages silently dropped before the model saw them,
+ * then got a two-line answer about a two-page paper and reasonably concluded
+ * the app had not read it. It had not. A scanned A4 page of Japanese
+ * transcribes to roughly 1,500-3,000 characters, so this holds a six-page
+ * handout whole — which is the size the course actually sets.
+ */
+const UPLOAD_CHAR_BUDGET = 16000;
 
 /** A student's own uploaded file, as context. */
 export interface AttachedUpload {
@@ -290,9 +314,48 @@ export function contextBlock(
  * per-minute token budget re-reading itself, which slows generation and
  * eventually squeezes out the course material — the one part of the prompt
  * that makes the answer correct. Recent turns are what a follow-up refers to;
- * the rest is history. */
-const HISTORY_TURNS = 8;
+ * the rest is history.
+ *
+ * Eight messages is four exchanges, and it was cut that fine for the same
+ * per-minute ceiling the character budgets above were cut for — a ceiling the
+ * cascade now routes around rather than suffers. Four exchanges is not much
+ * of a lesson: a student who asks a question, is given a list, says it is
+ * incomplete, asks for meanings too and then asks about a different topic has
+ * already pushed the start of their own question out of the window, which is
+ * what "it forgets what we were talking about" means in practice. */
+const HISTORY_TURNS = 16;
 
-export function recentTurns<T>(messages: T[], limit = HISTORY_TURNS): T[] {
-  return messages.length <= limit ? messages : messages.slice(-limit);
+/** And how much of it by SIZE, which is the limit that actually binds.
+ *
+ * Counting messages assumes they are about the same size, and they stopped
+ * being: a question that asks for every verb in seven topics is answered with
+ * a sixty-row table, and sixteen turns of those is a prompt made almost
+ * entirely of the app re-reading its own homework — slower every turn, and
+ * eventually crowding out the course material that makes the next answer
+ * right. Sixteen ordinary turns fit well inside this; one enormous one is
+ * kept whole and simply leaves less room behind it.
+ */
+const HISTORY_CHAR_BUDGET = 24000;
+
+/** Never fewer than this, however large they are. A follow-up is usually
+ * about the turn immediately before it, and dropping that to save characters
+ * answers the wrong question entirely. */
+const HISTORY_FLOOR = 4;
+
+export function recentTurns<T>(
+  messages: T[],
+  limit = HISTORY_TURNS,
+  charBudget = HISTORY_CHAR_BUDGET,
+): T[] {
+  const recent = messages.length <= limit ? messages : messages.slice(-limit);
+
+  let used = 0;
+  let keptFrom = recent.length;
+  for (let i = recent.length - 1; i >= 0; i--) {
+    used += JSON.stringify(recent[i]).length;
+    const kept = recent.length - i;
+    if (used > charBudget && kept > HISTORY_FLOOR) break;
+    keptFrom = i;
+  }
+  return recent.slice(keptFrom);
 }
