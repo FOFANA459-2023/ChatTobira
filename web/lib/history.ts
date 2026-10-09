@@ -183,6 +183,18 @@ export function placeUploads(uploads: UploadRow[], messages: MessageRow[]): Chat
  * are simply discarded if the conversation turns out not to be readable. RLS
  * already returns no messages for a conversation that is not the student's,
  * so asking for them first costs nothing in safety. */
+/** How much of a reopened conversation is loaded, newest first.
+ *
+ * A thread has no natural end, and this used to have no limit: every message
+ * a student had ever sent was read, rendered into the page, and then posted
+ * back to /api/chat on their next question. The cost grew with the thread and
+ * was paid again on every page view and every turn. Fifty is well past what
+ * anyone scrolls back through in practice, and bounds both halves of that.
+ *
+ * Older messages are not deleted — they stay in `messages` and still belong
+ * to the conversation. They are simply not loaded into the open chat. */
+export const CONVERSATION_MESSAGES = 50;
+
 export async function loadConversation(
   supabase: SupabaseClient,
   id: number,
@@ -195,7 +207,13 @@ export async function loadConversation(
       .from("messages")
       .select("id, role, content, citations, model, created_at")
       .eq("conversation_id", id)
-      .order("created_at", { ascending: true }),
+      // Newest first, so the cap keeps the END of a long thread rather than
+      // its opening, and flipped back below. Uncapped, reopening a chat
+      // re-rendered every message it had ever held, and the browser then
+      // posted all of them back on the next question — work that grew with
+      // the conversation and had no ceiling. See CONVERSATION_MESSAGES.
+      .order("created_at", { ascending: false })
+      .limit(CONVERSATION_MESSAGES),
     supabase
       .from("uploads")
       .select("id, filename, status, error, created_at")
@@ -204,7 +222,9 @@ export async function loadConversation(
   ]);
   if (!conversation || (conversation as { deleted_at?: string | null }).deleted_at) return null;
 
-  const messages = (messageRows ?? []) as MessageRow[];
+  // Back into the order it was said: placeUploads, toUIMessages and the page
+  // itself all read a conversation forwards.
+  const messages = ((messageRows ?? []) as MessageRow[]).slice().reverse();
   // A database without uploads.conversation_id yet (migration 0013 not
   // applied) answers with an error here. The chat still opens, without files.
   const uploads = uploadsResult.error ? [] : ((uploadsResult.data ?? []) as UploadRow[]);
