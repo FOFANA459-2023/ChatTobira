@@ -22,12 +22,17 @@ alter table usage_windows
   add constraint usage_windows_kind_check
   check (kind in ('chat', 'voice', 'translate'));
 
--- 7200 seconds — two hours per five-hour window, charged a minute at a time
--- exactly as voice is. A long class is ninety minutes and this leaves room to
--- rejoin one after a dropped connection. Finite for the same reason every
--- other ceiling here is: a tab left open overnight is a real way to spend a
--- model quota, and a translation session streams audio continuously whether
--- or not anybody is listening to it.
+-- 3000 seconds — fifty minutes per five-hour window, charged a minute at a
+-- time exactly as voice is. Shorter than a full class on purpose: this is a
+-- judgement about what a continuous audio stream costs, not a fit to a
+-- timetable, and a student translating a ninety-minute lecture end to end
+-- will run out partway through it. Finite for the same reason every other
+-- ceiling here is — a tab left open overnight is a real way to spend a model
+-- quota, and this streams audio whether or not anybody is listening.
+--
+-- The teacher is not subject to it. unlimited_quota (0009) is checked inside
+-- consume_allowance and bypasses the cap entirely, so an admin session is
+-- counted and never refused.
 create or replace function allowance_limit(p_kind text)
 returns int
 language sql
@@ -36,7 +41,7 @@ as $$
   select case p_kind
            when 'chat'      then 50
            when 'voice'     then 1800
-           when 'translate' then 7200
+           when 'translate' then 3000
          end;
 $$;
 

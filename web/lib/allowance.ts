@@ -9,11 +9,15 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 export const CHAT_ALLOWANCE = 50;
 export const VOICE_ALLOWANCE_SECONDS = 1_800;
-/** Live translation runs for the length of a class, so it is counted apart
- * from speaking practice: a ninety-minute lecture would otherwise eat a whole
- * day of conversation and still stop before the class did. Charged a minute at
- * a time, exactly as voice is. See 0018_live_translation.sql. */
-export const TRANSLATE_ALLOWANCE_SECONDS = 7_200;
+/** Live translation is counted apart from speaking practice: they are
+ * different lengths of thing and neither should be able to spend the other's
+ * budget. Charged a minute at a time, exactly as voice is.
+ *
+ * Fifty minutes per five-hour window. Note that a full class is longer than
+ * that, so a student translating one end to end will run out partway; the
+ * number is a deliberate choice about cost rather than a fit to a timetable.
+ * See 0018_live_translation.sql, which holds the limit that actually bites. */
+export const TRANSLATE_ALLOWANCE_SECONDS = 3_000;
 export const WINDOW_HOURS = 5;
 /** Voice is charged a minute at a time, as each minute starts. */
 export const VOICE_SLICE_SECONDS = 60;
