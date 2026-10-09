@@ -7,8 +7,8 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-export const CHAT_ALLOWANCE = 20;
-export const VOICE_ALLOWANCE_SECONDS = 600;
+export const CHAT_ALLOWANCE = 50;
+export const VOICE_ALLOWANCE_SECONDS = 1_800;
 export const WINDOW_HOURS = 5;
 /** Voice is charged a minute at a time, as each minute starts. */
 export const VOICE_SLICE_SECONDS = 60;
