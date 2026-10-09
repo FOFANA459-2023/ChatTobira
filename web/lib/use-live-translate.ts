@@ -73,8 +73,14 @@ registerProcessor("tobira-translate-capture", TobiraTranslateCapture);
 interface ServerMessage {
   setupComplete?: unknown;
   serverContent?: {
-    modelTurn?: { parts?: { text?: string }[] };
+    /** Spoken audio of the translation. Deliberately ignored — see
+     * translateSetup for why this session asks for speech at all. */
+    modelTurn?: { parts?: { inlineData?: unknown }[] };
+    /** What the microphone heard. */
     inputTranscription?: { text?: string };
+    /** THE TRANSLATION. With responseModalities AUDIO this is where the text
+     * is; there is no text part to read. */
+    outputTranscription?: { text?: string };
     turnComplete?: boolean;
   };
   sessionResumptionUpdate?: { newHandle?: string; resumable?: boolean };
@@ -328,7 +334,10 @@ export function useLiveTranslation(): LiveTranslation {
       if (!content) return;
 
       const heard = content.inputTranscription?.text;
-      const meant = content.modelTurn?.parts?.map((p) => p.text ?? "").join("") ?? "";
+      // The translation arrives as the transcript of speech the browser never
+      // plays, not as a text part. modelTurn carries that audio and is
+      // dropped on the floor.
+      const meant = content.outputTranscription?.text ?? "";
       if (heard || meant) {
         draftRef.current = {
           source: draftRef.current.source + (heard ?? ""),

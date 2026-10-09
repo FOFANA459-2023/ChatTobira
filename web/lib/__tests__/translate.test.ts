@@ -84,12 +84,37 @@ describe("the interpreter's instruction", () => {
 describe("the setup a token locks", () => {
   const setup = translateSetup({ source: "ja", target: "en" });
 
-  it("asks for text, because the point is to read it while someone speaks", () => {
-    expect(setup.generationConfig.responseModalities).toEqual(["TEXT"]);
+  it("asks for AUDIO, because no live model on this key will emit text", () => {
+    // Measured 2026-10-09: gemini-3.1-flash-live-preview refuses TEXT at
+    // setup, and gemini-3.8-live accepts the setup and then closes the socket
+    // 1007 the moment it has to generate. Asking for text does not work, so
+    // the session asks for speech and reads the transcript of it.
+    expect(setup.generationConfig.responseModalities).toEqual(["AUDIO"]);
+    expect(setup.generationConfig.speechConfig).toBeDefined();
   });
 
-  it("transcribes the input, which is the half a student checks against", () => {
+  it("transcribes BOTH sides, because the output transcript IS the translation", () => {
+    // Without outputAudioTranscription this feature returns audio and nothing
+    // a browser can display.
     expect(setup.inputAudioTranscription).toBeDefined();
+    expect(setup.outputAudioTranscription).toBeDefined();
+  });
+
+  it("sends no field the API does not have", () => {
+    // `audio: { sampleRateHertz }` was invented and 400d every token mint:
+    // "Unknown name \"audio\" ... Cannot find field". Every key here is one
+    // the live endpoint accepted in a real mint.
+    const allowed = new Set([
+      "model",
+      "generationConfig",
+      "systemInstruction",
+      "realtimeInputConfig",
+      "inputAudioTranscription",
+      "outputAudioTranscription",
+      "sessionResumption",
+      "contextWindowCompression",
+    ]);
+    for (const key of Object.keys(setup)) expect(allowed.has(key)).toBe(true);
   });
 
   it("compresses the context window, without which a lecture ends at 15 minutes", () => {

@@ -25,12 +25,18 @@
  * holds the lecture in its own context and keeps improving on it.
  */
 
-import { INPUT_RATE } from "./live-voice";
-
 /** The model that listens. The same one speaking practice uses: measured
  * fastest to a first token on this key, and a translation that lags the
  * speaker is not a live translation. */
 export const TRANSLATE_MODEL = "gemini-3.8-live";
+
+/** The voice it translates in.
+ *
+ * It is never played. See translateSetup: this session asks for AUDIO it
+ * throws away and reads the TRANSCRIPT of that audio as the translation,
+ * because no live model on this key will emit text. A voice still has to be
+ * named for the request to be valid. */
+export const TRANSLATE_VOICE = "Kore";
 
 /** How long the speaker must pause before a segment is finished.
  *
@@ -85,6 +91,8 @@ export interface TranslateSetupOptions {
   source: SourceLanguage;
   target: LanguageCode;
   model?: string;
+  /** Named only because a speech request needs one; it is never played. */
+  voice?: string;
   silenceMs?: number;
   /** What the class is about, if the student says. It only ever reaches the
    * instruction as terminology guidance. */
@@ -148,10 +156,24 @@ export function translateSetup(options: TranslateSetupOptions) {
   return {
     model: `models/${model}`,
     generationConfig: {
-      // TEXT, not AUDIO. The point of this feature is something you can read
-      // while someone else is still speaking; spoken output would collide
-      // with the voice in the room.
-      responseModalities: ["TEXT"],
+      // AUDIO, and the audio is thrown away.
+      //
+      // This feature wants text, and asking for text does not work. Measured
+      // against this key on 2026-10-09: gemini-3.1-flash-live-preview refuses
+      // TEXT when the session is set up ("response modalities (TEXT) is not
+      // supported by the model"), and gemini-3.8-live is worse — it ACCEPTS
+      // the setup, returns setupComplete, and then closes the socket 1007
+      // with the same complaint the moment it actually has to generate. The
+      // two older live models are not on this key at all.
+      //
+      // So the session asks for speech and reads outputAudioTranscription,
+      // which is the same text the model would have written. The browser
+      // never plays the audio. It costs more than text would and arrives no
+      // later, and it is the only shape that works.
+      responseModalities: ["AUDIO"],
+      speechConfig: {
+        voiceConfig: { prebuiltVoiceConfig: { voiceName: options.voice ?? TRANSLATE_VOICE } },
+      },
       // No reasoning budget, for the same reason speaking practice has none:
       // it buys nothing on a turn like this and costs time to the first word.
       thinkingConfig: { thinkingBudget: 0 },
@@ -166,10 +188,13 @@ export function translateSetup(options: TranslateSetupOptions) {
         silenceDurationMs: options.silenceMs ?? TRANSLATE_SILENCE_MS,
       },
     },
-    // What the microphone heard, which is half of what gets saved. Without it
-    // the student has a translation and no way to check it. Output
-    // transcription is NOT asked for: the output is already text.
+    // What the microphone heard: half of what gets saved, and the only way a
+    // student can check a translation against what was actually said.
     inputAudioTranscription: {},
+    // THE TRANSLATION ITSELF. Not a nicety — with responseModalities AUDIO
+    // this is where the text comes from, and without it this feature returns
+    // nothing a browser can display.
+    outputAudioTranscription: {},
     // Google closes a connection every few minutes. Resumption carries the
     // lecture onto the next one with its context intact, which is the whole
     // reason this is a session rather than a series of requests — a resumed
@@ -179,6 +204,5 @@ export function translateSetup(options: TranslateSetupOptions) {
     // ninety, so this is not a tuning choice; the feature does not work
     // without it.
     contextWindowCompression: { slidingWindow: {} },
-    audio: { sampleRateHertz: INPUT_RATE },
   };
 }
