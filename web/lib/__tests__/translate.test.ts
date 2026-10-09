@@ -127,14 +127,27 @@ describe("the setup a token locks", () => {
     expect((setup as { tools?: unknown }).tools).toBeUndefined();
   });
 
-  it("waits longer than speaking practice before calling a segment finished", () => {
-    // A lecturer pauses between sentences; a learner pauses inside one. Ending
-    // a segment at every breath chops one sentence into four and translates
-    // each of them without the others.
+  it("uses the measured silence window", () => {
     expect(setup.realtimeInputConfig.automaticActivityDetection.silenceDurationMs).toBe(
       TRANSLATE_SILENCE_MS,
     );
-    expect(TRANSLATE_SILENCE_MS).toBeGreaterThan(500);
+    // Measured, three runs each: 900ms reached the first word of translation
+    // in ~1350ms and 400ms in ~950ms, both completing every time.
+    expect(TRANSLATE_SILENCE_MS).toBe(400);
+  });
+
+  it("does NOT raise the end-of-speech sensitivity, which truncates the speaker", () => {
+    // liveSetup sets END_SENSITIVITY_HIGH to end a student's turn sooner. On a
+    // lecture it cut the speaker off in four runs out of six, closing the turn
+    // after "Next, let's look" while the sentence ran on. Losing what was said
+    // is a worse failure than being a few hundred milliseconds late.
+    // Cast because the type does not carry the field at all, which is itself
+    // half the guarantee; this pins the other half at runtime.
+    const detection = setup.realtimeInputConfig.automaticActivityDetection as Record<
+      string,
+      unknown
+    >;
+    expect(detection.endOfSpeechSensitivity).toBeUndefined();
   });
 
   it("resumes a session only when it was given a handle to resume", () => {

@@ -223,9 +223,17 @@ export function LiveTranslation({
           <ol className="space-y-4">
             {live.segments.map((segment) => (
               <li key={segment.seq}>
-                <p className="text-[15px] leading-relaxed">{segment.translated}</p>
+                {/* The translation is the thing being read, often from across
+                    a lecture theatre on a laptop screen. It gets an explicit
+                    colour (inheriting is what made the pickers invisible),
+                    the largest size on the page, and full contrast. */}
+                <p className="text-base leading-relaxed text-neutral-900 sm:text-lg dark:text-neutral-100">
+                  {segment.translated}
+                </p>
                 {segment.source && (
-                  <p className="mt-1 text-xs text-neutral-500">{segment.source}</p>
+                  <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
+                    {segment.source}
+                  </p>
                 )}
               </li>
             ))}
@@ -233,12 +241,19 @@ export function LiveTranslation({
                 list so React never re-keys what is already settled, which is
                 what stops the transcript flickering as this grows. */}
             {live.pending && (
-              <li aria-live="polite">
-                <p className="text-[15px] leading-relaxed opacity-70">
+              // The line still arriving. It used to be dimmed to 70% to say
+              // "not final", which dimmed the one line the student is
+              // actually reading — they are watching the newest text, not the
+              // settled text above it. Marked with a rule down the left
+              // instead, which says the same thing and costs no contrast.
+              <li aria-live="polite" className="border-l-2 border-neutral-400 pl-3 dark:border-neutral-600">
+                <p className="text-base leading-relaxed text-neutral-900 sm:text-lg dark:text-neutral-100">
                   {live.pending.translated || "…"}
                 </p>
                 {live.pending.source && (
-                  <p className="mt-1 text-xs text-neutral-400">{live.pending.source}</p>
+                  <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
+                    {live.pending.source}
+                  </p>
                 )}
               </li>
             )}
