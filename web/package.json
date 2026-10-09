@@ -29,6 +29,9 @@
     "tiny-segmenter": "^0.2.0",
     "zod": "^3.24.0"
   },
+  "overrides": {
+    "sharp": "^0.35.5"
+  },
   "devDependencies": {
     "@eslint/eslintrc": "^3.2.0",
     "@opennextjs/cloudflare": "^1.0.0",

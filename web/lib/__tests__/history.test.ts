@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { placeUploads, toUIMessages, turnRows } from "../history";
+import {
+  CONVERSATION_MESSAGES,
+  loadConversation,
+  placeUploads,
+  toUIMessages,
+  turnRows,
+} from "../history";
 import { recentTurns } from "../prompt";
 
 describe("turnRows", () => {
@@ -100,7 +106,7 @@ describe("recentTurns — bounded by size as well as by count", () => {
   it("keeps ordinary turns by count", () => {
     const messages = Array.from({ length: 30 }, (_, i) => turn(i, 200));
     const kept = recentTurns(messages);
-    expect(kept.length).toBe(16);
+    expect(kept.length).toBe(15);
     expect(kept.at(-1)?.id).toBe(29);
   });
 
@@ -125,5 +131,74 @@ describe("recentTurns — bounded by size as well as by count", () => {
   it("returns a short conversation untouched", () => {
     const messages = [turn(1, 50), turn(2, 50)];
     expect(recentTurns(messages)).toEqual(messages);
+  });
+});
+
+describe("loadConversation — a thread has no natural end, so it is capped", () => {
+  const row = (id: number) => ({
+    id,
+    role: "user" as const,
+    content: "message " + id,
+    citations: null,
+    model: null,
+    created_at: new Date(Date.UTC(2026, 0, 1, 0, id)).toISOString(),
+  });
+
+  /** Enough of PostgREST's builder to record what the query asked for. Each
+   * method returns the builder; awaiting it resolves like a PostgREST reply. */
+  function fakeClient(messageRows: ReturnType<typeof row>[]) {
+    const asked: { order?: { ascending?: boolean }; limit?: number } = {};
+    const build = (data: unknown, record: boolean) => {
+      const b: Record<string, unknown> = {};
+      Object.assign(b, {
+        select: () => b,
+        eq: () => b,
+        order: (_c: string, opts?: { ascending?: boolean }) => {
+          if (record) asked.order = opts;
+          return b;
+        },
+        limit: (n: number) => {
+          if (record) asked.limit = n;
+          return b;
+        },
+        maybeSingle: () => Promise.resolve({ data }),
+        then: (ok: (v: unknown) => unknown, no?: (e: unknown) => unknown) =>
+          Promise.resolve({ data, error: null }).then(ok, no),
+      });
+      return b;
+    };
+    const client = {
+      from: (table: string) =>
+        table === "conversations"
+          ? build({ id: 7, deleted_at: null }, false)
+          : table === "messages"
+            ? build(messageRows, true)
+            : build([], false),
+    };
+    return { client, asked };
+  }
+
+  it("asks for only the newest CONVERSATION_MESSAGES, not the whole thread", async () => {
+    // Uncapped, reopening a chat read every message it had ever held and the
+    // browser posted all of them back on the next question. Both halves of
+    // that grew with the conversation and neither had a ceiling.
+    const { client, asked } = fakeClient([row(1)]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await loadConversation(client as any, 7);
+    expect(asked.limit).toBe(CONVERSATION_MESSAGES);
+    // Newest first is what makes the limit keep the END of the thread. Asking
+    // ascending with a limit would hand the student the opening of a long
+    // conversation and hide what they just said.
+    expect(asked.order?.ascending).toBe(false);
+  });
+
+  it("hands them back in the order they were said", async () => {
+    // The query is newest-first; everything downstream — placeUploads,
+    // toUIMessages, the page — reads a conversation forwards.
+    const newestFirst = [row(3), row(2), row(1)];
+    const { client } = fakeClient(newestFirst);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const loaded = await loadConversation(client as any, 7);
+    expect(loaded?.messages.map((m) => m.id)).toEqual(["saved-1", "saved-2", "saved-3"]);
   });
 });

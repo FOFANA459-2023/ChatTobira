@@ -336,7 +336,7 @@ export function contextBlock(
  * incomplete, asks for meanings too and then asks about a different topic has
  * already pushed the start of their own question out of the window, which is
  * what "it forgets what we were talking about" means in practice. */
-const HISTORY_TURNS = 16;
+const HISTORY_TURNS = 15;
 
 /** And how much of it by SIZE, which is the limit that actually binds.
  *
