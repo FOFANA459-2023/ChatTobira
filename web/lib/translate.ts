@@ -40,13 +40,34 @@ export const TRANSLATE_VOICE = "Kore";
 
 /** How long the speaker must pause before a segment is finished.
  *
- * Longer than the 500ms speaking practice uses, and deliberately so. That
- * number is tuned for a learner hunting for a word mid-sentence, where
- * cutting them off is the failure. Here the speaker is fluent and the failure
- * is the opposite: a segment that ends at every natural breath, chopping one
- * sentence into four and translating each without the others.
+ * 400ms, measured rather than reasoned. Three runs each of the same
+ * synthesised Japanese, clock from the end of the speech to the first word of
+ * translation on screen:
+ *
+ *   900ms   1348, 1339, 1366ms     every run complete
+ *   600ms    965, 1059,  972ms     every run complete
+ *   400ms    907,  936, 1037ms     every run complete
+ *
+ * The saving is the window itself, and in a real lecture it is worth more
+ * than the 400ms it looks like: a segment cannot begin until the speaker
+ * pauses for this long, and a lecturer in full flow does not pause for
+ * nine-tenths of a second very often.
+ *
+ * What is NOT set here is endOfSpeechSensitivity. liveSetup uses
+ * END_SENSITIVITY_HIGH to end a student's turn sooner, and on this job it is
+ * actively harmful: with it, 300ms and 500ms truncated the speaker in four
+ * runs out of six — one or two chunks and a turn that closed mid-sentence,
+ * "Next, let's look" where the sentence went on for another ten words. A
+ * translation that is late is annoying; one that silently drops half of what
+ * was said is worse than none.
+ *
+ * The time from the end of speech to a segment CLOSING is ~7.5s and none of
+ * these numbers move it. That is the model generating speech nobody will hear
+ * (see translateSetup), and it varied 7.0-23.2s across runs at an unchanged
+ * setting. The student does not wait for it — the text streams in six or
+ * seven pieces and is on screen from the first.
  */
-export const TRANSLATE_SILENCE_MS = 900;
+export const TRANSLATE_SILENCE_MS = 400;
 
 /** Languages a lecture can be translated into.
  *
