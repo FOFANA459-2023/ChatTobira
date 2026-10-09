@@ -12,14 +12,16 @@ function withCookies(cookie: string): Request {
 }
 
 describe("trial metering", () => {
-  it("offers the relaxed pitch allowances", () => {
-    // TEMPORARY, 2026-10-05: raised for the school pitch. Normally 3, 1 and 2
-    // — see the block above TRIALS in lib/trial.ts. The tests below are
-    // written against the constants rather than the numbers, so they keep
-    // testing the metering itself when these are restored.
-    expect(TRIALS.chat.limit).toBe(100);
-    expect(TRIALS.quiz.limit).toBe(25);
-    expect(TRIALS.feedback.limit).toBe(50);
+  it("offers a taste of each surface, and no more", () => {
+    // Back to the normal ceilings after the school pitch of 2026-10-06, which
+    // raised these to 100, 25 and 50. Pinned as literals on purpose: these
+    // three numbers are a product decision about how much a stranger gets for
+    // free, and moving one should have to be written down here too. Every
+    // other test below reads the constants, so they go on testing the
+    // metering itself whatever the limits are.
+    expect(TRIALS.chat.limit).toBe(3);
+    expect(TRIALS.quiz.limit).toBe(1);
+    expect(TRIALS.feedback.limit).toBe(2);
   });
 
   it("counts a visitor with no cookie as having spent nothing", () => {

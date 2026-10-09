@@ -7,14 +7,8 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-/* TEMPORARY — RELAXED FOR THE SCHOOL PITCH, 2026-10-05. Normal values are
- * 20 requests and 600 seconds. These two are only the wording; the limits
- * that bite are in supabase/migrations/0015_relax_quotas_for_pitch.sql and
- * MUST be applied to the database for this to take effect. Restore by
- * reverting the commit this block arrived in, and applying the restore SQL
- * quoted at the foot of that migration. See also lib/trial.ts. */
-export const CHAT_ALLOWANCE = 1000;
-export const VOICE_ALLOWANCE_SECONDS = 14_400;
+export const CHAT_ALLOWANCE = 20;
+export const VOICE_ALLOWANCE_SECONDS = 600;
 export const WINDOW_HOURS = 5;
 /** Voice is charged a minute at a time, as each minute starts. */
 export const VOICE_SLICE_SECONDS = 60;
