@@ -7,7 +7,7 @@ import { MAX_TITLE, type ConversationSummary } from "@/lib/history";
 import type { ShellUser } from "@/lib/shell";
 import { createClient } from "@/lib/supabase/client";
 
-export type ShellPage = "chat" | "speaking" | "grammar" | "kanji";
+export type ShellPage = "chat" | "speaking" | "translate" | "grammar" | "kanji";
 
 /** What the chat page hands the sidebar so its chats open in place, without a
  * page load. Every other page leaves this out: there a chat is a link to
@@ -24,6 +24,9 @@ export interface ChatControls {
 
 const PRACTICE: { page: ShellPage; href: string; label: string; ja: string; icon: ReactNode }[] = [
   { page: "speaking", href: "/speaking", label: "Speaking", ja: "会話", icon: <MicIcon /> },
+  // Beside speaking rather than beside the tests: both are the microphone,
+  // and a student looking for "the one that listens" looks here.
+  { page: "translate", href: "/translate", label: "Live translate", ja: "通訳", icon: <TranslateIcon /> },
   { page: "grammar", href: "/quiz?kind=grammar", label: "Grammar test", ja: "文法", icon: <GrammarIcon /> },
   { page: "kanji", href: "/quiz?kind=kanji", label: "Kanji test", ja: "漢字", icon: <KanjiIcon /> },
 ];
@@ -761,6 +764,18 @@ function MicIcon() {
       <rect x="9" y="3" width="6" height="11" rx="3" />
       <path d="M5 11a7 7 0 0 0 14 0" />
       <path d="M12 18v3" />
+    </Svg>
+  );
+}
+
+function TranslateIcon() {
+  return (
+    <Svg>
+      <path d="M4 5h9" />
+      <path d="M8.5 5v2c0 3.3-2 6-4.5 7" />
+      <path d="M6 10c0 2.2 2.5 4 5.5 4" />
+      <path d="M13 20l4-10 4 10" />
+      <path d="M14.6 17h4.8" />
     </Svg>
   );
 }

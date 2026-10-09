@@ -9,6 +9,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 export const CHAT_ALLOWANCE = 50;
 export const VOICE_ALLOWANCE_SECONDS = 1_800;
+/** Live translation runs for the length of a class, so it is counted apart
+ * from speaking practice: a ninety-minute lecture would otherwise eat a whole
+ * day of conversation and still stop before the class did. Charged a minute at
+ * a time, exactly as voice is. See 0018_live_translation.sql. */
+export const TRANSLATE_ALLOWANCE_SECONDS = 7_200;
 export const WINDOW_HOURS = 5;
 /** Voice is charged a minute at a time, as each minute starts. */
 export const VOICE_SLICE_SECONDS = 60;
@@ -18,7 +23,7 @@ export const VOICE_SLICE_SECONDS = 60;
  * move on could keep at most this much extra per minute. */
 export const VOICE_HANDOVER_MS = 8_000;
 
-export type AllowanceKind = "chat" | "voice";
+export type AllowanceKind = "chat" | "voice" | "translate";
 
 export type Spend =
   | { ok: true; remaining: number; resetsAt: string | null }
@@ -96,7 +101,11 @@ export function resetTime(resetsAt: string | null | undefined): string | null {
 export function exhaustedMessage(kind: AllowanceKind, resetsAt: string | null | undefined): string {
   const at = resetTime(resetsAt);
   const when = at ? `at ${at} (Japan time)` : `within ${WINDOW_HOURS} hours`;
-  return kind === "chat"
-    ? `You have used your ${CHAT_ALLOWANCE} questions and practice tests for now. More are available ${when}.`
-    : `You have used your ${VOICE_ALLOWANCE_SECONDS / 60} minutes of conversation for now. More are available ${when}.`;
+  if (kind === "chat") {
+    return `You have used your ${CHAT_ALLOWANCE} questions and practice tests for now. More are available ${when}.`;
+  }
+  if (kind === "translate") {
+    return `You have used your ${TRANSLATE_ALLOWANCE_SECONDS / 60} minutes of live translation for now. More are available ${when}.`;
+  }
+  return `You have used your ${VOICE_ALLOWANCE_SECONDS / 60} minutes of conversation for now. More are available ${when}.`;
 }
