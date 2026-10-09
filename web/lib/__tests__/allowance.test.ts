@@ -101,3 +101,54 @@ describe("refundAllowance", () => {
     expect(none.updates).toEqual([]);
   });
 });
+
+describe("spendAllowance tells three refusals apart", () => {
+  /** Just enough of a Supabase client to answer one rpc() call. */
+  const client = (row: unknown) =>
+    ({ rpc: async () => ({ data: row, error: null }) }) as never;
+
+  it("allows a spend and reports what is left", async () => {
+    const spent = await spendAllowance(
+      client([{ allowed: true, remaining: 2940, resets_at: "2026-10-09T16:35:00Z" }]),
+      "translate",
+      60,
+    );
+    expect(spent).toEqual({ ok: true, remaining: 2940, resetsAt: "2026-10-09T16:35:00Z" });
+  });
+
+  it("calls a spent window exhausted, because it has a time to come back to", async () => {
+    const spent = await spendAllowance(
+      client([{ allowed: false, remaining: 0, resets_at: "2026-10-09T16:35:00Z" }]),
+      "translate",
+      60,
+    );
+    expect(spent).toEqual({
+      ok: false,
+      exhausted: true,
+      resetsAt: "2026-10-09T16:35:00Z",
+    });
+  });
+
+  it("calls a missing ceiling unconfigured, NOT exhausted", async () => {
+    // The bug this exists for: consume_allowance refuses a kind whose
+    // allowance_limit() answers NULL with the same shape it uses for a spent
+    // one, and it checks that BEFORE unlimited_quota — so on a database
+    // missing the migration even the teacher is refused. Read as exhaustion
+    // it became "you have used your 50 minutes" on an account that had used
+    // none. resets_at is what tells them apart: a spent window always has
+    // one, a missing ceiling never gets far enough to have one.
+    const spent = await spendAllowance(
+      client([{ allowed: false, remaining: 0, resets_at: null }]),
+      "translate",
+      60,
+    );
+    expect(spent).toEqual({ ok: false, exhausted: false, unconfigured: true });
+    // The thing that must never be true again:
+    expect("exhausted" in spent && spent.exhausted).toBe(false);
+  });
+
+  it("treats a database error as neither of those", async () => {
+    const broken = { rpc: async () => ({ data: null, error: { message: "boom" } }) } as never;
+    expect(await spendAllowance(broken, "chat", 1)).toEqual({ ok: false, exhausted: false });
+  });
+});

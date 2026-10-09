@@ -32,10 +32,26 @@ export type AllowanceKind = "chat" | "voice" | "translate";
 export type Spend =
   | { ok: true; remaining: number; resetsAt: string | null }
   | { ok: false; exhausted: true; resetsAt: string | null }
-  | { ok: false; exhausted: false };
+  /** Not refused because the student has spent it — refused because this kind
+   * has no ceiling to spend against. See `unconfigured` below. */
+  | { ok: false; exhausted: false; unconfigured: true }
+  | { ok: false; exhausted: false; unconfigured?: false };
 
 /** Spend from the caller's allowance. `exhausted` means it did not fit and
- * nothing was spent; any other failure is the database's, not the student's. */
+ * nothing was spent; any other failure is the database's, not the student's.
+ *
+ * `unconfigured` is the third case, and it exists because the other two told
+ * a lie. consume_allowance refuses a kind whose allowance_limit() answers
+ * NULL — a migration that has not been applied yet — with exactly the same
+ * shape it uses for a spent allowance, and it tests `cap is null` BEFORE it
+ * tests unlimited_quota, so even the teacher is refused. Read as exhaustion,
+ * that becomes "you have used your 50 minutes" on an account that has used
+ * none, which is what shipped on 2026-10-09.
+ *
+ * resets_at is what tells them apart. A spent window always has one, because
+ * the row it is read from was inserted before the update that failed to fit.
+ * A missing ceiling never gets that far.
+ */
 export async function spendAllowance(
   supabase: SupabaseClient,
   kind: AllowanceKind,
@@ -50,9 +66,14 @@ export async function spendAllowance(
     | { allowed: boolean; remaining: number; resets_at: string | null }
     | undefined;
   if (!row) return { ok: false, exhausted: false };
-  return row.allowed
-    ? { ok: true, remaining: row.remaining, resetsAt: row.resets_at }
-    : { ok: false, exhausted: true, resetsAt: row.resets_at };
+  if (row.allowed) {
+    return { ok: true, remaining: row.remaining, resetsAt: row.resets_at };
+  }
+  // Refused with nothing to come back to: there is no ceiling for this kind.
+  if (row.resets_at === null) {
+    return { ok: false, exhausted: false, unconfigured: true };
+  }
+  return { ok: false, exhausted: true, resetsAt: row.resets_at };
 }
 
 /** Give back what was spent for something that then never happened — a
