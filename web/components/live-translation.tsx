@@ -97,14 +97,16 @@ export function LiveTranslation({
           <label className="flex flex-col gap-1 text-sm">
             <span className="text-neutral-600 dark:text-neutral-400">From</span>
             <select
-              className="min-w-36 rounded-lg border border-neutral-300 bg-white px-3 py-2 dark:border-neutral-700 dark:bg-neutral-900"
+              className="min-w-36 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-neutral-900 placeholder:text-neutral-500 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
               value={source}
               disabled={started}
               onChange={(e) => setSource(e.target.value as SourceLanguage)}
             >
-              <option value="auto">Detect automatically</option>
+              <option className="bg-white text-neutral-900 dark:bg-neutral-900 dark:text-neutral-100" value="auto">
+                Detect automatically
+              </option>
               {LANGUAGES.map((l) => (
-                <option key={l.code} value={l.code}>
+                <option className="bg-white text-neutral-900 dark:bg-neutral-900 dark:text-neutral-100" key={l.code} value={l.code}>
                   {l.label} — {l.native}
                 </option>
               ))}
@@ -114,13 +116,13 @@ export function LiveTranslation({
           <label className="flex flex-col gap-1 text-sm">
             <span className="text-neutral-600 dark:text-neutral-400">Into</span>
             <select
-              className="min-w-36 rounded-lg border border-neutral-300 bg-white px-3 py-2 dark:border-neutral-700 dark:bg-neutral-900"
+              className="min-w-36 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-neutral-900 placeholder:text-neutral-500 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
               value={target}
               disabled={started}
               onChange={(e) => setTarget(e.target.value as LanguageCode)}
             >
               {LANGUAGES.filter((l) => l.code !== source).map((l) => (
-                <option key={l.code} value={l.code}>
+                <option className="bg-white text-neutral-900 dark:bg-neutral-900 dark:text-neutral-100" key={l.code} value={l.code}>
                   {l.label} — {l.native}
                 </option>
               ))}
@@ -132,7 +134,7 @@ export function LiveTranslation({
               What the class is about <span className="opacity-60">(optional)</span>
             </span>
             <input
-              className="rounded-lg border border-neutral-300 bg-white px-3 py-2 dark:border-neutral-700 dark:bg-neutral-900"
+              className="rounded-lg border border-neutral-300 bg-white px-3 py-2 text-neutral-900 placeholder:text-neutral-500 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
               value={subject}
               disabled={started}
               maxLength={200}
