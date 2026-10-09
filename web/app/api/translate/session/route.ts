@@ -93,16 +93,34 @@ export async function POST(request: Request) {
 
   const spent = await spendAllowance(supabase, "translate", VOICE_SLICE_SECONDS);
   if (!spent.ok) {
-    return spent.exhausted
-      ? Response.json(
-          {
-            error: "quota_exhausted",
-            resetsAt: spent.resetsAt,
-            message: exhaustedMessage("translate", spent.resetsAt),
-          },
-          { status: 429 },
-        )
-      : Response.json({ error: "quota_check_failed" }, { status: 500 });
+    if (spent.exhausted) {
+      return Response.json(
+        {
+          error: "quota_exhausted",
+          resetsAt: spent.resetsAt,
+          message: exhaustedMessage("translate", spent.resetsAt),
+        },
+        { status: 429 },
+      );
+    }
+    // The allowance has no ceiling, which means 0018 has not been applied to
+    // this database. Said plainly rather than dressed up as a spent quota:
+    // "you have used your fifty minutes" on an account that has used none
+    // sends whoever reads it looking in entirely the wrong place.
+    if (spent.unconfigured) {
+      console.error(
+        "translate allowance missing: allowance_limit('translate') is NULL — apply 0018_live_translation.sql",
+      );
+      return Response.json(
+        {
+          error: "translate_not_configured",
+          message:
+            "Live translation is not switched on for this server yet. Nothing has been used from your allowance.",
+        },
+        { status: 503 },
+      );
+    }
+    return Response.json({ error: "quota_check_failed" }, { status: 500 });
   }
 
   const model = process.env.TRANSLATE_MODEL ?? TRANSLATE_MODEL;

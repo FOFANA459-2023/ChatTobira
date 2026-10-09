@@ -365,6 +365,16 @@ export function useLiveTranslation(): LiveTranslation {
           setError({ kind: "config", message: "Please sign in again to keep translating." });
           return false;
         }
+        // The server knows the feature is not switched on. Retrying cannot
+        // help, and retrying silently is how this looked like a quota problem
+        // in the first place.
+        if (minted.status === 503) {
+          setError({
+            kind: "config",
+            message: minted.message ?? "Live translation is not switched on for this server yet.",
+          });
+          return false;
+        }
         if (attempt < RECONNECT_ATTEMPTS) {
           await new Promise((r) => setTimeout(r, RECONNECT_BACKOFF_MS * 2 ** attempt));
           return connect(attempt + 1);
