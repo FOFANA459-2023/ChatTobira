@@ -89,10 +89,22 @@ COPY package-lock.json ./
 #
 # The version is read out of the lockfile first, so this tracks what CI
 # resolved rather than drifting to whatever is latest.
+#
+# sharp is forced to a patched version. miniflare depends on it at exactly
+# 0.35.4, which carries GHSA-wq5f-xc86-pv6w (HIGH, librsvg CVE-2026-96889)
+# and fails the Trivy gate below. The app's own override cannot reach it:
+# this stage builds a bare project and installs wrangler into it, so the
+# tree is resolved from scratch with none of the app's constraints. An
+# exception in .trivyignore.yaml would be the wrong trade here — the fix
+# exists and is a patch, where every entry in that file needs a semver-major
+# upgrade. Forcing a dependency its author pinned exactly is the risk, and
+# the smoke test immediately below is what catches it: nothing in this image
+# serves students, it exists to boot the worker and be talked to.
 RUN --mount=type=cache,target=/root/.npm \
     WRANGLER="$(node -p "require('./package-lock.json').packages['node_modules/wrangler'].version")" \
  && rm package-lock.json \
  && npm init -y > /dev/null \
+ && npm pkg set 'overrides.sharp=^0.35.5' \
  && npm install --no-audit --no-fund "wrangler@${WRANGLER}"
 
 # ---------------------------------------------------------------------------
