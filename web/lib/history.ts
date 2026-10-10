@@ -30,6 +30,16 @@ interface MessageRow {
   created_at: string;
 }
 
+/** One segment of a live translation session: what was heard and what it
+ * meant. Its own table rather than the messages table — see 0018. */
+interface TranslationSegmentRow {
+  seq: number;
+  source_text: string;
+  translated_text: string;
+  target_lang: string;
+  created_at: string;
+}
+
 interface UploadRow {
   id: number;
   filename: string;
@@ -158,6 +168,44 @@ export function toUIMessages(rows: MessageRow[], conversationId: number): UIMess
 
 /** Where each upload sits among the messages: after every message written no
  * later than it was added. */
+/** A translation session, as the chat already knows how to draw one.
+ *
+ * Each segment becomes the pair it already is: what the room heard as the
+ * student's turn, and what it meant as the reply. That reuses the whole
+ * chat renderer rather than inventing a second one, and it reads the way a
+ * transcript should — the Japanese above, the English under it.
+ *
+ * Ids are derived from the segment's seq rather than generated, so React
+ * keeps its rows across a re-render and a reload shows the same list.
+ */
+export function translationUIMessages(
+  rows: TranslationSegmentRow[],
+  conversationId: number,
+): UIMessage[] {
+  const out: UIMessage[] = [];
+  for (const row of rows) {
+    // A segment with nothing on one side is normal: the model produces no
+    // translation for a cough, and a pause produces no speech. Neither is
+    // worth a blank row in the transcript.
+    if (row.source_text.trim()) {
+      out.push({
+        id: `translated-${conversationId}-${row.seq}-src`,
+        role: 'user',
+        parts: [{ type: 'text', text: row.source_text }],
+      });
+    }
+    if (row.translated_text.trim()) {
+      out.push({
+        id: `translated-${conversationId}-${row.seq}`,
+        role: 'assistant',
+        parts: [{ type: 'text', text: row.translated_text }],
+        metadata: { citations: [], model: `live translation (${row.target_lang})`, conversationId },
+      });
+    }
+  }
+  return out;
+}
+
 export function placeUploads(uploads: UploadRow[], messages: MessageRow[]): ChatUpload[] {
   const times = messages.map((m) => Date.parse(m.created_at));
   return uploads
@@ -199,7 +247,8 @@ export async function loadConversation(
   supabase: SupabaseClient,
   id: number,
 ): Promise<{ id: number; messages: UIMessage[]; uploads: ChatUpload[] } | null> {
-  const [{ data: conversation }, { data: messageRows }, uploadsResult] = await Promise.all([
+  const [{ data: conversation }, { data: messageRows }, uploadsResult, segmentsResult] =
+    await Promise.all([
     // "*" rather than naming deleted_at, so this still reads before
     // migration 0013 adds the column.
     supabase.from("conversations").select("*").eq("id", id).maybeSingle(),
@@ -219,6 +268,20 @@ export async function loadConversation(
       .select("id, filename, status, error, created_at")
       .eq("conversation_id", id)
       .order("created_at", { ascending: true }),
+    // A live translation session keeps what it heard in its own table rather
+    // than in the messages table — see 0018. Nothing read it, so a finished lecture
+    // left a conversation with a title and nothing inside, and the student
+    // was told it had been saved to a chat that looked empty.
+    //
+    // Newest first and capped, for the same reason messages are: a lecture is
+    // hundreds of segments and the point of the cap is that reopening one is
+    // not unbounded work.
+    supabase
+      .from("translation_segments")
+      .select("seq, source_text, translated_text, target_lang, created_at")
+      .eq("conversation_id", id)
+      .order("seq", { ascending: false })
+      .limit(CONVERSATION_MESSAGES),
   ]);
   if (!conversation || (conversation as { deleted_at?: string | null }).deleted_at) return null;
 
@@ -229,9 +292,15 @@ export async function loadConversation(
   // applied) answers with an error here. The chat still opens, without files.
   const uploads = uploadsResult.error ? [] : ((uploadsResult.data ?? []) as UploadRow[]);
 
+  // A database without 0018 applied answers with an error here rather than an
+  // empty list. The chat still opens; it simply has no translation in it.
+  const segments = segmentsResult.error
+    ? []
+    : ((segmentsResult.data ?? []) as TranslationSegmentRow[]).slice().reverse();
+
   return {
     id,
-    messages: toUIMessages(messages, id),
+    messages: [...toUIMessages(messages, id), ...translationUIMessages(segments, id)],
     uploads: placeUploads(uploads, messages),
   };
 }

@@ -220,6 +220,40 @@ export interface LiveTranslation {
   end: () => void;
 }
 
+/** Sentence endings in every language this translates into, plus the CJK
+ * full stops, since a target language may be Japanese or Chinese. */
+/** A sentence ending, in any language this translates into. The CJK stops
+ * are here because the TARGET may be Japanese or Chinese, not only the
+ * source. Deliberately contains no backslash escapes — an earlier version
+ * lost them in transit and silently matched nothing. */
+const SENTENCE_END = /[.!?。．！？]["'”’)]?[ 	]*$/;
+
+/** Dr., e.g., i.e. — a full stop that ends no sentence. One or two letters
+ * before the stop, possibly repeated. Closing on these cuts a sentence in
+ * half. */
+const ABBREVIATION = /(?:^|[ (])(?:[A-Za-z]{1,2}[.])+$/;
+
+/** Below this, a 'sentence' is a fragment. Eight characters clears every
+ * abbreviation and still admits a short real sentence in any script. */
+const MIN_SEGMENT_CHARS = 8;
+
+/** A segment long enough to close on its own with no full stop in sight.
+ * A lecturer who does not pause produces one unbroken clause, and a line
+ * that never settles is a line that never gets saved. */
+const RUNAWAY_CHARS = 320;
+
+export function shouldClose(translated: string): boolean {
+  const text = translated.trimEnd();
+  if (!text) return false;
+  if (text.length >= RUNAWAY_CHARS) return true;
+  if (!SENTENCE_END.test(text)) return false;
+  if (ABBREVIATION.test(text)) return false;
+  // Counting WORDS here would have been the obvious guard and is wrong:
+  // Japanese and Chinese have no spaces, so a finished sentence counts as
+  // one word and would never close. Length works in every script.
+  return text.length >= MIN_SEGMENT_CHARS;
+}
+
 export function useLiveTranslation(): LiveTranslation {
   const [phase, setPhase] = useState<TranslatePhase>("idle");
   const [segments, setSegments] = useState<Segment[]>([]);
@@ -334,18 +368,37 @@ export function useLiveTranslation(): LiveTranslation {
       if (!content) return;
 
       const heard = content.inputTranscription?.text;
-      // The translation arrives as the transcript of speech the browser never
-      // plays, not as a text part. modelTurn carries that audio and is
-      // dropped on the floor.
+      // The translation arrives on outputTranscription in fragments, a few
+      // hundred milliseconds behind the matching fragment of the source.
+      // modelTurn carries audio nobody plays and is dropped on the floor.
       const meant = content.outputTranscription?.text ?? "";
-      if (heard || meant) {
-        draftRef.current = {
-          source: draftRef.current.source + (heard ?? ""),
-          translated: draftRef.current.translated + meant,
-        };
-        setPending({ ...draftRef.current });
+      if (!heard && !meant) {
+        if (content.turnComplete) finishSegment();
+        return;
       }
-      if (content.turnComplete) finishSegment();
+      draftRef.current = {
+        source: draftRef.current.source + (heard ?? ""),
+        translated: draftRef.current.translated + meant,
+      };
+      setPending({ ...draftRef.current });
+
+      // WHERE A SEGMENT ENDS.
+      //
+      // The translate model never sends turnComplete. It is not answering
+      // turns; it is interpreting a stream, and the stream does not stop
+      // until the student does. Waiting for a turn that never comes would
+      // leave one segment growing for ninety minutes, saved only at the end
+      // and lost entirely if the tab closed.
+      //
+      // So a sentence ending in the TRANSLATION closes a segment, with
+      // whatever source has arrived by then. The two run about a third of a
+      // second apart, so the pairing is close but not exact — a word of the
+      // source occasionally lands in the next segment. That is a cosmetic
+      // cost in the smaller, secondary line, and the alternative is aligning
+      // two streams that nothing promises are alignable.
+      if (content.turnComplete || shouldClose(draftRef.current.translated)) {
+        finishSegment();
+      }
     },
     [finishSegment],
   );
