@@ -45,6 +45,48 @@ body {
   min-height: 100dvh;
 }
 
+/* The live-translation indicator: four bars that rise and fall for as long as
+ * the microphone is open.
+ *
+ * Movement rather than a static icon, because the question it answers — is
+ * this still running? — is one a student asks mid-lecture without reading
+ * anything, and because the moment it STOPS moving is the moment they need to
+ * notice. A student who has asked for less motion gets the bars held at an
+ * even height instead; the chip's colour and wording still say "live". */
+@keyframes tobira-bars {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.tobira-bars > span {
+  height: 100%;
+  transform-origin: center bottom;
+  animation: tobira-bars 900ms ease-in-out infinite;
+}
+
+/* Staggered, so they read as a level meter rather than one bar four times. */
+.tobira-bars > span:nth-child(2) {
+  animation-delay: 150ms;
+}
+.tobira-bars > span:nth-child(3) {
+  animation-delay: 300ms;
+}
+.tobira-bars > span:nth-child(4) {
+  animation-delay: 450ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tobira-bars > span {
+    animation: none;
+    transform: scaleY(0.6);
+  }
+}
+
 /* iOS Safari zooms the page in when a field it focuses sets type smaller than
  * 16px, and does not zoom back out afterwards — the student is left pinching
  * the page back to width after every answer they type. So on phones every

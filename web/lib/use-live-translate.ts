@@ -96,6 +96,31 @@ function decode(data: unknown): ServerMessage | null {
   }
 }
 
+function sendAudio(socket: WebSocket, data: string) {
+  socket.send(
+    JSON.stringify({
+      realtimeInput: { audio: { mimeType: `audio/pcm;rate=${INPUT_RATE}`, data } },
+    }),
+  );
+}
+
+/** Whether the microphone is already allowed, so opening it cannot stop to
+ * ask. Only then is the token minted at the same time as the microphone is
+ * opened: a token has thirty seconds to open its socket, and a permission
+ * prompt left sitting on screen would run that out and spend a minute of
+ * allowance on a session that never happened. A browser with no Permissions
+ * API — Safari — answers no and keeps the old, strictly ordered path. */
+async function micAlreadyAllowed(): Promise<boolean> {
+  try {
+    const status = await navigator.permissions?.query({
+      name: "microphone" as PermissionName,
+    });
+    return status?.state === "granted";
+  } catch {
+    return false;
+  }
+}
+
 export interface Segment {
   seq: number;
   /** What the microphone heard. */
@@ -134,6 +159,11 @@ const SAVE_EVERY_SEGMENTS = 5;
 const SAVE_EVERY_MS = 15_000;
 /** The server refuses more than this in one write. */
 const MAX_BATCH = 50;
+/** How many 40ms frames of audio are held while the connection comes up.
+ * Seventy-five is three seconds: longer than opening a socket takes, and
+ * short enough that the model is never handed speech old enough to have
+ * stopped being the sentence in progress. */
+const PRE_ROLL_FRAMES = 75;
 
 type Minted =
   | { ok: true; token: string; model: string; expiresAt: number; remainingSeconds: number }
@@ -214,6 +244,10 @@ export interface LiveTranslation {
   remainingSeconds: number | null;
   /** The conversation these segments are being saved into, once there is one. */
   conversationId: number | null;
+  /** True between pressing End and the last segment reaching the server. The
+   * screen is cleared on the far side of this, so it is what tells a student
+   * their lecture is being written rather than discarded. */
+  saving: boolean;
   start: (options: { source: SourceLanguage; target: LanguageCode; subject?: string }) => void;
   pause: () => void;
   resume: () => void;
@@ -228,10 +262,25 @@ export interface LiveTranslation {
  * lost them in transit and silently matched nothing. */
 const SENTENCE_END = /[.!?。．！？]["'”’)]?[ 	]*$/;
 
-/** Dr., e.g., i.e. — a full stop that ends no sentence. One or two letters
- * before the stop, possibly repeated. Closing on these cuts a sentence in
- * half. */
-const ABBREVIATION = /(?:^|[ (])(?:[A-Za-z]{1,2}[.])+$/;
+/** A full stop that ends no sentence. Two shapes, because they are two
+ * different things:
+ *
+ *   e.g.  i.e.  a.m.  U.S.     a stop INSIDE the word, so at least two of them
+ *   Dr.   Prof.  Mr.   vs.     a title, which is a short and closed list
+ *
+ * What stood here was "one or two letters then a stop", which is also the
+ * shape of an ordinary sentence ending in a short word: "Please do it.",
+ * "I think so.", "the difference between wa and ga." None of those closed, so
+ * the line stayed open until the NEXT sentence finished and the student got
+ * two sentences at once, one of them late. For a reader that is the single
+ * most visible delay on the page, and it was self-inflicted.
+ *
+ * Where the two rules disagree, closing wins. Splitting one sentence in two
+ * costs a line break; failing to close costs a sentence's worth of waiting.
+ * So "etc." and "No." are deliberately absent — both end sentences far more
+ * often than they sit inside one. */
+const ABBREVIATION = /(?:^|[ ("])(?:[A-Za-z][.]){2,}$/;
+const TITLE = /(?:^|[ ("])(?:Mr|Mrs|Ms|Dr|Prof|St|Sr|Jr|vs)[.]$/;
 
 /** Below this, a 'sentence' is a fragment. Eight characters clears every
  * abbreviation and still admits a short real sentence in any script. */
@@ -247,7 +296,7 @@ export function shouldClose(translated: string): boolean {
   if (!text) return false;
   if (text.length >= RUNAWAY_CHARS) return true;
   if (!SENTENCE_END.test(text)) return false;
-  if (ABBREVIATION.test(text)) return false;
+  if (ABBREVIATION.test(text) || TITLE.test(text)) return false;
   // Counting WORDS here would have been the obvious guard and is wrong:
   // Japanese and Chinese have no spaces, so a finished sentence counts as
   // one word and would never close. Length works in every script.
@@ -261,6 +310,7 @@ export function useLiveTranslation(): LiveTranslation {
   const [error, setError] = useState<TranslateError | null>(null);
   const [remainingSeconds, setRemaining] = useState<number | null>(null);
   const [conversationId, setConversationId] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
 
   /* Everything below is a ref rather than state: it changes on every audio
    * block or socket frame, and re-rendering a ninety-minute transcript at
@@ -288,6 +338,8 @@ export function useLiveTranslation(): LiveTranslation {
    * a dropped connection. */
   const closingRef = useRef(false);
   const pausedRef = useRef(false);
+  /** Audio captured before the socket was ready, oldest first. */
+  const preRollRef = useRef<string[]>([]);
 
   /* ---------------------------------------------------------------- saving */
 
@@ -469,6 +521,16 @@ export function useLiveTranslation(): LiveTranslation {
       }
 
       socketRef.current = socket;
+      // Whatever was captured while this connection was coming up goes first,
+      // in the order it was spoken. Doing it here rather than waiting for the
+      // next frame of audio means the opening words are on their way the
+      // instant the socket is usable — and it is the same path that recovers
+      // the gap when a connection drops mid-lecture and is replaced.
+      const held = preRollRef.current;
+      if (held.length > 0) {
+        preRollRef.current = [];
+        for (const frame of held) sendAudio(socket, frame);
+      }
       // Only now close the one being replaced, so no audio falls between them.
       if (previous && previous !== socket) {
         previous.onclose = null;
@@ -522,8 +584,9 @@ export function useLiveTranslation(): LiveTranslation {
       const source = context.createMediaStreamSource(stream);
       const capture = new AudioWorkletNode(context, "tobira-translate-capture");
       capture.port.onmessage = (event) => {
-        const socket = socketRef.current;
-        if (!socket || socket.readyState !== WebSocket.OPEN || pausedRef.current) return;
+        // Paused is the one state that discards audio, because that is what
+        // pausing means. Everything else is kept.
+        if (pausedRef.current) return;
         const { samples, state } = downsample(
           event.data as Float32Array,
           context.sampleRate,
@@ -534,13 +597,30 @@ export function useLiveTranslation(): LiveTranslation {
         if (samples.length === 0) return;
         const pcm = floatToPcm16(samples);
         const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
-        socket.send(
-          JSON.stringify({
-            realtimeInput: {
-              audio: { mimeType: `audio/pcm;rate=${INPUT_RATE}`, data: bytesToBase64(bytes) },
-            },
-          }),
-        );
+        const frame = bytesToBase64(bytes);
+
+        const socket = socketRef.current;
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+          // WHY THE START USED TO FEEL SLOW.
+          //
+          // The microphone opens in a few tens of milliseconds; minting a
+          // token and getting setupComplete back takes most of a second.
+          // Audio captured in between used to be thrown away, so a student
+          // who pressed Start and spoke straight away had their opening words
+          // deleted and waited for the NEXT sentence to appear. Holding those
+          // frames and sending them the moment the socket opens means the
+          // session effectively begins on the click.
+          preRollRef.current.push(frame);
+          if (preRollRef.current.length > PRE_ROLL_FRAMES) preRollRef.current.shift();
+          return;
+        }
+
+        const held = preRollRef.current;
+        if (held.length > 0) {
+          preRollRef.current = [];
+          for (const earlier of held) sendAudio(socket, earlier);
+        }
+        sendAudio(socket, frame);
       };
       source.connect(capture);
       // Connected to the destination through a silent gain node: without a
@@ -578,13 +658,28 @@ export function useLiveTranslation(): LiveTranslation {
       startedAtRef.current = Date.now();
       setError(null);
       setPhase("connecting");
+      setConversationId(null);
+      setSaving(false);
+      preRollRef.current = [];
       void (async () => {
-        if (!(await openMicrophone())) {
-          setPhase("error");
-          return;
+        // Two independent waits — a microphone and a minted token — that used
+        // to run one after the other for no reason beyond the order they were
+        // written in.
+        let mic: boolean;
+        let online: boolean;
+        if (await micAlreadyAllowed()) {
+          [mic, online] = await Promise.all([openMicrophone(), connect()]);
+        } else {
+          mic = await openMicrophone();
+          online = mic ? await connect() : false;
         }
-        if (!(await connect())) {
+        if (!mic || !online) {
+          // Whichever half did succeed is undone. A connection left open
+          // would go on renewing its token every minute against an allowance
+          // nobody is listening to.
+          teardownSocket();
           closeMicrophone();
+          preRollRef.current = [];
           setPhase("error");
           return;
         }
@@ -593,7 +688,7 @@ export function useLiveTranslation(): LiveTranslation {
         setPhase("listening");
       })();
     },
-    [phase, openMicrophone, connect, closeMicrophone, flush],
+    [phase, openMicrophone, connect, closeMicrophone, teardownSocket, flush],
   );
 
   const pause = useCallback(() => {
@@ -606,6 +701,10 @@ export function useLiveTranslation(): LiveTranslation {
     // tokens and spend a lecture's allowance on silence; the resumption handle
     // is what makes resuming the same session rather than a new one.
     teardownSocket();
+    // Anything captured between the last frame sent and this click belongs to
+    // the part of the lecture being skipped, so it is dropped rather than
+    // played into the session on resume.
+    preRollRef.current = [];
     void flush();
     setPhase("paused");
   }, [phase, finishSegment, teardownSocket, flush]);
@@ -625,16 +724,40 @@ export function useLiveTranslation(): LiveTranslation {
   }, [phase, connect]);
 
   const end = useCallback(() => {
+    if (phase === "idle" || phase === "ended") return;
     closingRef.current = true;
     pausedRef.current = true;
     finishSegment();
     teardownSocket();
     closeMicrophone();
+    preRollRef.current = [];
     if (saveTimerRef.current) clearInterval(saveTimerRef.current);
     saveTimerRef.current = null;
-    void flush();
     setPhase("ended");
-  }, [finishSegment, teardownSocket, closeMicrophone, flush]);
+
+    // The screen is cleared only once what was on it is written, in that
+    // order and never the other way round: a student who presses End watches
+    // a lecture's worth of text disappear, and the one thing that must be
+    // true at that moment is that it is already saved.
+    setSaving(unsavedRef.current.length > 0);
+    void (async () => {
+      await flush();
+      setSaving(false);
+      // A save that failed keeps its transcript AND its conversation, so the
+      // retry on the next tick lands in the right place instead of opening a
+      // second conversation for the same lecture.
+      if (unsavedRef.current.length > 0) return;
+      setSegments([]);
+      setPending(null);
+      draftRef.current = { source: "", translated: "" };
+      // The next session is a new lecture: its own conversation, numbered
+      // from the start. Segments key on (conversation, seq), so carrying
+      // either of these over would write the new lecture into the old one.
+      seqRef.current = 0;
+      conversationRef.current = null;
+      resumeHandleRef.current = undefined;
+    })();
+  }, [phase, finishSegment, teardownSocket, closeMicrophone, flush]);
 
   /** A tab closed mid-lecture still saves what it has. */
   useEffect(() => {
@@ -658,6 +781,7 @@ export function useLiveTranslation(): LiveTranslation {
     error,
     remainingSeconds,
     conversationId,
+    saving,
     start,
     pause,
     resume,
