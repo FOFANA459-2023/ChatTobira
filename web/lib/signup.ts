@@ -7,28 +7,39 @@
  * after one as "Database error saving new user".
  */
 
-import { isAdminEmail } from "./admin";
-import { normalizeEmail } from "./email";
+import { EMAIL_SHAPE, normalizeEmail } from "./email";
 
+/** The university's domain. No longer a gate — approval is, see 0019 — but
+ * still the address most students sign up with, so it is what the field
+ * suggests. */
 export const APU_DOMAIN = "apu.ac.jp";
 
-/** Exactly @apu.ac.jp — no subdomains, no lookalikes. Same pattern as the
- * database's is_apu_email(). Takes a normalised address. */
+/** Exactly @apu.ac.jp: no subdomains, no lookalikes. Nothing refuses an
+ * address for failing this any more. It is kept because 'is this a
+ * university account?' is a real question the admin roster may want to
+ * ask, and the pattern is already written and tested. */
 const APU_EMAIL = /^[a-z0-9._%+-]+@apu\.ac\.jp$/;
 
 export function isApuEmail(address: string): boolean {
   return APU_EMAIL.test(address);
 }
 
-/** Why this address cannot sign up, or null when it can. The admin's
- * personal address is the only non-APU one the app accepts, and it signs in
- * on /admin rather than signing up. */
+/** Why this address cannot sign up, or null when it can.
+ *
+ * Any address may now ask for an account. The domain used to be the whole
+ * of the admission policy; the teacher's approval is, and that happens
+ * after signup and cannot be checked here. So this is reduced to what it
+ * should always have been: does this look like an email address at all.
+ * The database agrees — 0019 stopped handle_new_user() refusing on it.
+ *
+ * Deliberately permissive. Whether an address RECEIVES mail is decided by
+ * the mail server, and a confirmation link that never arrives is a kinder
+ * answer than a regex refusing a valid address it has not heard of. */
 export function emailProblem(raw: string): string | null {
   const address = normalizeEmail(raw);
-  if (!address) return "Enter your APU email address.";
-  if (isAdminEmail(address)) return null;
-  if (!isApuEmail(address)) {
-    return `Use your APU student email — it ends in @${APU_DOMAIN}.`;
+  if (!address) return "Enter your email address.";
+  if (!EMAIL_SHAPE.test(address)) {
+    return "That does not look like an email address.";
   }
   return null;
 }

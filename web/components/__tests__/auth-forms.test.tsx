@@ -44,7 +44,7 @@ function fillSignup({
 } = {}) {
   confirm ??= password;
   fireEvent.change(screen.getByLabelText("Full name"), { target: { value: name } });
-  fireEvent.change(screen.getByLabelText("APU email"), { target: { value: email } });
+  fireEvent.change(screen.getByLabelText("Email"), { target: { value: email } });
   if (gender) fireEvent.click(screen.getByLabelText(gender));
   if (describedAs !== undefined) {
     fireEvent.change(screen.getByLabelText("How would you describe it?"), {
@@ -58,10 +58,18 @@ function fillSignup({
 }
 
 describe("signup form", () => {
-  it("refuses a non-APU address before anything is sent", async () => {
+  it("accepts an address from anywhere, because approval is the gate", async () => {
+    // The domain used to be the whole admission policy. Since 0019 anyone may
+    // ask and the teacher decides, so a gmail address has to reach signUp.
     render(<SignupForm />);
     fillSignup({ email: "someone@gmail.com" });
-    expect(await screen.findByText(/ends in @apu\.ac\.jp/)).toBeInTheDocument();
+    await waitFor(() => expect(auth.signUp).toHaveBeenCalled());
+  });
+
+  it("still refuses something that is not an address", async () => {
+    render(<SignupForm />);
+    fillSignup({ email: "someone" });
+    expect(await screen.findByText(/does not look like an email address/)).toBeInTheDocument();
     expect(auth.signUp).not.toHaveBeenCalled();
   });
 
@@ -69,7 +77,7 @@ describe("signup form", () => {
     render(<SignupForm />);
     fillSignup({ name: "", email: "", gender: null, level: null, password: "" });
     expect(await screen.findByText(/as it appears on your student ID/)).toBeInTheDocument();
-    expect(screen.getByText(/Enter your APU email/)).toBeInTheDocument();
+    expect(screen.getByText(/Enter your email address/)).toBeInTheDocument();
     expect(screen.getByText(/at least 8 characters for your password/)).toBeInTheDocument();
     // Gender and undergraduate/graduate are required too, and each says so
     // beside itself rather than as one message at the bottom.
@@ -154,7 +162,7 @@ describe("signup form", () => {
 
 describe("login form", () => {
   function signIn(email: string, password: string) {
-    fireEvent.change(screen.getByLabelText("APU email"), { target: { value: email } });
+    fireEvent.change(screen.getByLabelText("Email"), { target: { value: email } });
     fireEvent.change(screen.getByLabelText("Password"), { target: { value: password } });
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
   }
@@ -201,7 +209,7 @@ describe("login form", () => {
     auth.resetPasswordForEmail.mockResolvedValue({ error: null });
     render(<LoginForm />);
     fireEvent.click(screen.getByRole("button", { name: "Forgot password?" }));
-    fireEvent.change(screen.getByLabelText("APU email"), { target: { value: "fo25v2eg@apu.ac.jp" } });
+    fireEvent.change(screen.getByLabelText("Email"), { target: { value: "fo25v2eg@apu.ac.jp" } });
     fireEvent.click(screen.getByRole("button", { name: "Send reset link" }));
     await waitFor(() =>
       expect(auth.resetPasswordForEmail).toHaveBeenCalledWith("fo25v2eg@apu.ac.jp", {

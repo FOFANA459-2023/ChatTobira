@@ -15,7 +15,7 @@ import {
 } from "../signup";
 import { greetingName } from "../name";
 
-describe("APU email rule", () => {
+describe("which addresses may sign up", () => {
   it("accepts student addresses in the shape APU issues", () => {
     expect(emailProblem("kr25s6il@apu.ac.jp")).toBeNull();
     expect(emailProblem("fo25v2eg@apu.ac.jp")).toBeNull();
@@ -26,15 +26,26 @@ describe("APU email rule", () => {
     expect(emailProblem("Varlee <FO25V2EG@APU.AC.JP>")).toBeNull();
   });
 
-  it("refuses personal and other university addresses", () => {
+  it("now accepts any address, because approval is the gate", () => {
+    // The domain used to be the whole admission policy. Since 0019 anyone
+    // may ask for an account and the teacher decides, so refusing a gmail
+    // address here would block a request the teacher might want to accept.
     for (const address of [
       "someone@gmail.com",
       "gr0123ab@ed.ritsumei.ac.jp",
       "x@outlook.jp",
-      "x@yahoo.co.jp",
+      "teacher@example.ac.uk",
     ]) {
-      expect(emailProblem(address), address).toMatch(/@apu\.ac\.jp/);
+      expect(emailProblem(address), address).toBeNull();
     }
+  });
+
+  it("still refuses something that is not an address at all", () => {
+    // Permissive is not the same as absent: a typo should be caught here
+    // rather than becoming a confirmation email sent into the void.
+    expect(emailProblem("someone")).toMatch(/email address/i);
+    expect(emailProblem("someone@")).toMatch(/email address/i);
+    expect(emailProblem("someone@localhost")).toMatch(/email address/i);
   });
 
   it("refuses lookalikes of the domain", () => {

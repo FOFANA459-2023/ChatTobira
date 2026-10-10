@@ -38,7 +38,7 @@ type Outcome =
   | { kind: "exists" }
   | { kind: "error"; text: string };
 
-/** Full name, APU email, password. Supabase emails a confirmation link; the
+/** Full name, email, password. Supabase emails a confirmation link; the
  * account cannot sign in until it is clicked. */
 export function SignupForm({ disabled = false }: { disabled?: boolean }) {
   const [fullName, setFullName] = useState("");
@@ -109,7 +109,7 @@ export function SignupForm({ disabled = false }: { disabled?: boolean }) {
           // rules apply rather than "database error".
           setOutcome({
             kind: "error",
-            text: `That account could not be created. Use your @${APU_DOMAIN} address, your full name as on your student ID, and answer every question above.`,
+            text: "That account could not be created. Check the email address, give your full name as it appears on your ID, and answer every question above.",
           });
         } else {
           setOutcome({ kind: "error", text: "Something went wrong on our side. Please try again." });
@@ -180,7 +180,7 @@ export function SignupForm({ disabled = false }: { disabled?: boolean }) {
         />
       </Field>
 
-      <Field label="APU email" htmlFor="email" error={problems.email}>
+      <Field label="Email" htmlFor="email" error={problems.email}>
         {/* type="text": the native email check runs on the raw input and
             rejects full-width IME characters before they are normalised. */}
         <input
@@ -190,7 +190,7 @@ export function SignupForm({ disabled = false }: { disabled?: boolean }) {
           autoComplete="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          placeholder={`ab12cd34@${APU_DOMAIN}`}
+          placeholder={`ab12cd34@${APU_DOMAIN}`}  /* the address most students use; any works */
           aria-invalid={Boolean(problems.email)}
           aria-describedby={problems.email ? "email-error" : undefined}
           disabled={busy}

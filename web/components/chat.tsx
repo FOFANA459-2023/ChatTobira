@@ -689,7 +689,7 @@ export function Chat({
             {!authenticated && (
               <p className="mt-3 text-xs text-stone-400">
                 You can try {TRIALS.chat.limit} questions free — after that,
-                create a free account with your APU email.
+                create a free account.
               </p>
             )}
           </div>
