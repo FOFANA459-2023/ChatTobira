@@ -3,7 +3,8 @@ import Link from "next/link";
 import { AuthCard, SetupNotice } from "@/components/auth-card";
 import { SignupForm } from "@/components/signup-form";
 
-/** Open to any APU student with an @apu.ac.jp address. */
+/** Anyone may ask for an account; nobody gets in until the teacher approves
+ * it. See 0019 — the domain used to be the gate and a person is now. */
 export default function SignupPage() {
   const configured = Boolean(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
 

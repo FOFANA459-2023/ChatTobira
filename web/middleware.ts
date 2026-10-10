@@ -92,6 +92,35 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
+  // THE APPROVAL GATE, ahead of the welcome questions.
+  //
+  // Any address may sign up since 0019, so this is what keeps strangers out
+  // of an app that teaches from copyright-protected APU material. It is read
+  // off app_metadata, which only the service role and security-definer
+  // functions can write — a student cannot set it on themselves — and which
+  // getUser() has already fetched, so the check costs no round trip.
+  //
+  // It comes BEFORE the welcome questions on purpose: someone who will not be
+  // let in should not be asked their college and semester first.
+  if (user && !isAdminEmail(user.email)) {
+    const approved = Boolean(user.app_metadata?.approved);
+    const waiting =
+      path.startsWith("/pending") ||
+      path.startsWith("/auth") ||
+      path.startsWith("/login") ||
+      path.startsWith("/admin");
+    if (!approved && !waiting) {
+      if (path.startsWith("/api/")) {
+        return NextResponse.json({ error: "not_approved" }, { status: 403 });
+      }
+      return redirectTo(request, "/pending", response);
+    }
+    // An approved account has no business on the waiting page.
+    if (approved && path.startsWith("/pending")) {
+      return redirectTo(request, "/", response);
+    }
+  }
+
   if (user && !isAdminEmail(user.email)) {
     // The welcome questions are required. Read off app_metadata, which only
     // complete_profile() writes and the student cannot, on the user this

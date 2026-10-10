@@ -1,6 +1,6 @@
 <!-- ChatTobira signup confirmation email.
      Paste into: Supabase dashboard -> Authentication -> Emails -> "Confirm signup".
-     Subject:  ChatTobira — メールアドレスの確認 / Confirm your APU email
+     Subject:  ChatTobira — メールアドレスの確認 / Confirm your email
      {{ .Data.full_name }} is the name the student gave at signup (user metadata).
      The link opens a page with a Confirm button; the token is spent only when the button is
      pressed, so a university mail scanner opening the link first does not use it up.
@@ -29,7 +29,7 @@
           <td align="center" style="padding:10px 0 26px;">
             <span style="font-size:14px;color:#57534e;line-height:1.7;">
               Thanks for signing up for ChatTobira.<br>
-              Confirm your APU email to activate your account.
+              Confirm your email address to finish creating your account.
             </span>
           </td>
         </tr>
@@ -39,6 +39,22 @@
                style="display:inline-block;background-color:#1c1917;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;padding:13px 36px;border-radius:12px;">
               Confirm my email&nbsp;·&nbsp;確認する
             </a>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding-bottom:26px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fffbeb;border:1px solid #fde68a;border-radius:12px;">
+              <tr>
+                <td style="padding:14px 16px;font-size:13px;color:#78350f;line-height:1.75;text-align:left;">
+                  <strong style="font-weight:600;">One more step after this.</strong><br>
+                  ChatTobira is not open to the public. It teaches from APU course
+                  materials, which are copyright-protected, so every account is
+                  approved individually. You will be able to sign in once yours is
+                  approved. Questions or concerns? Write to the developer at
+                  fvarlee@gmail.com
+                </td>
+              </tr>
+            </table>
           </td>
         </tr>
         <tr>

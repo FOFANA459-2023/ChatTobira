@@ -14,7 +14,7 @@ const BodySchema = z.object({
 });
 
 const PatchSchema = BodySchema.extend({
-  action: z.enum(["suspend", "restore"]),
+  action: z.enum(["suspend", "restore", "approve", "unapprove"]),
 });
 
 // Supabase expresses an indefinite ban as a very long duration; "none" lifts it.
@@ -146,6 +146,24 @@ export async function PATCH(request: Request) {
   const id = await findAccountId(service, email);
   if (!id) {
     return Response.json({ error: "no_account" }, { status: 404 });
+  }
+
+  // Approval is one RPC rather than two writes from here, because the flag
+  // lives in two places — profiles.approved_at for this screen and
+  // app_metadata.approved for the middleware — and an account approved in one
+  // but not the other is either locked out while showing as approved or let
+  // in while showing as waiting. See 0019.
+  if (action === "approve" || action === "unapprove") {
+    const approved = action === "approve";
+    const { data, error } = await service.rpc("set_student_approval", {
+      p_email: email,
+      p_approved: approved,
+    });
+    if (error) {
+      console.error(`set_student_approval failed for ${email}: ${error.message}`);
+      return Response.json({ error: `${action}_failed` }, { status: 502 });
+    }
+    return Response.json({ ok: true, email, approvedAt: (data as string | null) ?? null });
   }
 
   const { error } = await service.auth.admin.updateUserById(id, {

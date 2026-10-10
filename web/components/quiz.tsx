@@ -323,7 +323,7 @@ export function QuizView({
               <p className="mt-3 text-center text-xs text-stone-400">
                 You can sit {TRIALS.quiz.limit} practice test
                 {(TRIALS.quiz.limit as number) === 1 ? "" : "s"} free — after that, create
-                a free account with your APU email.
+                a free account.
               </p>
             )}
             <p className="mt-4 text-center">
