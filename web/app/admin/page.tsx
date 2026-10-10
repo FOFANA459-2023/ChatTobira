@@ -110,7 +110,7 @@ export default function AdminDashboard() {
       <div className="mt-6 grid gap-4 lg:grid-cols-2">
         <Card
           title="Sign-ups"
-          description="Students sign up themselves with an @apu.ac.jp address."
+          description="Anyone can sign up. Nobody gets in until you approve them."
         >
           <dl className="grid grid-cols-2 gap-px bg-stone-100 text-sm">
             <Figure label="Active" value={students?.active} />

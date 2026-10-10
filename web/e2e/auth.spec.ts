@@ -27,7 +27,7 @@ test("quiz page is open to trial visitors, like the chat", async ({ page }) => {
 
 test("login page signs in with an APU email and password", async ({ page }) => {
   await page.goto("/login");
-  await expect(page.getByLabel("APU email")).toBeVisible();
+  await expect(page.getByLabel("Email")).toBeVisible();
   await expect(page.getByPlaceholder(/@apu\.ac\.jp/)).toBeVisible();
   await expect(page.getByLabel("Password")).toBeVisible();
   await expect(page.getByRole("button", { name: /^sign in$/i })).toBeVisible();
@@ -40,19 +40,33 @@ test("signup page asks for full name, APU email and password", async ({ page }) 
   await page.goto("/signup");
   await expect(page.getByLabel("Full name")).toBeVisible();
   await expect(page.getByText(/as it appears on your APU student ID/i)).toBeVisible();
-  await expect(page.getByLabel("APU email")).toBeVisible();
+  await expect(page.getByLabel("Email")).toBeVisible();
   await expect(page.getByLabel("Password", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Confirm password")).toBeVisible();
 });
 
-test("signup refuses a personal email before sending anything", async ({ page }) => {
+test("signup accepts an address from anywhere, because approval is the gate", async ({ page }) => {
+  // The domain used to be the whole admission policy. Since 0019 anyone may
+  // ask for an account and the teacher decides, so a personal address has to
+  // get past the form. Without a backend here the request itself fails; what
+  // matters is that the form stopped refusing it.
   await page.goto("/signup");
   await page.getByLabel("Full name").fill("FOFANA VARLEE");
-  await page.getByLabel("APU email").fill("someone@gmail.com");
+  await page.getByLabel("Email").fill("someone@gmail.com");
   await page.getByLabel("Password", { exact: true }).fill("correct horse");
   await page.getByLabel("Confirm password").fill("correct horse");
   await page.getByRole("button", { name: "Create account" }).click();
-  await expect(page.getByText(/ends in @apu\.ac\.jp/)).toBeVisible();
+  await expect(page.getByText(/ends in @apu/)).toHaveCount(0);
+});
+
+test("signup still refuses something that is not an address", async ({ page }) => {
+  await page.goto("/signup");
+  await page.getByLabel("Full name").fill("FOFANA VARLEE");
+  await page.getByLabel("Email").fill("someone");
+  await page.getByLabel("Password", { exact: true }).fill("correct horse");
+  await page.getByLabel("Confirm password").fill("correct horse");
+  await page.getByRole("button", { name: "Create account" }).click();
+  await expect(page.getByText(/does not look like an email address/)).toBeVisible();
 });
 
 test("the welcome questions require a session", async ({ page }) => {

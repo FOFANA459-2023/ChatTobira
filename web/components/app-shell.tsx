@@ -665,7 +665,7 @@ function Footer({
     ) : (
       <div className="border-t border-stone-200/80 p-3">
         <p className="px-1 text-xs leading-relaxed text-stone-500">
-          Sign up with your APU email to keep your chats and practise without limits.
+          Sign up to keep your chats and practise without limits.
         </p>
         <div className="mt-2 flex gap-2">
           <Link

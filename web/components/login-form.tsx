@@ -172,12 +172,12 @@ export function LoginForm({
       {mode !== "signin" && (
         <p className="mb-4 text-sm text-stone-600">
           {mode === "forgot"
-            ? "Enter your APU email and we will send you a link to choose a new password."
-            : "Enter your APU email and we will send a new confirmation link."}
+            ? "Enter your email address and we will send you a link to choose a new password."
+            : "Enter your email address and we will send a new confirmation link."}
         </p>
       )}
       <form onSubmit={submit} noValidate className="space-y-4">
-        <Field label="APU email" htmlFor="login-email">
+        <Field label="Email" htmlFor="login-email">
           <input
             id="login-email"
             type="text"
@@ -185,7 +185,7 @@ export function LoginForm({
             autoComplete="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            placeholder={`ab12cd34@${APU_DOMAIN}`}
+            placeholder={`ab12cd34@${APU_DOMAIN}`}  /* the address most students use; any works */
             disabled={locked}
             className={inputClass}
           />

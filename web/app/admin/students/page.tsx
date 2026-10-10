@@ -18,16 +18,21 @@ interface Student {
   signed_up_at: string;
   verified: boolean;
   onboarded: boolean;
+  /** Null while they are waiting. Any address may sign up since 0019, so
+   * this is what decides whether they get in at all. */
+  approved_at: string | null;
   suspended: boolean;
   last_sign_in_at: string | null;
   last_activity_at: string | null;
   questions_today: number;
 }
 
-type Filter = "all" | "active" | "pending" | "suspended";
+type Filter = "all" | "waiting" | "active" | "pending" | "suspended";
 
 const FILTERS: { id: Filter; label: string }[] = [
   { id: "all", label: "All" },
+  // First, because it is the only one with anything for the teacher to DO.
+  { id: "waiting", label: "Waiting for approval" },
   { id: "active", label: "Active" },
   { id: "pending", label: "Not finished signing up" },
   { id: "suspended", label: "Suspended" },
@@ -69,7 +74,10 @@ export default function StudentsPage() {
   useEffect(load, [load]);
 
   /** Suspend, restore or remove, through the admin students API. */
-  async function act(email: string, action: "suspend" | "restore" | "remove") {
+  async function act(
+    email: string,
+    action: "suspend" | "restore" | "remove" | "approve" | "unapprove",
+  ) {
     if (
       action === "remove" &&
       !window.confirm(
@@ -115,11 +123,13 @@ export default function StudentsPage() {
   const shown = (students ?? []).filter((student) =>
     filter === "all"
       ? true
-      : filter === "active"
-        ? student.onboarded && !student.suspended
-        : filter === "pending"
-          ? !student.onboarded
-          : student.suspended,
+      : filter === "waiting"
+        ? !student.approved_at && !student.suspended
+        : filter === "active"
+          ? student.approved_at && student.onboarded && !student.suspended
+          : filter === "pending"
+            ? !student.onboarded
+            : student.suspended,
   );
 
   return (
@@ -242,6 +252,18 @@ export default function StudentsPage() {
                     <td className="px-4 py-3 text-stone-500">{shortDate(student.signed_up_at)}</td>
                     <td className="px-4 py-3 text-right">
                       <div className="inline-flex gap-1">
+                        {/* First in the row because for a waiting account it
+                            is the only button that matters, and the one the
+                            teacher came to this screen to press. */}
+                        <RowButton
+                          onClick={() =>
+                            act(student.email, student.approved_at ? "unapprove" : "approve")
+                          }
+                          busy={busyEmail === student.email}
+                          primary={!student.approved_at}
+                        >
+                          {student.approved_at ? "Un-approve" : "Approve"}
+                        </RowButton>
                         <RowButton
                           onClick={() =>
                             act(student.email, student.suspended ? "restore" : "suspend")
@@ -274,7 +296,11 @@ export default function StudentsPage() {
 function StatusBadge({ student }: { student: Student }) {
   const [label, className] = student.suspended
     ? ["Suspended", "bg-red-50 text-red-700"]
-    : student.onboarded
+    // Waiting comes before the rest of the journey: until it is approved the
+    // account cannot be used, whatever else it has finished.
+    : !student.approved_at
+      ? ["Waiting for approval", "bg-amber-50 text-amber-800"]
+      : student.onboarded
       ? ["Active", "bg-green-50 text-green-800"]
       : student.verified
         ? ["Profile pending", "bg-sky-50 text-sky-800"]
@@ -289,11 +315,15 @@ function RowButton({
   onClick,
   busy,
   danger = false,
+  primary = false,
 }: {
   children: React.ReactNode;
   onClick: () => void;
   busy: boolean;
   danger?: boolean;
+  /** The one action worth doing on this row. Filled rather than outlined, so
+   * a screen full of waiting accounts reads as a queue to work through. */
+  primary?: boolean;
 }) {
   return (
     <button
@@ -302,7 +332,9 @@ function RowButton({
       className={`rounded-lg border px-2.5 py-1 text-xs disabled:opacity-40 ${
         danger
           ? "border-red-200 text-red-700 hover:bg-red-50"
-          : "border-stone-200 text-stone-600 hover:bg-stone-100"
+          : primary
+            ? "border-stone-900 bg-stone-900 text-white hover:bg-stone-800"
+            : "border-stone-200 text-stone-600 hover:bg-stone-100"
       }`}
     >
       {busy ? "…" : children}

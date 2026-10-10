@@ -28,6 +28,7 @@ const STUDENTS = [
     signed_up_at: ago(30 * 86400),
     verified: true,
     onboarded: true,
+    approved_at: "2026-02-01T00:00:00Z",
     suspended: false,
     last_sign_in_at: ago(3 * 3600),
     last_activity_at: ago(2 * 3600),
@@ -42,6 +43,7 @@ const STUDENTS = [
     signed_up_at: ago(2 * 86400),
     verified: false,
     onboarded: false,
+    approved_at: null,
     suspended: false,
     last_sign_in_at: null,
     last_activity_at: null,
@@ -56,6 +58,7 @@ const STUDENTS = [
     signed_up_at: ago(1 * 86400),
     verified: true,
     onboarded: false,
+    approved_at: "2026-02-01T00:00:00Z",
     suspended: false,
     last_sign_in_at: ago(86400),
     last_activity_at: ago(86400),
@@ -73,6 +76,7 @@ const STUDENTS = [
     signed_up_at: ago(60 * 86400),
     verified: true,
     onboarded: true,
+    approved_at: "2026-02-01T00:00:00Z",
     suspended: true,
     last_sign_in_at: ago(20 * 86400),
     last_activity_at: ago(20 * 86400),
@@ -140,7 +144,9 @@ describe("admin students page", () => {
     render(<StudentsPage />);
     const row = (await screen.findByText("waiting@apu.ac.jp")).closest("tr")!;
     expect(within(row).getByText("Never logged in")).toBeInTheDocument();
-    expect(within(row).getByText("Email not verified")).toBeInTheDocument();
+    // Waiting for approval now outranks the rest of the journey on the badge:
+    // until the teacher approves it the account cannot be used at all.
+    expect(within(row).getByText("Waiting for approval")).toBeInTheDocument();
   });
 
   it("distinguishes each step of signing up, and suspension, at a glance", async () => {
@@ -149,7 +155,7 @@ describe("admin students page", () => {
     const badges = document.querySelectorAll("tbody .rounded-full");
     expect([...badges].map((badge) => badge.textContent)).toEqual([
       "Active",
-      "Email not verified",
+      "Waiting for approval",
       "Profile pending",
       "Suspended",
     ]);
