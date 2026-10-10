@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   CONVERSATION_MESSAGES,
   loadConversation,
+  translationUIMessages,
   placeUploads,
   toUIMessages,
   turnRows,
@@ -200,5 +201,47 @@ describe("loadConversation — a thread has no natural end, so it is capped", ()
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const loaded = await loadConversation(client as any, 7);
     expect(loaded?.messages.map((m) => m.id)).toEqual(["saved-1", "saved-2", "saved-3"]);
+  });
+});
+
+describe("a saved lecture, read back", () => {
+  const seg = (seq: number, source: string, translated: string) => ({
+    seq,
+    source_text: source,
+    translated_text: translated,
+    target_lang: "en",
+    created_at: new Date(Date.UTC(2026, 0, 1, 0, seq)).toISOString(),
+  });
+
+  it("turns each segment into the pair the chat already draws", () => {
+    // What the room heard becomes the student's turn, what it meant becomes
+    // the reply — so the existing renderer shows a transcript with no new UI.
+    const out = translationUIMessages([seg(0, "こんにちは", "Hello")], 7);
+    expect(out.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(out[0].parts).toEqual([{ type: "text", text: "こんにちは" }]);
+    expect(out[1].parts).toEqual([{ type: "text", text: "Hello" }]);
+  });
+
+  it("keeps the lecture in order", () => {
+    const out = translationUIMessages([seg(0, "A", "one"), seg(1, "B", "two")], 7);
+    expect(out.map((m) => m.id)).toEqual([
+      "translated-7-0-src",
+      "translated-7-0",
+      "translated-7-1-src",
+      "translated-7-1",
+    ]);
+  });
+
+  it("writes no blank rows for a cough or a pause", () => {
+    // The model produces nothing for filler, and a pause produces no speech.
+    // Either way a blank line in the transcript helps nobody.
+    expect(translationUIMessages([seg(0, "   ", "")], 7)).toEqual([]);
+    expect(translationUIMessages([seg(0, "ええと", "")], 7)).toHaveLength(1);
+  });
+
+  it("gives ids that survive a reload, not generated ones", () => {
+    const first = translationUIMessages([seg(3, "A", "one")], 7);
+    const again = translationUIMessages([seg(3, "A", "one")], 7);
+    expect(first.map((m) => m.id)).toEqual(again.map((m) => m.id));
   });
 });

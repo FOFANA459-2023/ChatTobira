@@ -25,20 +25,35 @@
  * holds the lecture in its own context and keeps improving on it.
  */
 
-/** The model that listens. The same one speaking practice uses: measured
- * fastest to a first token on this key, and a translation that lags the
- * speaker is not a live translation. */
-export const TRANSLATE_MODEL = "gemini-3.8-live";
-
-/** The voice it translates in.
+/** The model that listens, and the whole reason this feature is usable.
  *
- * It is never played. See translateSetup: this session asks for AUDIO it
- * throws away and reads the TRANSCRIPT of that audio as the translation,
- * because no live model on this key will emit text. A voice still has to be
- * named for the request to be valid. */
-export const TRANSLATE_VOICE = "Kore";
+ * It is NOT the model speaking practice uses. gemini-3.8-live is a
+ * conversation model: it answers only in speech, and generating speech costs
+ * about as long as the speech itself, so a lecture fell further behind with
+ * every sentence — seven and a half seconds per segment and drifting.
+ *
+ * This one is built for the job. Measured on the same three Japanese
+ * sentences, streamed in real time, it translates WHILE the speaker is still
+ * talking:
+ *
+ *    3.86s  heard  では、次に敬語について見て
+ *    4.22s  text   Now, let's look
+ *    4.39s  heard  いきましょう。
+ *    4.62s  text    at honorifics.
+ *
+ * Roughly a third of a second behind the transcription and under a second
+ * behind the speaker, continuously, for as long as they talk. */
+export const TRANSLATE_MODEL = "gemini-3.5-live-translate-preview";
 
-/** How long the speaker must pause before a segment is finished.
+/** How long a pause has to be before the model treats it as a break.
+ *
+ * It matters far less on this model than it did on the last one. There are no
+ * turns here — translation streams continuously and never sends turnComplete,
+ * so nothing waits on this window for text to appear. It is kept short
+ * because the measurements below were taken with it, not because a student
+ * waits for it.
+ *
+ * (Original note, from the conversation model this replaced:)
  *
  * 400ms, measured rather than reasoned. Three runs each of the same
  * synthesised Japanese, clock from the end of the speech to the first word of
@@ -112,8 +127,6 @@ export interface TranslateSetupOptions {
   source: SourceLanguage;
   target: LanguageCode;
   model?: string;
-  /** Named only because a speech request needs one; it is never played. */
-  voice?: string;
   silenceMs?: number;
   /** What the class is about, if the student says. It only ever reaches the
    * instruction as terminology guidance. */
@@ -177,29 +190,11 @@ export function translateSetup(options: TranslateSetupOptions) {
   return {
     model: `models/${model}`,
     generationConfig: {
-      // AUDIO, and the audio is thrown away.
-      //
-      // This feature wants text, and asking for text does not work. Measured
-      // against this key on 2026-10-09: gemini-3.1-flash-live-preview refuses
-      // TEXT when the session is set up ("response modalities (TEXT) is not
-      // supported by the model"), and gemini-3.8-live is worse — it ACCEPTS
-      // the setup, returns setupComplete, and then closes the socket 1007
-      // with the same complaint the moment it actually has to generate. The
-      // two older live models are not on this key at all.
-      //
-      // So the session asks for speech and reads outputAudioTranscription,
-      // which is the same text the model would have written. The browser
-      // never plays the audio. It costs more than text would and arrives no
-      // later, and it is the only shape that works.
-      responseModalities: ["AUDIO"],
-      speechConfig: {
-        voiceConfig: { prebuiltVoiceConfig: { voiceName: options.voice ?? TRANSLATE_VOICE } },
-      },
-      // No reasoning budget, for the same reason speaking practice has none:
-      // it buys nothing on a turn like this and costs time to the first word.
-      thinkingConfig: { thinkingBudget: 0 },
-      // Translation is the one job here where invention is the enemy.
-      temperature: 0.2,
+      // TEXT, which this model will actually produce. The conversation model
+      // this replaced would not: it accepted the setup and then closed the
+      // socket 1007 the moment it had to generate, which is why the first
+      // version asked for speech and read the subtitles of it.
+      responseModalities: ["TEXT"],
     },
     systemInstruction: { parts: [{ text: translateInstruction(options) }] },
     // No tools. Speaking practice can search the textbooks; an interpreter
@@ -211,11 +206,12 @@ export function translateSetup(options: TranslateSetupOptions) {
     },
     // What the microphone heard: half of what gets saved, and the only way a
     // student can check a translation against what was actually said.
+    //
+    // The TRANSLATION is not asked for here and arrives anyway, on
+    // serverContent.outputTranscription, in fragments a few hundred
+    // milliseconds behind each fragment of this one. That is measured rather
+    // than documented, so the client reads both and assumes neither.
     inputAudioTranscription: {},
-    // THE TRANSLATION ITSELF. Not a nicety — with responseModalities AUDIO
-    // this is where the text comes from, and without it this feature returns
-    // nothing a browser can display.
-    outputAudioTranscription: {},
     // Google closes a connection every few minutes. Resumption carries the
     // lecture onto the next one with its context intact, which is the whole
     // reason this is a session rather than a series of requests — a resumed

@@ -8,6 +8,7 @@ import {
   translateInstruction,
   translateSetup,
 } from "../translate";
+import { shouldClose } from "../use-live-translate";
 
 describe("the languages a lecture can be turned into", () => {
   it("knows the ones it lists and nothing else", () => {
@@ -84,20 +85,27 @@ describe("the interpreter's instruction", () => {
 describe("the setup a token locks", () => {
   const setup = translateSetup({ source: "ja", target: "en" });
 
-  it("asks for AUDIO, because no live model on this key will emit text", () => {
-    // Measured 2026-10-09: gemini-3.1-flash-live-preview refuses TEXT at
-    // setup, and gemini-3.8-live accepts the setup and then closes the socket
-    // 1007 the moment it has to generate. Asking for text does not work, so
-    // the session asks for speech and reads the transcript of it.
-    expect(setup.generationConfig.responseModalities).toEqual(["AUDIO"]);
-    expect(setup.generationConfig.speechConfig).toBeDefined();
+  it("asks for TEXT, which the translate model will actually produce", () => {
+    // The conversation model this replaced would not: it accepted the setup,
+    // sent setupComplete, and closed the socket 1007 the moment it had to
+    // generate. Measured on this key, 2026-10-09.
+    expect(setup.generationConfig.responseModalities).toEqual(["TEXT"]);
   });
 
-  it("transcribes BOTH sides, because the output transcript IS the translation", () => {
-    // Without outputAudioTranscription this feature returns audio and nothing
-    // a browser can display.
+  it("asks to hear the source, and nothing about the output", () => {
+    // The translation arrives on outputTranscription without being requested
+    // — measured, not documented — so the client reads it defensively rather
+    // than the setup demanding it.
     expect(setup.inputAudioTranscription).toBeDefined();
-    expect(setup.outputAudioTranscription).toBeDefined();
+    expect("outputAudioTranscription" in setup).toBe(false);
+  });
+
+  it("uses the model built for this, not the one speaking practice uses", () => {
+    // gemini-3.8-live answers only in speech, and generating speech costs
+    // about as long as the speech itself — a lecture fell further behind with
+    // every sentence. This one translates while the speaker is still talking.
+    expect(setup.model).toBe("models/gemini-3.5-live-translate-preview");
+    expect(setup.model).not.toContain("3.8-live");
   });
 
   it("sends no field the API does not have", () => {
@@ -110,7 +118,6 @@ describe("the setup a token locks", () => {
       "systemInstruction",
       "realtimeInputConfig",
       "inputAudioTranscription",
-      "outputAudioTranscription",
       "sessionResumption",
       "contextWindowCompression",
     ]);
@@ -161,8 +168,10 @@ describe("the setup a token locks", () => {
     expect(translateSetup({ source: "ja", target: "en", model: "x" }).model).toBe("models/x");
   });
 
-  it("keeps the temperature low, because invention is the enemy here", () => {
-    expect(setup.generationConfig.temperature).toBeLessThanOrEqual(0.3);
+  it("keeps the generation config to what this model takes", () => {
+    // Every extra key here is a chance to 400 the mint, and this model needs
+    // none of them: no voice, no thinking budget, no temperature.
+    expect(Object.keys(setup.generationConfig)).toEqual(["responseModalities"]);
   });
 });
 
@@ -170,5 +179,35 @@ describe("languageName", () => {
   it("answers in English, which is what the instruction is written in", () => {
     expect(languageName("ja")).toBe("Japanese");
     expect(languageName("zh-TW")).toBe("Chinese (Traditional)");
+  });
+});
+
+describe("where a segment ends, now that nothing tells us", () => {
+  it("closes on a finished sentence", () => {
+    expect(shouldClose("Please submit your report by Friday.")).toBe(true);
+    expect(shouldClose("Is that clear to everyone?")).toBe(true);
+    expect(shouldClose("今日は助詞について説明します。")).toBe(true);
+  });
+
+  it("does not close mid-sentence", () => {
+    expect(shouldClose("Now, let's look")).toBe(false);
+    expect(shouldClose("Respectful language is")).toBe(false);
+    expect(shouldClose("")).toBe(false);
+  });
+
+  it("is not fooled by a full stop that ends no sentence", () => {
+    // The model writes these, and closing on them chops a sentence in half.
+    expect(shouldClose("Dr.")).toBe(false);
+    expect(shouldClose("e.g.")).toBe(false);
+  });
+
+  it("closes a runaway line even with no full stop", () => {
+    // A lecturer who does not pause produces one unbroken clause. A line that
+    // never settles is a line that never gets saved, so length ends it.
+    expect(shouldClose("and then we move on to the next point ".repeat(12))).toBe(true);
+  });
+
+  it("tolerates a closing quote or bracket after the stop", () => {
+    expect(shouldClose('He said "that is correct."')).toBe(true);
   });
 });
