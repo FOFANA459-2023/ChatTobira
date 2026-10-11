@@ -199,6 +199,19 @@ describe("where a segment ends, now that nothing tells us", () => {
     // The model writes these, and closing on them chops a sentence in half.
     expect(shouldClose("Dr.")).toBe(false);
     expect(shouldClose("e.g.")).toBe(false);
+    expect(shouldClose("The lecture today is given by Dr.")).toBe(false);
+    expect(shouldClose("The class starts at 9 a.m.")).toBe(false);
+    expect(shouldClose("This is a case of 全部 vs.")).toBe(false);
+  });
+
+  it("still closes a sentence that happens to end in a short word", () => {
+    // The guard above used to be "one or two letters then a stop", which is
+    // the shape of an abbreviation AND of half the sentences in English. A
+    // line that cannot close is a line the student waits for.
+    expect(shouldClose("Please do it.")).toBe(true);
+    expect(shouldClose("I think so.")).toBe(true);
+    expect(shouldClose("Last week we covered the particles wa and ga.")).toBe(true);
+    expect(shouldClose("Everyone has to hand one in.")).toBe(true);
   });
 
   it("closes a runaway line even with no full stop", () => {
