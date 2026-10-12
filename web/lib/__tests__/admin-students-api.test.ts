@@ -142,11 +142,24 @@ describe("approving an account", () => {
     expect(await response.json()).toMatchObject({ ok: true, approvedAt: null });
   });
 
-  it("says so plainly when the database has no such function yet", async () => {
-    // 0019 not applied. Reported as a failure rather than as a silent success,
-    // because the screen would otherwise go on showing the account as waiting
-    // with nothing to explain why.
-    rpc.mockResolvedValue({ data: null, error: { message: "function does not exist" } });
+  it("names the missing migration, rather than telling the teacher to try again", async () => {
+    // 0019 not applied: the function is simply not there. "Please try again"
+    // is the one response that cannot help — the teacher presses the button
+    // all day — so the reply says which file is missing and the screen shows
+    // that sentence verbatim.
+    rpc.mockResolvedValue({
+      data: null,
+      error: { message: "Could not find the function public.set_student_approval in the schema cache" },
+    });
+    const response = await patch({ email: "someone@gmail.com", action: "approve" });
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as { error: string; message: string };
+    expect(body.error).toBe("approval_not_configured");
+    expect(body.message).toMatch(/0019_open_signup_with_approval\.sql/);
+  });
+
+  it("still reports an ordinary database failure as a failure", async () => {
+    rpc.mockResolvedValue({ data: null, error: { message: "deadlock detected" } });
     const response = await patch({ email: "someone@gmail.com", action: "approve" });
     expect(response.status).toBe(502);
     expect(await response.json()).toEqual({ error: "approve_failed" });

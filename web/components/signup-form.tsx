@@ -7,7 +7,6 @@ import { Field, inputClass, primaryButtonClass } from "@/components/auth-card";
 import { isAdminEmail } from "@/lib/admin";
 import { normalizeEmail } from "@/lib/email";
 import {
-  APU_DOMAIN,
   cleanFullName,
   cleanGenderDescription,
   emailProblem,
@@ -104,12 +103,21 @@ export function SignupForm({ disabled = false }: { disabled?: boolean }) {
           setProblems({ password: error.message });
           setOutcome({ kind: "idle" });
         } else if (/database error/i.test(error.message)) {
-          // The signup trigger refused it. The checks above mirror it, so this
-          // is a crafted request or a rule that drifted — either way, say which
-          // rules apply rather than "database error".
+          // The signup trigger refused it.
+          //
+          // This used to say "check the email address and answer every
+          // question", on the reasoning that the checks in this form mirror
+          // the trigger. Since 0019 they do not: the form accepts any address
+          // and the trigger only stops refusing non-APU ones once that
+          // migration is applied. So the advice sent students to re-read a
+          // form that was already correct, which no amount of care could fix.
+          //
+          // Named plainly instead. A student cannot act on it, but they can
+          // repeat it to the person who can, and it stops them blaming their
+          // own typing.
           setOutcome({
             kind: "error",
-            text: "That account could not be created. Check the email address, give your full name as it appears on your ID, and answer every question above.",
+            text: "Accounts cannot be created on this server yet — it is waiting on a database update. Nothing is wrong with what you typed. Please tell the course administrator at fvarlee@gmail.com.",
           });
         } else {
           setOutcome({ kind: "error", text: "Something went wrong on our side. Please try again." });
@@ -191,7 +199,7 @@ export function SignupForm({ disabled = false }: { disabled?: boolean }) {
           autoComplete="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          placeholder={`ab12cd34@${APU_DOMAIN}`}  /* the address most students use; any works */
+          placeholder="you@example.com"
           aria-invalid={Boolean(problems.email)}
           aria-describedby={problems.email ? "email-error" : undefined}
           disabled={busy}

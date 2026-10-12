@@ -4,7 +4,7 @@ import { AuthCard, SetupNotice } from "@/components/auth-card";
 import { LoginForm } from "@/components/login-form";
 import { normalizeEmail } from "@/lib/email";
 
-/** Student sign-in: APU email and password. */
+/** Student sign-in: email and password. */
 export default async function LoginPage({
   searchParams,
 }: {

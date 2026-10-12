@@ -70,11 +70,23 @@ export default function StudentsPage() {
   const load = useCallback(() => {
     setFailed(false);
     void fetch("/api/admin/students")
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((body: { students: Student[] }) => setStudents(body.students))
-      .catch(() => {
+      .then(async (r) => {
+        const body = (await r.json().catch(() => ({}))) as {
+          students?: Student[];
+          message?: string;
+        };
+        if (!r.ok) throw new Error(body.message ?? String(r.status));
+        return body;
+      })
+      .then((body) => setStudents(body.students ?? []))
+      .catch((reason: Error) => {
         setStudents([]);
         setFailed(true);
+        // Only when the server sent a sentence; a bare status number would
+        // read as noise above an already-empty list.
+        if (reason.message.includes(" ")) {
+          setNote({ ok: false, text: reason.message });
+        }
       });
   }, []);
 
@@ -102,7 +114,10 @@ export default function StudentsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(action === "remove" ? { email } : { email, action }),
       });
-      const body = (await response.json().catch(() => ({}))) as { error?: string };
+      const body = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        message?: string;
+      };
 
       if (response.ok) {
         setNote({
@@ -122,6 +137,11 @@ export default function StudentsPage() {
         });
       } else if (body.error === "no_account") {
         setNote({ ok: false, text: `There is no account for ${email} any more.` });
+      } else if (body.message) {
+        // The server knows exactly what is wrong — a missing migration, say.
+        // Telling the teacher to try again instead would have them pressing
+        // the button until someone reads a log.
+        setNote({ ok: false, text: body.message });
       } else {
         setNote({ ok: false, text: `Could not ${action} ${email}. Please try again.` });
       }

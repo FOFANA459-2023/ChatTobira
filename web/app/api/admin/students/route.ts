@@ -66,6 +66,23 @@ export async function GET() {
     return Response.json({ error: "lookup_failed" }, { status: 500 });
   }
 
+  // 0019 added approved_at to this function's result. A roster without it is
+  // not a roster with nobody approved — it is an un-migrated database, and
+  // showing every student as "waiting" would be a lie the teacher then acts
+  // on. Caught here, once, rather than in each place that reads the column.
+  const first = (data ?? [])[0] as Record<string, unknown> | undefined;
+  if (first && !("approved_at" in first)) {
+    console.error("admin_students() has no approved_at — apply 0019_open_signup_with_approval.sql");
+    return Response.json(
+      {
+        error: "approval_not_configured",
+        message:
+          "This database has not had 0019_open_signup_with_approval.sql applied, so no account can be approved yet.",
+      },
+      { status: 503 },
+    );
+  }
+
   interface Row {
     email: string;
     full_name: string | null;
@@ -169,6 +186,20 @@ export async function PATCH(request: Request) {
     });
     if (error) {
       console.error(`set_student_approval failed for ${email}: ${error.message}`);
+      // A database that has not had 0019 applied has no such function, and
+      // "please try again" is the one thing that cannot possibly help: the
+      // teacher will press the button all day. Say which migration is
+      // missing, the way the translate route does when 0018 is absent.
+      if (/could not find the function|does not exist|schema cache/i.test(error.message)) {
+        return Response.json(
+          {
+            error: "approval_not_configured",
+            message:
+              "This database has not had 0019_open_signup_with_approval.sql applied, so there is nothing to approve into yet. Nothing was changed.",
+          },
+          { status: 503 },
+        );
+      }
       return Response.json({ error: `${action}_failed` }, { status: 502 });
     }
     return Response.json({ ok: true, email, approvedAt: (data as string | null) ?? null });
