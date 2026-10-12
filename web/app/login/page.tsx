@@ -22,7 +22,7 @@ export default async function LoginPage({
           Sign in <span className="text-base font-normal text-stone-500">とびら</span>
         </>
       }
-      intro="Welcome back. Sign in with your APU email and password."
+      intro="Welcome back. Sign in with your email and password."
       footer={
         <Link href="/admin" className="underline hover:text-stone-600">
           Admin sign-in

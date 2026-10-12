@@ -78,6 +78,11 @@ export async function GET() {
     signed_up_at: string;
     verified: boolean;
     onboarded: boolean;
+    /** Null while the account is waiting. The screen reads this to decide
+     * between Approve and Un-approve, and to colour the row; leaving it out
+     * of this payload made every student look like they were waiting and
+     * made approving one look as though it had failed. */
+    approved_at: string | null;
     suspended: boolean;
     last_sign_in_at: string | null;
     last_activity_at: string | null;
@@ -99,6 +104,7 @@ export async function GET() {
       signed_up_at: row.signed_up_at,
       verified: row.verified,
       onboarded: row.onboarded,
+      approved_at: row.approved_at ?? null,
       suspended: row.suspended,
       last_sign_in_at: row.last_sign_in_at,
       last_activity_at: row.last_activity_at,
@@ -109,7 +115,9 @@ export async function GET() {
     students,
     summary: {
       total: students.length,
-      active: students.filter((s) => s.onboarded && !s.suspended).length,
+      // Waiting on the teacher, which since 0019 is the queue that matters.
+      waiting: students.filter((s) => !s.approved_at && !s.suspended).length,
+      active: students.filter((s) => s.approved_at && s.onboarded && !s.suspended).length,
       // Signed up and never clicked the confirmation link.
       unverified: students.filter((s) => !s.verified).length,
       // Verified, but stopped at the welcome questions.

@@ -8,6 +8,9 @@ import { createClient } from "@/lib/supabase/client";
 
 interface Summary {
   total: number;
+  /** Signed up, not yet approved. Since 0019 this is the only queue on this
+   * screen that needs the teacher personally, so it gets the second tile. */
+  waiting: number;
   active: number;
   unverified: number;
   incomplete: number;
@@ -88,7 +91,12 @@ export default function AdminDashboard() {
     >
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Stat label="Students" value={students?.total} href="/admin/students" />
-        <Stat label="Active" value={students?.active} href="/admin/students" />
+        <Stat
+          label="Waiting for approval"
+          value={students?.waiting}
+          href="/admin/students?filter=waiting"
+          tone={students && students.waiting > 0 ? "warn" : "plain"}
+        />
         <Stat
           label="Not finished signing up"
           value={students ? students.unverified + students.incomplete : undefined}
@@ -113,10 +121,12 @@ export default function AdminDashboard() {
           description="Anyone can sign up. Nobody gets in until you approve them."
         >
           <dl className="grid grid-cols-2 gap-px bg-stone-100 text-sm">
+            <Figure label="Waiting for approval" value={students?.waiting} />
             <Figure label="Active" value={students?.active} />
             <Figure label="Email not verified" value={students?.unverified} />
             <Figure label="Profile pending" value={students?.incomplete} />
             <Figure label="Suspended" value={students?.suspended} />
+            <Figure label="Students" value={students?.total} />
           </dl>
         </Card>
 

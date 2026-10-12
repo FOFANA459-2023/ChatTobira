@@ -56,7 +56,14 @@ function whoTheyAre(student: Student): string | null {
 export default function StudentsPage() {
   const [students, setStudents] = useState<Student[] | null>(null);
   const [failed, setFailed] = useState(false);
-  const [filter, setFilter] = useState<Filter>("all");
+  // The dashboard links here with ?filter=waiting, so the teacher arrives at
+  // the queue rather than at a list they have to narrow themselves. Read once,
+  // on mount: after that the tabs own it.
+  const [filter, setFilter] = useState<Filter>(() => {
+    if (typeof window === "undefined") return "all";
+    const asked = new URLSearchParams(window.location.search).get("filter");
+    return FILTERS.some((f) => f.id === asked) ? (asked as Filter) : "all";
+  });
   const [busyEmail, setBusyEmail] = useState<string | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
 
@@ -105,7 +112,13 @@ export default function StudentsPage() {
               ? `${email} was removed completely.`
               : action === "suspend"
                 ? `${email} is suspended. Their account and history are kept.`
-                : `${email} can sign in again.`,
+                : action === "approve"
+                  ? `${email} is approved and can sign in now.`
+                  : // Said plainly: un-approving used to fall through to the
+                    // restore wording and report the opposite of what it did.
+                    action === "unapprove"
+                    ? `${email} is waiting for approval again and cannot sign in.`
+                    : `${email} can sign in again.`,
         });
       } else if (body.error === "no_account") {
         setNote({ ok: false, text: `There is no account for ${email} any more.` });

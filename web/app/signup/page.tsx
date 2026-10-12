@@ -16,7 +16,10 @@ export default function SignupPage() {
           <span className="text-base font-normal text-stone-500">とびら</span>
         </>
       }
-      intro="ChatTobira is for APU students. Sign up with your @apu.ac.jp email — we will send a link to confirm it."
+      // Since 0019 the address no longer decides who gets in — the teacher
+      // does — so this says what actually happens next instead of promising
+      // the app to anyone with the right domain.
+      intro="Sign up with any email. We will send a link to confirm it, and your account is approved by the course administrator before you can sign in."
       footer={
         <>
           Already have an account?{" "}
