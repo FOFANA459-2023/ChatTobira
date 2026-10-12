@@ -76,7 +76,9 @@ describe("signup form", () => {
   it("requires every field", async () => {
     render(<SignupForm />);
     fillSignup({ name: "", email: "", gender: null, level: null, password: "" });
-    expect(await screen.findByText(/as it appears on your student ID/)).toBeInTheDocument();
+    // By the error's own text, not by the half of it the field's hint also
+    // says — matching the shared half made this pass on the hint alone.
+    expect(await screen.findByText(/^Enter your full name/)).toBeInTheDocument();
     expect(screen.getByText(/Enter your email address/)).toBeInTheDocument();
     expect(screen.getByText(/at least 8 characters for your password/)).toBeInTheDocument();
     // Gender and undergraduate/graduate are required too, and each says so

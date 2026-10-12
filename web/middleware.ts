@@ -102,21 +102,30 @@ export async function middleware(request: NextRequest) {
   //
   // It comes BEFORE the welcome questions on purpose: someone who will not be
   // let in should not be asked their college and semester first.
+  // This gate ANSWERS for an account that is waiting — it returns, and the
+  // welcome gate below never sees one. That is not tidiness, it is the bug:
+  // when both gates ran, /pending failed the welcome gate (it is not one of
+  // its exempt paths) and was sent to /welcome, and /welcome failed this gate
+  // and was sent back to /pending. A confirmed student who signed in got
+  // ERR_TOO_MANY_REDIRECTS and could not reach the app at all. Returning here
+  // makes that loop unreachable rather than relying on two lists of paths
+  // agreeing with each other.
   if (user && !isAdminEmail(user.email)) {
     const approved = Boolean(user.app_metadata?.approved);
-    const waiting =
-      path.startsWith("/pending") ||
-      path.startsWith("/auth") ||
-      path.startsWith("/login") ||
-      path.startsWith("/admin");
-    if (!approved && !waiting) {
+    if (!approved) {
       if (path.startsWith("/api/")) {
         return NextResponse.json({ error: "not_approved" }, { status: 403 });
       }
-      return redirectTo(request, "/pending", response);
+      // What an account that is waiting may still reach: the page explaining
+      // the wait, the link in their confirmation email, and the admin door.
+      // The sign-in forms are not on the list — they are signed in already,
+      // and /pending is where that leads.
+      const allowed =
+        path.startsWith("/pending") || path.startsWith("/auth") || path.startsWith("/admin");
+      return allowed ? response : redirectTo(request, "/pending", response);
     }
     // An approved account has no business on the waiting page.
-    if (approved && path.startsWith("/pending")) {
+    if (path.startsWith("/pending")) {
       return redirectTo(request, "/", response);
     }
   }

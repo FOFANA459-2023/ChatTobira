@@ -144,7 +144,8 @@ export function SignupForm({ disabled = false }: { disabled?: boolean }) {
         <p className="font-medium">Check your inbox</p>
         <p className="mt-1">
           We sent a confirmation link to <strong>{outcome.email}</strong>. Click it to verify your
-          email, then you will be asked a few quick questions.
+          email. Your account is then approved by the course administrator before you can sign
+          in — the welcome questions come after that.
         </p>
         <p className="mt-2 text-xs text-green-800">
           Nothing there after a few minutes? Check your spam folder, or{" "}
@@ -163,7 +164,7 @@ export function SignupForm({ disabled = false }: { disabled?: boolean }) {
     <form onSubmit={submit} noValidate className="space-y-4">
       <Field
         label="Full name"
-        hint="Exactly as it appears on your APU student ID card."
+        hint="Exactly as it appears on your student ID card."
         htmlFor="full-name"
         error={problems.fullName}
       >

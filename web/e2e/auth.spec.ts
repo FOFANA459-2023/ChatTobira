@@ -36,10 +36,12 @@ test("login page signs in with an APU email and password", async ({ page }) => {
   await expect(page.getByRole("link", { name: /admin sign-in/i })).toBeVisible();
 });
 
-test("signup page asks for full name, APU email and password", async ({ page }) => {
+test("signup page asks for full name, email and password", async ({ page }) => {
   await page.goto("/signup");
   await expect(page.getByLabel("Full name")).toBeVisible();
-  await expect(page.getByText(/as it appears on your APU student ID/i)).toBeVisible();
+  await expect(page.getByText(/as it appears on your student ID/i).first()).toBeVisible();
+  // The page says who decides, now that the address no longer does.
+  await expect(page.getByText(/approved by the course administrator/i)).toBeVisible();
   await expect(page.getByLabel("Email")).toBeVisible();
   await expect(page.getByLabel("Password", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Confirm password")).toBeVisible();
