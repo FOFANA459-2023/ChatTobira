@@ -25,10 +25,12 @@ test("quiz page is open to trial visitors, like the chat", async ({ page }) => {
   ).toBeVisible();
 });
 
-test("login page signs in with an APU email and password", async ({ page }) => {
+test("login page signs in with an email and password", async ({ page }) => {
   await page.goto("/login");
   await expect(page.getByLabel("Email")).toBeVisible();
-  await expect(page.getByPlaceholder(/@apu\.ac\.jp/)).toBeVisible();
+  // The example address stopped naming a domain when the domain stopped
+  // deciding who gets in.
+  await expect(page.getByPlaceholder("you@example.com")).toBeVisible();
   await expect(page.getByLabel("Password")).toBeVisible();
   await expect(page.getByRole("button", { name: /^sign in$/i })).toBeVisible();
   await expect(page.getByRole("button", { name: /forgot password/i })).toBeVisible();

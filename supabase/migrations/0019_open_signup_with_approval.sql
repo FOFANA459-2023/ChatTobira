@@ -17,28 +17,45 @@
 -- March" cost the same to store and the second answers questions the first
 -- cannot. Null means waiting.
 
-alter table profiles add column if not exists approved_at timestamptz;
+-- EVERY ACCOUNT THAT ALREADY EXISTS IS APPROVED — BUT ONLY ON THE FIRST RUN.
+--
+-- Without the backfill the gate closes on the whole school the moment this is
+-- applied, the teacher's own account included, and there is no way back in
+-- through the app to open it. Only accounts created afterwards wait.
+--
+-- Without the GUARD around it, running this file a second time would approve
+-- everyone currently waiting — the exact queue the teacher is working
+-- through. A half-applied migration is a normal thing to want to re-run, so
+-- it has to be safe to.
+do $$
+declare
+  first_run boolean := not exists (
+    select 1 from information_schema.columns
+     where table_schema = 'public'
+       and table_name = 'profiles'
+       and column_name = 'approved_at'
+  );
+begin
+  alter table profiles add column if not exists approved_at timestamptz;
+
+  if first_run then
+    update profiles set approved_at = now() where approved_at is null;
+
+    -- The middleware reads approval off the session rather than the database,
+    -- so it costs no round trip on a page view. That means the flag has to
+    -- live in app_metadata as well — the same place `onboarded` lives (0010)
+    -- and for the same reason. app_metadata is writable only by the service
+    -- role and by security-definer functions, never by the student.
+    update auth.users u
+       set raw_app_meta_data =
+             coalesce(raw_app_meta_data, '{}'::jsonb) || jsonb_build_object('approved', true)
+      from profiles p
+     where p.id = u.id and p.approved_at is not null;
+  end if;
+end $$;
 
 comment on column profiles.approved_at is
   'When the teacher approved this account. Null means it is waiting and cannot use the app.';
-
--- EVERY ACCOUNT THAT ALREADY EXISTS IS APPROVED.
---
--- Without this the gate closes on the whole school the moment it is applied,
--- the teacher's own account included, and there is no way back in through the
--- app to open it. Only accounts created after this migration wait.
-update profiles set approved_at = now() where approved_at is null;
-
--- The middleware reads approval off the session rather than the database, so
--- it costs no round trip on a page view. That means the flag has to live in
--- app_metadata as well — the same place `onboarded` lives (0010) and for the
--- same reason. app_metadata is writable only by the service role and by
--- security-definer functions, never by the student.
-update auth.users u
-   set raw_app_meta_data =
-         coalesce(raw_app_meta_data, '{}'::jsonb) || jsonb_build_object('approved', true)
-  from profiles p
- where p.id = u.id and p.approved_at is not null;
 
 -- ---------------------------------------------------------------------------
 -- 2. Approving, and taking it back

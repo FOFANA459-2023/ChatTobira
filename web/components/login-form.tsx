@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { Field, inputClass, primaryButtonClass } from "@/components/auth-card";
 import { isAdminEmail } from "@/lib/admin";
 import { normalizeEmail } from "@/lib/email";
-import { APU_DOMAIN, emailProblem } from "@/lib/signup";
+import { emailProblem } from "@/lib/signup";
 import { createClient } from "@/lib/supabase/client";
 
 type Mode = "signin" | "forgot" | "resend";
@@ -185,7 +185,7 @@ export function LoginForm({
             autoComplete="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            placeholder={`ab12cd34@${APU_DOMAIN}`}  /* the address most students use; any works */
+            placeholder="you@example.com"
             disabled={locked}
             className={inputClass}
           />

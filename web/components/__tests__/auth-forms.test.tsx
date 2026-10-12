@@ -158,7 +158,12 @@ describe("signup form", () => {
     });
     render(<SignupForm />);
     fillSignup();
-    expect(await screen.findByText(/could not be created/)).toBeInTheDocument();
+    // Names the real cause and clears the student of blame. The old wording
+    // told them to check the address and answer every question, which since
+    // 0019 is advice they cannot act on: the form is right and the database
+    // is behind it.
+    expect(await screen.findByText(/waiting on a database update/)).toBeInTheDocument();
+    expect(screen.getByText(/Nothing is wrong with what you typed/)).toBeInTheDocument();
   });
 });
 

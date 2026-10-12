@@ -87,7 +87,9 @@ export function AuthPrompt({ message }: { message: string }) {
           Sign in
         </Link>
       </div>
-      <p className="mt-2 text-xs text-stone-500">For APU students with an @apu.ac.jp email.</p>
+      <p className="mt-2 text-xs text-stone-500">
+        Sign up with any email. Accounts are approved by the course administrator.
+      </p>
     </div>
   );
 }
