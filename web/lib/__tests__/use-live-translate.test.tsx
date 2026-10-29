@@ -255,6 +255,71 @@ describe("starting on the click, not a second later", () => {
   });
 });
 
+describe("when the server refuses the session", () => {
+  /** How many tokens were minted — each one spends a minute of allowance. */
+  const minted = () =>
+    fetchMock.mock.calls.filter(([url]) => url === "/api/translate/session").length;
+
+  it("does not mint another token when the refusal is final", async () => {
+    const { result, socket } = await listen();
+    expect(minted()).toBe(1);
+
+    // What an account with no credit actually sends: the socket opens, says
+    // setupComplete, and dies the moment the model is asked to produce.
+    act(() =>
+      socket.onclose!({
+        code: 1011,
+        reason: "Your prepayment credits are depleted. Please go to AI Studio",
+      }),
+    );
+
+    await waitFor(() => expect(result.current.phase).toBe("error"));
+    // THE BUG: this path had no counter and called connect() again, so it
+    // minted, opened, closed and minted again as fast as the network allowed
+    // — fifty minutes of allowance in seconds.
+    expect(minted()).toBe(1);
+    expect(result.current.error?.kind).toBe("provider");
+    expect(result.current.error?.message).toMatch(/not your allowance/);
+  });
+
+  it("keeps what was already translated when it gives up", async () => {
+    const { result, socket } = await listen();
+    say(socket, "大事なところです。", "This is the important part.");
+    await waitFor(() => expect(result.current.segments).toHaveLength(1));
+
+    act(() => socket.onclose!({ code: 1011, reason: "RESOURCE_EXHAUSTED: billing" }));
+
+    await waitFor(() => expect(saved).toHaveLength(1));
+    expect(saved[0].segments[0].translated).toBe("This is the important part.");
+  });
+
+  it("still reconnects through an ordinary drop, but not for ever", async () => {
+    const { result, socket } = await listen();
+    // A blip, not a refusal: this one SHOULD be carried through, because a
+    // ninety-minute lecture on bad wifi depends on it.
+    act(() => socket.onclose!({ code: 1006, reason: "" }));
+    await waitFor(() => expect(minted()).toBe(2));
+    expect(result.current.phase).not.toBe("error");
+  });
+
+  it("gives up once the rebuild budget is spent, rather than draining the allowance", async () => {
+    const { result } = await listen();
+    // Five drops in a row with nothing translated in between: four rebuilds
+    // are allowed, the fifth ends it.
+    for (let i = 0; i < 6; i++) {
+      const socket = FakeSocket.all.at(-1)!;
+      act(() => socket.onclose!({ code: 1006, reason: "" }));
+      await waitFor(() => expect(FakeSocket.all.at(-1)!.readyState).not.toBe(3));
+      act(() => FakeSocket.all.at(-1)!.open());
+      act(() => FakeSocket.all.at(-1)!.receive({ setupComplete: {} }));
+      if (result.current.phase === "error") break;
+    }
+    await waitFor(() => expect(result.current.phase).toBe("error"));
+    expect(minted()).toBeLessThanOrEqual(5);
+    expect(result.current.error?.message).toMatch(/kept dropping/);
+  });
+});
+
 describe("ending a session saves it and clears the page", () => {
   it("writes the transcript, then empties the screen", async () => {
     const { result, socket } = await listen();

@@ -83,7 +83,11 @@ export type VoiceError =
   | "empty"
   | "transcription_failed"
   | "network"
-  | "quota";
+  | "quota"
+  // The provider refused and will refuse the next attempt too — out of
+  // credit, or a bad key. Separate from "network" because the student's
+  // connection is fine and retrying cannot help.
+  | "provider";
 
 export const VOICE_ERROR_TEXT: Record<VoiceError, string> = {
   unsupported: "This browser cannot record audio. Try Chrome, Edge or Safari.",
@@ -94,6 +98,8 @@ export const VOICE_ERROR_TEXT: Record<VoiceError, string> = {
   transcription_failed: "I could not make out that recording. Please try again.",
   network: "The connection dropped. Check your network and try again.",
   quota: "You have used your 10 minutes of conversation for now. More are available within 5 hours.",
+  provider:
+    "The server's AI service is unavailable — this is not your connection and not your allowance. Please tell the course administrator at fvarlee@gmail.com.",
 };
 
 /** The audio format this browser will actually record.

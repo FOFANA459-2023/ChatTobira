@@ -30,7 +30,9 @@ import {
   floatToPcm16,
   freshDownsample,
   INPUT_RATE,
+  isPermanentRefusal,
   LIVE_SOCKET_URL,
+  PROVIDER_REFUSED_TEXT,
   type DownsampleState,
 } from "./live-voice";
 import type { LanguageCode, SourceLanguage } from "./translate";
@@ -140,7 +142,7 @@ export type TranslatePhase =
   | "error";
 
 export interface TranslateError {
-  kind: "microphone" | "quota" | "network" | "config" | "unknown";
+  kind: "microphone" | "quota" | "network" | "config" | "provider" | "unknown";
   message: string;
 }
 
@@ -153,6 +155,18 @@ const RENEW_LEAD_MS = 6_000;
  * (doubling after each). */
 const RECONNECT_ATTEMPTS = 5;
 const RECONNECT_BACKOFF_MS = 500;
+/** How many times a session may be rebuilt after the server drops it.
+ *
+ * There was no limit here, and the path had no counter: a server that closed
+ * the connection as soon as it opened produced mint, open, close, mint, ...
+ * as fast as the network allowed. Every mint SPENDS A MINUTE of the
+ * student's allowance, so fifty minutes could go in seconds while the screen
+ * said the connection had dropped.
+ *
+ * The budget is restored whenever a session actually produces a line, since
+ * that proves the setup works and the next drop is a fresh problem — a
+ * ninety-minute lecture through a bad wifi is allowed its reconnections. */
+const REBUILD_BUDGET = 4;
 /** Finished segments are written in batches: whichever of these comes first.
  * Small enough that a browser that dies loses a sentence, not a lecture. */
 const SAVE_EVERY_SEGMENTS = 5;
@@ -202,7 +216,10 @@ function openSocket(
   token: string,
   model: string,
   onMessage: (message: ServerMessage) => void,
-  onClose: () => void,
+  // The close REASON decides whether reconnecting is worth a token, so it has
+  // to travel; this used to be a bare () => void and everything downstream
+  // had to guess.
+  onClose: (event: { code: number; reason: string }) => void,
 ): Promise<WebSocket | null> {
   return new Promise((resolve) => {
     let settled = false;
@@ -226,9 +243,9 @@ function openSocket(
       onMessage(message);
     };
     socket.onerror = () => give(null);
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       give(null);
-      onClose();
+      onClose({ code: event.code, reason: String(event.reason ?? "") });
     };
   });
 }
@@ -340,6 +357,8 @@ export function useLiveTranslation(): LiveTranslation {
   const pausedRef = useRef(false);
   /** Audio captured before the socket was ready, oldest first. */
   const preRollRef = useRef<string[]>([]);
+  /** Rebuilds left before the session gives up. */
+  const rebuildsLeftRef = useRef(REBUILD_BUDGET);
 
   /* ---------------------------------------------------------------- saving */
 
@@ -378,6 +397,17 @@ export function useLiveTranslation(): LiveTranslation {
 
   /* ------------------------------------------------------------- the socket */
 
+  // Defined up here rather than beside openMicrophone: connect() has to be
+  // able to shut the microphone down when the provider refuses the session,
+  // and it is declared before the microphone section.
+  const closeMicrophone = useCallback(() => {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    void contextRef.current?.close().catch(() => {});
+    contextRef.current = null;
+    downsampleRef.current = freshDownsample();
+  }, []);
+
   const teardownSocket = useCallback(() => {
     if (renewTimerRef.current) clearTimeout(renewTimerRef.current);
     renewTimerRef.current = null;
@@ -407,6 +437,9 @@ export function useLiveTranslation(): LiveTranslation {
       offsetMs: Math.max(0, Date.now() - startedAtRef.current),
     };
     setSegments((previous) => [...previous, segment]);
+    // A line on the screen is proof the connection is good, so the allowance
+    // for rebuilding it is given back.
+    rebuildsLeftRef.current = REBUILD_BUDGET;
     unsavedRef.current.push(segment);
     if (unsavedRef.current.length >= SAVE_EVERY_SEGMENTS) void flush();
   }, [flush]);
@@ -505,10 +538,40 @@ export function useLiveTranslation(): LiveTranslation {
       );
 
       const previous = socketRef.current;
-      const socket = await openSocket(minted.token, minted.model, handleMessage, () => {
-        // An unexpected close mid-lecture: get back on, carrying the handle so
-        // the new session still knows the lecture.
+      const socket = await openSocket(minted.token, minted.model, handleMessage, (event) => {
         if (closingRef.current || pausedRef.current) return;
+
+        // The server will refuse the next token too — it is out of credit, or
+        // the key is bad. Reconnecting would mint again and spend another
+        // minute for another immediate close, so this ends here and says why.
+        if (isPermanentRefusal(event.reason)) {
+          closingRef.current = true;
+          setError({ kind: "provider", message: PROVIDER_REFUSED_TEXT });
+          teardownSocket();
+          closeMicrophone();
+          preRollRef.current = [];
+          void flush();
+          setPhase("error");
+          return;
+        }
+
+        // An unexpected close mid-lecture: get back on, carrying the handle so
+        // the new session still knows the lecture — but only while there is
+        // budget for it, because each attempt costs a minute.
+        if (rebuildsLeftRef.current <= 0) {
+          closingRef.current = true;
+          setError({
+            kind: "network",
+            message:
+              "The connection kept dropping, so the session was ended rather than spend more of your time on it. What you have is saved.",
+          });
+          teardownSocket();
+          closeMicrophone();
+          void flush();
+          setPhase("error");
+          return;
+        }
+        rebuildsLeftRef.current -= 1;
         void connect();
       });
       if (!socket) {
@@ -550,7 +613,7 @@ export function useLiveTranslation(): LiveTranslation {
       );
       return true;
     },
-    [handleMessage],
+    [handleMessage, teardownSocket, closeMicrophone, flush],
   );
 
   /* -------------------------------------------------------------- the mic  */
@@ -639,13 +702,6 @@ export function useLiveTranslation(): LiveTranslation {
     }
   }, []);
 
-  const closeMicrophone = useCallback(() => {
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    streamRef.current = null;
-    void contextRef.current?.close().catch(() => {});
-    contextRef.current = null;
-    downsampleRef.current = freshDownsample();
-  }, []);
 
   /* ------------------------------------------------------------- controls  */
 
@@ -661,6 +717,7 @@ export function useLiveTranslation(): LiveTranslation {
       setConversationId(null);
       setSaving(false);
       preRollRef.current = [];
+      rebuildsLeftRef.current = REBUILD_BUDGET;
       void (async () => {
         // Two independent waits — a microphone and a minted token — that used
         // to run one after the other for no reason beyond the order they were
