@@ -11,6 +11,7 @@ import {
   floatToPcm16,
   freshDownsample,
   INPUT_RATE,
+  isPermanentRefusal,
   LIVE_SILENCE_MS,
   LIVE_SOCKET_URL,
   LOOKUP_TOOL,
@@ -514,6 +515,16 @@ export function useLiveConversation(options: {
     // A replacement is already being opened; it takes over when it is up,
     // and what the student says meanwhile is queued for it.
     if (reconnectingRef.current) return;
+    // The provider will refuse the replacement too, and asking for one is
+    // what spends the next minute. Five renewals against an account with no
+    // credit cost the student five minutes and told them their network had
+    // dropped; this ends the call and names the real cause instead.
+    if (isPermanentRefusal(event.reason)) {
+      flushExchange();
+      setError("provider");
+      teardown();
+      return;
+    }
     // The server ended the connection underneath a live conversation. Carry
     // it on — a minute's token ending before the handover ran (a throttled
     // tab, a slow network) is the common case.
