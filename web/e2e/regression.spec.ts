@@ -120,6 +120,62 @@ test.describe("the app is styled", () => {
   });
 });
 
+test.describe("nothing is standing on the page", () => {
+  /* The privacy notice is fixed to the bottom of the window, and the screens
+   * around it are sized to the viewport and centre their content in it — so
+   * it does not push anything aside, it covers it. It covered the "Confirm my
+   * email" button on the page every emailed signup link opens, and a student
+   * following that link pressed a button that could not be pressed: nothing
+   * happened, every time, on the one screen they cannot skip.
+   *
+   * A visible button is not a clickable one, which is why this asks the
+   * browser what is actually on top at that point rather than whether the
+   * button is on screen. */
+  const notice = "[role=dialog][aria-label='Privacy and cookies notice']";
+
+  for (const [where, width, height] of [
+    ["a laptop", 1024, 768],
+    ["a phone", 375, 812],
+  ] as const) {
+    test(`the emailed confirmation button can be pressed on ${where}`, async ({ page }) => {
+      await page.setViewportSize({ width, height });
+      await page.goto("/auth/verify?token_hash=not-a-real-token&type=signup");
+
+      // The notice waits two seconds before it appears, so a check made too
+      // early passes against a page the student never sees.
+      await expect(page.locator(notice)).toBeVisible({ timeout: 10_000 });
+
+      const button = page.getByRole("button", { name: /confirm my email/i });
+      await expect(button).toBeVisible();
+      const onTop = await button.evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return el === hit || el.contains(hit);
+      });
+      expect(onTop, "something is covering the confirmation button").toBe(true);
+
+      // And pressing it really does spend the token: a made-up one comes
+      // back as the expired-link message rather than doing nothing at all.
+      await button.click();
+      await expect(page).toHaveURL(/\/login\?error=link/);
+    });
+  }
+
+  test("the notice does not cover the chat composer either", async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.goto("/");
+    await expect(page.locator(notice)).toBeVisible({ timeout: 10_000 });
+
+    const send = page.getByRole("button", { name: /^send$/i });
+    const onTop = await send.evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return el === hit || el.contains(hit);
+    });
+    expect(onTop, "the privacy notice is covering the send button").toBe(true);
+  });
+});
+
 test.describe("the shell still navigates", () => {
   test("the sidebar offers every kind of practice and a new chat", async ({ page }) => {
     await page.goto("/");

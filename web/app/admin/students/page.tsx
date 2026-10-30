@@ -27,12 +27,16 @@ interface Student {
   questions_today: number;
 }
 
-type Filter = "all" | "waiting" | "active" | "pending" | "suspended";
+type Filter = "all" | "waiting" | "unverified" | "active" | "pending" | "suspended";
 
 const FILTERS: { id: Filter; label: string }[] = [
   { id: "all", label: "All" },
   // First, because it is the only one with anything for the teacher to DO.
   { id: "waiting", label: "Waiting for approval" },
+  // Its own filter since these rows became actionable: each one carries a
+  // Confirm email button, and an account stuck here cannot be approved
+  // because it cannot sign in to be approved.
+  { id: "unverified", label: "Email not verified" },
   { id: "active", label: "Active" },
   { id: "pending", label: "Not finished signing up" },
   { id: "suspended", label: "Suspended" },
@@ -92,10 +96,11 @@ export default function StudentsPage() {
 
   useEffect(load, [load]);
 
-  /** Suspend, restore or remove, through the admin students API. */
+  /** Everything this screen can do to one account, through the admin
+   *  students API. */
   async function act(
     email: string,
-    action: "suspend" | "restore" | "remove" | "approve" | "unapprove",
+    action: "suspend" | "restore" | "remove" | "approve" | "unapprove" | "verify",
   ) {
     if (
       action === "remove" &&
@@ -129,11 +134,13 @@ export default function StudentsPage() {
                 ? `${email} is suspended. Their account and history are kept.`
                 : action === "approve"
                   ? `${email} is approved and can sign in now.`
-                  : // Said plainly: un-approving used to fall through to the
-                    // restore wording and report the opposite of what it did.
-                    action === "unapprove"
-                    ? `${email} is waiting for approval again and cannot sign in.`
-                    : `${email} can sign in again.`,
+                  : action === "verify"
+                    ? `${email} is confirmed. They can sign in — approve them next if they should be let in.`
+                    : // Said plainly: un-approving used to fall through to the
+                      // restore wording and report the opposite of what it did.
+                      action === "unapprove"
+                      ? `${email} is waiting for approval again and cannot sign in.`
+                      : `${email} can sign in again.`,
         });
       } else if (body.error === "no_account") {
         setNote({ ok: false, text: `There is no account for ${email} any more.` });
@@ -158,11 +165,13 @@ export default function StudentsPage() {
       ? true
       : filter === "waiting"
         ? !student.approved_at && !student.suspended
-        : filter === "active"
-          ? student.approved_at && student.onboarded && !student.suspended
-          : filter === "pending"
-            ? !student.onboarded
-            : student.suspended,
+        : filter === "unverified"
+          ? !student.verified
+          : filter === "active"
+            ? student.approved_at && student.onboarded && !student.suspended
+            : filter === "pending"
+              ? !student.onboarded
+              : student.suspended,
   );
 
   return (
@@ -297,6 +306,18 @@ export default function StudentsPage() {
                         >
                           {student.approved_at ? "Un-approve" : "Approve"}
                         </RowButton>
+                        {/* Only while it is the thing standing in the way.
+                            An account that confirmed itself has nothing to
+                            confirm, and a button for it would be one more
+                            thing to read on every other row. */}
+                        {!student.verified && (
+                          <RowButton
+                            onClick={() => act(student.email, "verify")}
+                            busy={busyEmail === student.email}
+                          >
+                            Confirm email
+                          </RowButton>
+                        )}
                         <RowButton
                           onClick={() =>
                             act(student.email, student.suspended ? "restore" : "suspend")

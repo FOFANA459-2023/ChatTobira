@@ -123,7 +123,11 @@ export default function AdminDashboard() {
           <dl className="grid grid-cols-2 gap-px bg-stone-100 text-sm">
             <Figure label="Waiting for approval" value={students?.waiting} />
             <Figure label="Active" value={students?.active} />
-            <Figure label="Email not verified" value={students?.unverified} />
+            <Figure
+              label="Email not verified"
+              value={students?.unverified}
+              href="/admin/students?filter=unverified"
+            />
             <Figure label="Profile pending" value={students?.incomplete} />
             <Figure label="Suspended" value={students?.suspended} />
             <Figure label="Students" value={students?.total} />
@@ -206,9 +210,19 @@ function Stat({
   );
 }
 
-function Figure({ label, value }: { label: string; value: number | undefined }) {
-  return (
-    <div className="bg-white px-4 py-3">
+function Figure({
+  label,
+  value,
+  href,
+}: {
+  label: string;
+  value: number | undefined;
+  /** Where this figure's students are listed, when there is such a list. A
+   *  count the teacher has to act on is worth being a way in. */
+  href?: string;
+}) {
+  const body = (
+    <>
       <dt className="text-xs text-stone-500">{label}</dt>
       <dd className="mt-0.5 font-semibold text-stone-900">
         {value === undefined ? (
@@ -217,6 +231,13 @@ function Figure({ label, value }: { label: string; value: number | undefined }) 
           value.toLocaleString()
         )}
       </dd>
-    </div>
+    </>
+  );
+  return href ? (
+    <Link href={href} className="bg-white px-4 py-3 hover:bg-stone-50">
+      {body}
+    </Link>
+  ) : (
+    <div className="bg-white px-4 py-3">{body}</div>
   );
 }

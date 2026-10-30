@@ -14,7 +14,7 @@ const BodySchema = z.object({
 });
 
 const PatchSchema = BodySchema.extend({
-  action: z.enum(["suspend", "restore", "approve", "unapprove"]),
+  action: z.enum(["suspend", "restore", "approve", "unapprove", "verify"]),
 });
 
 // Supabase expresses an indefinite ban as a very long duration; "none" lifts it.
@@ -144,7 +144,7 @@ export async function GET() {
   });
 }
 
-/** Suspend or restore a student.
+/** Suspend, restore, approve, un-approve, or confirm an address by hand.
  *
  * Suspension pauses access but keeps the account and its history, so
  * restoring is a single click. The ban is what actually stops them — an
@@ -203,6 +203,27 @@ export async function PATCH(request: Request) {
       return Response.json({ error: `${action}_failed` }, { status: 502 });
     }
     return Response.json({ ok: true, email, approvedAt: (data as string | null) ?? null });
+  }
+
+  // Confirming an address on the student's behalf.
+  //
+  // The emailed link is the normal route and stays the normal route. This is
+  // for the student it does not reach: a university filter that swallows the
+  // message, a mailbox that bounces it, an address typed with one letter
+  // wrong that still belongs to them. Without this the teacher's only
+  // remedies were to delete the account and have them sign up again, or to
+  // open the Supabase dashboard — and an account stuck here cannot be
+  // approved into anything, because it cannot sign in to be approved.
+  //
+  // It confirms the address and nothing else: approval is still a separate
+  // press, so this cannot quietly let somebody in.
+  if (action === "verify") {
+    const { error } = await service.auth.admin.updateUserById(id, { email_confirm: true });
+    if (error) {
+      console.error(`manual verify failed for ${email}: ${error.message}`);
+      return Response.json({ error: "verify_failed" }, { status: 502 });
+    }
+    return Response.json({ ok: true, email, verified: true });
   }
 
   const { error } = await service.auth.admin.updateUserById(id, {
