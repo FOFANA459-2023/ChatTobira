@@ -1,3 +1,5 @@
+import type { UIMessageChunk } from "ai";
+
 /** Shared health tracking for the model provider cascade.
  *
  * Some provider failures are permanent for the life of a deployment rather
@@ -237,4 +239,40 @@ export function withDeadline<T>(work: Promise<T>, ms: number, label = "timeout")
 export function resetProviderHealth(): void {
   dead.clear();
   consecutiveFailures.clear();
+}
+
+/** Chunk types only the PROVIDER can have produced.
+ *
+ * Everything else a UI message stream emits is the SDK's own framing, which
+ * exists before the model has said anything. */
+const CONTENT_CHUNK = /-delta$|^file$|^source-/;
+
+/** Read a tier's stream until it proves the provider is actually answering.
+ *
+ * The first chunk out of `toUIMessageStream` is `{type:"start"}`, and the SDK
+ * emits it when the STREAM opens — not when the model replies. So reading one
+ * chunk ALWAYS succeeded, every tier was declared healthy the instant it was
+ * started, and the chat route's cascade never ran: whichever provider came
+ * first answered every turn, and if it could not, nothing else was asked.
+ *
+ * Measured against a Google key with no credit left on 2026-10-30, with
+ * DeepSeek configured and healthy behind it: 66ms to `start`, then an error
+ * part, then done. The student got a 200 response carrying "An error
+ * occurred." and no second tier was tried.
+ *
+ * A provider refusing arrives as an `error` chunk INSIDE that 200, so it has
+ * to be read for rather than caught. Either way this throws, which is what
+ * the cascade already treats as "try the next tier".
+ */
+export async function firstAnswerChunk(
+  reader: ReadableStreamDefaultReader<UIMessageChunk>,
+): Promise<void> {
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) throw new Error("tier_finished_without_answering");
+    if (value.type === "error") {
+      throw new Error(`tier_refused: ${(value as { errorText?: string }).errorText ?? "no reason"}`);
+    }
+    if (CONTENT_CHUNK.test(value.type)) return;
+  }
 }

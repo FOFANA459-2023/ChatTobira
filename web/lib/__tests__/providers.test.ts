@@ -3,8 +3,11 @@ import { resolve } from "node:path";
 
 import { beforeEach, describe, expect, it } from "vitest";
 
+import type { UIMessageChunk } from "ai";
+
 import {
   ACCEPT_BUDGET_MS,
+  firstAnswerChunk,
   isProviderDead,
   noteProviderFailure,
   noteProviderSuccess,
@@ -238,5 +241,67 @@ describe("acceptBudgetMs is coupled to the prompts this app actually builds", ()
 
   it("still fits two tiers inside the route's 60s maxDuration", () => {
     expect(acceptBudgetMs(false, worstCasePromptTokens) * 2).toBeLessThan(60_000);
+  });
+});
+
+describe("firstAnswerChunk tells a stream that opened from a provider that answered", () => {
+  /** A reader over a fixed list of chunks, which is all the helper touches. */
+  const readerOver = (chunks: { type: string; errorText?: string }[]) => {
+    let i = 0;
+    return {
+      read: async () =>
+        i < chunks.length
+          ? { done: false as const, value: chunks[i++] }
+          : { done: true as const, value: undefined },
+    } as unknown as ReadableStreamDefaultReader<UIMessageChunk>;
+  };
+
+  // The exact opening of a UI message stream, observed on 2026-10-30 from a
+  // real answer: three framing chunks before the model has said one syllable.
+  const FRAMING = [{ type: "start" }, { type: "start-step" }, { type: "text-start" }];
+
+  it("does not mistake the stream opening for the model answering", async () => {
+    // The regression this guards is the whole reason the cascade existed on
+    // paper and not in fact: reading ONE chunk here saw `start`, called the
+    // tier healthy, and broke out of the loop. A dead first provider then
+    // took chat down with it while a healthy tier sat behind it, unasked.
+    await expect(
+      firstAnswerChunk(readerOver([...FRAMING, { type: "error", errorText: "An error occurred." }])),
+    ).rejects.toThrow(/tier_refused/);
+  });
+
+  it("accepts a tier the moment real content arrives", async () => {
+    await expect(
+      firstAnswerChunk(readerOver([...FRAMING, { type: "text-delta" }])),
+    ).resolves.toBeUndefined();
+  });
+
+  it("accepts a tier that reasons or calls a tool before it writes", async () => {
+    await expect(
+      firstAnswerChunk(readerOver([...FRAMING, { type: "reasoning-delta" }])),
+    ).resolves.toBeUndefined();
+    await expect(
+      firstAnswerChunk(readerOver([...FRAMING, { type: "tool-input-delta" }])),
+    ).resolves.toBeUndefined();
+    await expect(
+      firstAnswerChunk(readerOver([{ type: "start" }, { type: "source-url" }])),
+    ).resolves.toBeUndefined();
+  });
+
+  it("carries the provider's own words out, so the refusal can be recognised", async () => {
+    await expect(
+      firstAnswerChunk(
+        readerOver([
+          { type: "start" },
+          { type: "error", errorText: "Your prepayment credits are depleted." },
+        ]),
+      ),
+    ).rejects.toThrow(/prepayment credits are depleted/);
+  });
+
+  it("declines a tier that finishes without ever answering", async () => {
+    await expect(firstAnswerChunk(readerOver(FRAMING))).rejects.toThrow(
+      /tier_finished_without_answering/,
+    );
   });
 });

@@ -24,6 +24,7 @@ import { contextBlock, recentTurns, systemPrompt, type AttachedUpload } from "@/
 import {
   acceptBudgetMs,
   estimateTokens,
+  firstAnswerChunk,
   noteProviderFailure,
   noteProviderSuccess,
   withDeadline,
@@ -606,12 +607,11 @@ export async function POST(request: Request) {
   const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
   const google = createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY });
 
-  // Provider cascade, cheapest-and-freest first. Groq's free tier (30/min,
-  // 1,000/day) is spent before anything is billed. DeepSeek then absorbs the
-  // overflow: it has no daily request cap at all, only a concurrency limit, so
-  // it is what actually removes the daily wall. Gemini stays last — rarely
-  // reached now, which leaves the Google key for vision and embeddings, the
-  // two jobs no other provider in this stack can do.
+  // Provider cascade. The ORDER is not decided here — lib/router.ts measures
+  // it per task and PREFERENCE is the list that wins. This comment used to
+  // claim Gemini was last and rarely reached; it has led every chat cascade
+  // since the Google key moved to a paid plan, which is why a key with no
+  // credit left takes chat down rather than slowing it.
   const tiers: {
     provider: string;
     /** What health is recorded against — the tier, not the provider. */
@@ -703,9 +703,25 @@ export async function POST(request: Request) {
     });
   }
 
+  /** Why the last tier declined, for the message the student gets if they all
+   *  do. A busy provider and a refused key read the same from here otherwise. */
+  let lastTierFailure: string | null = null;
+
   /** What the client gets with the answer, built per tier because the
    * metadata names the model that wrote it. */
   const streamOptions = (label: string): StreamOptions => ({
+    // A provider can refuse INSIDE a 200 stream, and by default the SDK
+    // replaces whatever it said with "An error occurred." — which is how a
+    // dead key reached students as four words that named nothing. The real
+    // reason is kept here for the cascade and the log; the student gets a
+    // sentence, never a provider's internals.
+    onError: (error) => {
+      lastTierFailure = error instanceof Error ? error.message : String(error);
+      console.error(`chat stream error on ${label}:`, lastTierFailure);
+      return isPermanentRefusal(lastTierFailure)
+        ? PROVIDER_REFUSED_TEXT
+        : "The answer stopped partway. Please send your question again.";
+    },
     messageMetadata: ({ part }) => {
       if (part.type === "finish") {
         // The conversation's language rides out with the answer so the voice
@@ -747,9 +763,6 @@ export async function POST(request: Request) {
 
   let answerStream: ReadableStream<UIMessageChunk> | undefined;
   let modelUsed = "";
-  /** Why the last tier declined, for the message the student gets if they all
-   *  do. A busy provider and a refused key read the same from here otherwise. */
-  let lastTierFailure: string | null = null;
   // A tier that neither accepts nor refuses gets the same treatment as one
   // that refuses. See ACCEPT_BUDGET_MS: a stalled provider used to hold the
   // whole turn until the route's own 60s ceiling killed it, and the student
@@ -760,6 +773,9 @@ export async function POST(request: Request) {
     const controller = new AbortController();
     const attempt = tier.start(controller.signal);
     const tierFrom = Date.now();
+    // The branch meant for the client, so a tier that turns out to have
+    // refused can be dropped rather than left open behind the next one.
+    let discard: ReadableStream<UIMessageChunk> | undefined;
     try {
       // Wait for the FIRST CHUNK, not for the answer.
       //
@@ -779,14 +795,19 @@ export async function POST(request: Request) {
       // Cancelling one branch of a tee does not disturb the other, so the
       // client's branch still carries the first chunk and everything after
       // it, from the moment it exists.
+      //
+      // "Far enough" is the whole question, and reading ONE chunk was not far
+      // enough: see firstAnswerChunk.
       const ui = attempt.toUIMessageStream(streamOptions(tier.label));
       const [probe, out] = ui.tee();
+      discard = out;
       const reader = probe.getReader();
-      await withDeadline(reader.read(), budget, "tier_timeout");
+      await withDeadline(firstAnswerChunk(reader), budget, "tier_timeout");
       void reader.cancel();
       clock.mark(`model:${tier.key}`);
       noteProviderSuccess(tier.key);
       answerStream = out;
+      discard = undefined;
       modelUsed = tier.label;
       break;
     } catch (error) {
@@ -795,7 +816,13 @@ export async function POST(request: Request) {
       // Timed out: abort it, or the abandoned stream keeps running — and on a
       // metered provider an abandoned stream is still a paid one.
       controller.abort();
-      lastTierFailure = error instanceof Error ? error.message : String(error);
+      void discard?.cancel();
+      // onError above has usually already recorded the provider's own words,
+      // which say far more than "tier_refused" does. Only fall back to the
+      // thrown message when it has not — a timeout, or a start that threw.
+      if (!lastTierFailure) {
+        lastTierFailure = error instanceof Error ? error.message : String(error);
+      }
       console.error(
         `chat tier ${tier.label} declined after ${Date.now() - tierFrom}ms:`,
         lastTierFailure,
