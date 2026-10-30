@@ -1,8 +1,22 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const CONSENT_KEY = "tobira_consent_v1";
+/** How much of the screen the notice is standing on.
+ *
+ * It is a fixed bar at the bottom of a page whose screens are sized to the
+ * viewport and centre their content in it, so it does not push anything out
+ * of the way — it covers it. On a 1024x768 window that put the card squarely
+ * over the "Confirm my email" button, and a student following the link from
+ * their signup email pressed a button that could not be pressed: nothing
+ * happened, every time, on the one screen they cannot skip.
+ *
+ * Publishing the height here lets h-viewport and min-h-viewport in
+ * globals.css take it off, so every full-height screen ends where the notice
+ * begins instead of running underneath it. Unset, the fallback is 0px and
+ * nothing moves. */
+const INSET_VAR = "--consent-inset";
 // Let the page land first; a notice that pounces on arrival reads as a popup
 // to dismiss, one that arrives after a beat reads as information.
 const APPEAR_DELAY_MS = 2000;
@@ -17,6 +31,7 @@ const EXIT_MS = 400;
 export function ConsentBanner() {
   const [mounted, setMounted] = useState(false);
   const [open, setOpen] = useState(false);
+  const barRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     try {
@@ -37,6 +52,23 @@ export function ConsentBanner() {
     return () => clearTimeout(appear);
   }, []);
 
+  // Keep the reserved strip the same height as the notice. It is measured
+  // rather than guessed because the text wraps differently at every width,
+  // and a guess that is short by a line puts the button back underneath it.
+  useEffect(() => {
+    const bar = barRef.current;
+    if (!bar) return;
+    const publish = () =>
+      document.documentElement.style.setProperty(INSET_VAR, `${bar.offsetHeight}px`);
+    publish();
+    const observer = new ResizeObserver(publish);
+    observer.observe(bar);
+    return () => {
+      observer.disconnect();
+      document.documentElement.style.removeProperty(INSET_VAR);
+    };
+  }, [mounted]);
+
   function acknowledge() {
     try {
       localStorage.setItem(CONSENT_KEY, new Date().toISOString());
@@ -44,6 +76,9 @@ export function ConsentBanner() {
       /* remembered for this page view only */
     }
     setOpen(false);
+    // Given back as it starts to leave, so the page grows into the space
+    // while the card slides out of it rather than a beat afterwards.
+    document.documentElement.style.removeProperty(INSET_VAR);
     setTimeout(() => setMounted(false), EXIT_MS);
   }
 
@@ -51,15 +86,19 @@ export function ConsentBanner() {
 
   return (
     <div
+      ref={barRef}
       role="dialog"
       aria-label="Privacy and cookies notice"
       className={[
-        "fixed inset-x-0 bottom-0 z-50 px-3 pb-3 sm:px-6 sm:pb-6",
+        // pointer-events: the gutter either side of the card is this
+        // element too, and it was swallowing clicks on whatever showed
+        // through it.
+        "pointer-events-none fixed inset-x-0 bottom-0 z-50 px-3 pb-3 sm:px-6 sm:pb-6",
         "transition-[transform,opacity] duration-500 ease-out motion-reduce:transition-none",
         open ? "translate-y-0 opacity-100" : "translate-y-6 opacity-0",
       ].join(" ")}
     >
-      <div className="mx-auto max-w-2xl rounded-2xl border border-stone-200 bg-white/95 p-5 shadow-[0_8px_40px_rgba(0,0,0,0.12)] backdrop-blur sm:p-6">
+      <div className="pointer-events-auto mx-auto max-w-2xl rounded-2xl border border-stone-200 bg-white/95 p-5 shadow-[0_8px_40px_rgba(0,0,0,0.12)] backdrop-blur sm:p-6">
         <h2 className="text-sm font-semibold tracking-tight text-stone-900">
           Privacy &amp; Cookies
         </h2>

@@ -35,14 +35,19 @@ body {
  * composer — sits below the fold until they scroll. dvh tracks the area
  * actually visible and resizes as the toolbars slide away. The vh line stays
  * first as the fallback for browsers that do not know dvh. */
+/* --consent-inset is the strip the privacy notice is standing on, published
+ * by components/consent-banner.tsx while it is showing and unset otherwise.
+ * Taking it off here is what keeps a screen's own content — the Confirm
+ * button on an emailed link, the chat composer — above the notice instead of
+ * underneath it, where it cannot be clicked. */
 .h-viewport {
-  height: 100vh;
-  height: 100dvh;
+  height: calc(100vh - var(--consent-inset, 0px));
+  height: calc(100dvh - var(--consent-inset, 0px));
 }
 
 .min-h-viewport {
-  min-height: 100vh;
-  min-height: 100dvh;
+  min-height: calc(100vh - var(--consent-inset, 0px));
+  min-height: calc(100dvh - var(--consent-inset, 0px));
 }
 
 /* The live-translation indicator: four bars that rise and fall for as long as

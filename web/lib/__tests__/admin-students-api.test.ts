@@ -171,3 +171,69 @@ describe("approving an account", () => {
     expect(rpc).not.toHaveBeenCalled();
   });
 });
+
+describe("confirming an address by hand", () => {
+  /* The emailed link is the normal route. This is for the account it never
+   * reaches — a university filter that eats the message, a bounced mailbox —
+   * which is otherwise stuck for good: it cannot be approved, because it
+   * cannot sign in to be approved. */
+  it("confirms the address through the auth admin API", async () => {
+    updateUserById.mockResolvedValue({ error: null });
+
+    const response = await PATCH(
+      new Request(`${SITE}/api/admin/students`, {
+        method: "PATCH",
+        body: JSON.stringify({ email: "stuck@gmail.com", action: "verify" }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, verified: true });
+    expect(updateUserById).toHaveBeenCalledWith("account-1", { email_confirm: true });
+  });
+
+  it("does not let anybody in on its own", async () => {
+    // Confirming an address says the address is real. Approval says this
+    // person may read the course's copyright-protected books. Rolling the
+    // two together would make a mail problem into a way in.
+    updateUserById.mockResolvedValue({ error: null });
+
+    await PATCH(
+      new Request(`${SITE}/api/admin/students`, {
+        method: "PATCH",
+        body: JSON.stringify({ email: "stuck@gmail.com", action: "verify" }),
+      }),
+    );
+
+    expect(rpc).not.toHaveBeenCalledWith("set_student_approval", expect.anything());
+    expect(updateUserById).not.toHaveBeenCalledWith("account-1", expect.objectContaining({ ban_duration: expect.anything() }));
+  });
+
+  it("says so when the account is already gone", async () => {
+    maybeSingle.mockResolvedValue({ data: null });
+
+    const response = await PATCH(
+      new Request(`${SITE}/api/admin/students`, {
+        method: "PATCH",
+        body: JSON.stringify({ email: "ghost@gmail.com", action: "verify" }),
+      }),
+    );
+
+    expect(response.status).toBe(404);
+    expect(updateUserById).not.toHaveBeenCalled();
+  });
+
+  it("refuses a caller who is not the administrator", async () => {
+    auth.getUser.mockResolvedValue({ data: { user: { email: "student@gmail.com" } } });
+
+    const response = await PATCH(
+      new Request(`${SITE}/api/admin/students`, {
+        method: "PATCH",
+        body: JSON.stringify({ email: "stuck@gmail.com", action: "verify" }),
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    expect(updateUserById).not.toHaveBeenCalled();
+  });
+});
