@@ -16,6 +16,7 @@ import { conversationState, languageModeFor } from "@/lib/conversation";
 import { routeModels, routeReason } from "@/lib/router";
 import { conversationKey, recallContext, rememberContext } from "@/lib/recent-context";
 import { pageSpellings } from "@/lib/pages";
+import { isPermanentRefusal, PROVIDER_REFUSED_TEXT } from "@/lib/provider-refusal";
 import { contextSizeFor } from "@/lib/intent";
 import { aspectOf, wantsEverything } from "@/lib/topics";
 import { turnRows } from "@/lib/history";
@@ -172,6 +173,31 @@ export async function POST(request: Request) {
   // though it is written after the answer has finished streaming.
   const askedAt = new Date().toISOString();
 
+  /** Why the last embedding call failed, if one did. */
+  let embedFailure: string | null = null;
+  const noteEmbedFailure = (error: unknown): null => {
+    embedFailure = error instanceof Error ? error.message : String(error);
+    console.error("chat embed failed:", embedFailure);
+    return null;
+  };
+  /** The 502 for a question that could not be embedded.
+   *
+   * Both halves are the same HTTP failure and used to carry the same four
+   * words — "Something went wrong answering that" — whether the provider was
+   * refusing every request on the account or a single call had timed out.
+   * Only one of those is worth retrying, so only one of them says to. */
+  const embeddingUnavailable = () =>
+    Response.json(
+      isPermanentRefusal(embedFailure)
+        ? { error: "provider_refused", message: PROVIDER_REFUSED_TEXT }
+        : {
+            error: "embedding_failed",
+            message:
+              "The textbook search did not answer just now. Please send your question again.",
+          },
+      { status: 502 },
+    );
+
   // In flight while the auth round trip below happens. Nothing about an
   // embedding depends on who is asking; the only cost of starting early is
   // one wasted embed when a trial visitor turns out to be past their limit,
@@ -179,9 +205,14 @@ export async function POST(request: Request) {
   // Embedded on the RESOLVED query, so a follow-up searches the corpus for
   // what it is actually about rather than for the pronoun it was typed with.
   // A file sent on its own is embedded once its text is in hand, below.
+  //
+  // The failure is swallowed so a dead embedding cannot take the request down
+  // with it, but the REASON is kept: a provider that is out of credit refuses
+  // every retry, and saying "please try again" to that is a lie the student
+  // can do nothing with. See embeddingUnavailable below.
   const embedding = trivial || attachmentOnly
     ? Promise.resolve(null)
-    : clock.time("embed", embedQuery(query.text).catch(() => null));
+    : clock.time("embed", embedQuery(query.text).catch(noteEmbedFailure));
 
   const supabase = await createClient();
   let user = null;
@@ -332,7 +363,7 @@ export async function POST(request: Request) {
       .slice(0, 800);
     if (fileText) {
       query = { ...query, text: fileText };
-      fileVector = await clock.time("embed", embedQuery(fileText).catch(() => null));
+      fileVector = await clock.time("embed", embedQuery(fileText).catch(noteEmbedFailure));
     } else {
       // Nothing readable came out of it: answer from the file alone.
       trivial = true;
@@ -365,7 +396,7 @@ export async function POST(request: Request) {
 
   if (!trivial && db) {
     if (!queryVector) {
-      return Response.json({ error: "embedding_failed" }, { status: 502 });
+      return embeddingUnavailable();
     }
     vectorLiteral = `[${queryVector.join(",")}]`;
 
@@ -436,7 +467,13 @@ export async function POST(request: Request) {
     }
 
     if (!retrieval.ok) {
-      return Response.json({ error: "retrieval_failed" }, { status: 502 });
+      return Response.json(
+        {
+          error: "retrieval_failed",
+          message: "The textbook search did not answer just now. Please send your question again.",
+        },
+        { status: 502 },
+      );
     }
     // One entry per chunk: a page can be both the closest match and a literal
     // hit, and the literal flag is the one that matters for selection.
@@ -710,6 +747,9 @@ export async function POST(request: Request) {
 
   let answerStream: ReadableStream<UIMessageChunk> | undefined;
   let modelUsed = "";
+  /** Why the last tier declined, for the message the student gets if they all
+   *  do. A busy provider and a refused key read the same from here otherwise. */
+  let lastTierFailure: string | null = null;
   // A tier that neither accepts nor refuses gets the same treatment as one
   // that refuses. See ACCEPT_BUDGET_MS: a stalled provider used to hold the
   // whole turn until the route's own 60s ceiling killed it, and the student
@@ -755,16 +795,29 @@ export async function POST(request: Request) {
       // Timed out: abort it, or the abandoned stream keeps running — and on a
       // metered provider an abandoned stream is still a paid one.
       controller.abort();
+      lastTierFailure = error instanceof Error ? error.message : String(error);
       console.error(
         `chat tier ${tier.label} declined after ${Date.now() - tierFrom}ms:`,
-        error instanceof Error ? error.message : error,
+        lastTierFailure,
       );
       noteProviderFailure(tier.key, error);
     }
   }
 
   if (!answerStream) {
-    return Response.json({ error: "all_models_unavailable" }, { status: 502 });
+    // Every tier declined. They are three different providers, so one of them
+    // being out of credit is not this — but one key covering all three being
+    // refused is, and the student should hear which.
+    return Response.json(
+      isPermanentRefusal(lastTierFailure)
+        ? { error: "provider_refused", message: PROVIDER_REFUSED_TEXT }
+        : {
+            error: "all_models_unavailable",
+            message:
+              "Every answering model was busy just now. Please send your question again.",
+          },
+      { status: 502 },
+    );
   }
 
   // One line per turn, slowest stage first. This is the whole of the

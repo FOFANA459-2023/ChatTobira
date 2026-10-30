@@ -11,7 +11,6 @@ import {
   floatToPcm16,
   freshDownsample,
   INPUT_RATE,
-  isPermanentRefusal,
   LIVE_SILENCE_MS,
   LIVE_SOCKET_URL,
   LOOKUP_TOOL,
@@ -21,6 +20,7 @@ import {
   type DownsampleState,
   type LiveTurn,
 } from "./live-voice";
+import { isPermanentRefusal } from "./provider-refusal";
 import { VOICE_HANDOVER_MS } from "./allowance";
 import type { SpeakingMode } from "./speech";
 import type { VoiceError, VoicePhase } from "./use-voice";

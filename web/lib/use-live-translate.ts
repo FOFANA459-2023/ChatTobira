@@ -30,11 +30,10 @@ import {
   floatToPcm16,
   freshDownsample,
   INPUT_RATE,
-  isPermanentRefusal,
   LIVE_SOCKET_URL,
-  PROVIDER_REFUSED_TEXT,
   type DownsampleState,
 } from "./live-voice";
+import { isPermanentRefusal, PROVIDER_REFUSED_TEXT } from "./provider-refusal";
 import type { LanguageCode, SourceLanguage } from "./translate";
 
 /* ------------------------------------------------------------------------ */

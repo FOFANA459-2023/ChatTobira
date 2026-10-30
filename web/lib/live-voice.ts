@@ -67,43 +67,6 @@ export const LOOKUP_TOOL = "search_course_material";
 export const OPENING_CUE =
   "(The student has just opened speaking practice and is waiting for you to begin. Greet them now.)";
 
-/** Close reasons that mean the provider will refuse the NEXT connection too.
- *
- * Both live features mint a token and then open a socket. Minting is an auth
- * call and keeps working when the account cannot pay; the socket opens, says
- * setupComplete, and only dies when the model is actually asked to produce
- * something — with the real reason in the close frame:
- *
- *   1011 Your prepayment credits are depleted. Please go to AI Studio ...
- *
- * Reconnecting from there mints another token, and minting is what SPENDS a
- * student's allowance. A lecture could therefore burn fifty minutes in a few
- * seconds on an account with no credit, and tell the student their network
- * had dropped. So a close that matches this is final: do not reconnect, and
- * say what actually happened.
- *
- * Matched on the reason text rather than the code. 1011 is "internal error"
- * and is also what a transient server hiccup sends — those SHOULD reconnect,
- * and treating them as final would break the recovery that keeps a lecture
- * alive through a blip.
- */
-const PERMANENT_REFUSAL =
-  /prepayment credits|credits are depleted|billing|quota|RESOURCE_EXHAUSTED|PERMISSION_DENIED|API key not valid|API_KEY_INVALID|exceeded your current/i;
-
-export function isPermanentRefusal(reason: string | undefined | null): boolean {
-  return Boolean(reason && PERMANENT_REFUSAL.test(reason));
-}
-
-/** What to tell the student when that happens.
- *
- * It is the server's bill, not their mistake and not their connection, and
- * there is nothing for them to retry — so the sentence says so and names who
- * can fix it. Deliberately free of "credits" arithmetic a student might read
- * as their own allowance running out.
- */
-export const PROVIDER_REFUSED_TEXT =
-  "The server's AI service is unavailable — this is not your connection and not your allowance. Please tell the course administrator at fvarlee@gmail.com.";
-
 export interface LiveTurn {
   role: "user" | "assistant";
   text: string;

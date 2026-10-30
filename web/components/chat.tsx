@@ -756,9 +756,7 @@ export function Chat({
 
         {error && !trialExhausted && (
           <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
-            {/quota/i.test(error.message)
-              ? quotaMessage(error.message)
-              : "Something went wrong answering that. Please try again."}
+            {failureMessage(error.message)}
           </div>
         )}
       </div>
@@ -887,16 +885,23 @@ function firstQuestion(messages: UIMessage[]): string | undefined {
     .join(" ");
 }
 
-/** The server's own sentence for a spent allowance, which names the time it
- * comes back. useChat hands over the response body as the error message. */
-function quotaMessage(raw: string): string {
+/** What to show the student when a turn fails.
+ *
+ * The route names every failure it can and sends its own sentence with it, so
+ * those words win: a provider with no credit left and a model that was busy
+ * for a moment are not the same news, and both used to arrive here as the same
+ * four words with an invitation to retry. useChat hands over the response body
+ * as the error message, which is where that sentence is. */
+function failureMessage(raw: string): string {
   try {
     const body = JSON.parse(raw) as { message?: string };
     if (body.message) return body.message;
   } catch {
-    /* not JSON */
+    /* Not JSON — a gateway's own error page, or a dropped connection. */
   }
-  return "You have used your questions and practice tests for now. More are available within 5 hours.";
+  return /quota/i.test(raw)
+    ? "You have used your questions and practice tests for now. More are available within 5 hours."
+    : "Something went wrong answering that. Please try again.";
 }
 
 /** A file the student added, shown in the transcript as their own turn: the
