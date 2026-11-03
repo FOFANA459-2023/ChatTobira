@@ -22,18 +22,37 @@ export interface TermEntry {
   gloss: string;
 }
 
+/** One option of a multiple-choice question, and whether it is the answer. */
+export interface QuizChoice {
+  text: string;
+  correct: boolean;
+}
+
+export interface QuizQuestion {
+  prompt: string;
+  choices: QuizChoice[];
+  /** Why that answer is the answer. Shown only after the student has chosen,
+   * so it teaches rather than giving the game away. */
+  explanation?: string;
+}
+
 export type AnswerBlock =
   | { kind: "heading"; level: 1 | 2 | 3; text: string }
   | { kind: "terms"; items: TermEntry[] }
   | { kind: "list"; ordered: boolean; items: string[] }
   | { kind: "table"; head: string[]; rows: string[][] }
+  | { kind: "quiz"; questions: QuizQuestion[] }
   | { kind: "paragraph"; text: string }
   | { kind: "rule" };
 
 const HEADING_RE = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*$/;
 const LIST_RE = /^(\s*)(?:[-*+]|(\d{1,3})[.)])\s+(.*)$/;
 const RULE_RE = /^\s{0,3}(?:-\s*-\s*-[-\s]*|\*\s*\*\s*\*[*\s]*|_\s*_\s*_[_\s]*)$/;
-const FENCE_RE = /^\s*```/;
+/** A fence, with whatever the model labelled it. The label is the only thing
+ * that tells a quiz apart from a code block, and the quiz is the one block in
+ * an answer that is not prose. */
+const FENCE_RE = /^\s*```(.*)$/;
+const QUIZ_FENCE_RE = /^quiz\b/i;
 /** A table's delimiter row: pipes, dashes and alignment colons only. */
 const TABLE_DIVIDER_RE = /^\s*\|?[\s:|-]*-{2,}[\s:|-]*\|?\s*$/;
 
@@ -94,6 +113,90 @@ function joinsOn(previous: string, next: string): boolean {
   return /[A-Za-z,]$/.test(previous.trimEnd()) && /^[A-Za-z]/.test(next.trimStart());
 }
 
+/** One option: a task-list bullet, ticked when it is the answer.
+ *
+ * `- [x]` rather than an invented marker because it is the one "this one is
+ * the right one" notation every model already writes without being taught,
+ * and a model that improvises here hands the student a quiz with the answers
+ * printed beside the questions.
+ */
+const QUIZ_CHOICE_RE = /^\s*[-*+]\s*\[([ xX])\]\s*(.+?)\s*$/;
+
+/** The line of teaching under a question. */
+const QUIZ_WHY_RE = /^\s*(?:E|Why|解説|理由)\s*[:：]\s*(.+?)\s*$/i;
+
+/** A question's own numbering and label, which the renderer supplies
+ * itself. Bold markers come off with it: a model asked for `Q:` writes
+ * `**Q:**` often enough that leaving it would print the asterisks. */
+const QUIZ_NUMBER_RE =
+  /^\s*(?:\*\*)?\s*(?:(?:Q|問題?)\s*\d*\s*[.):：]|\d{1,2}\s*[.)、])(?:\*\*)?\s*/i;
+
+/** `**Q:** 1. どちら` carries two of those at once — the label the prompt
+ * asked for and the numbering it did not — so one pass is not enough. */
+function stripQuestionLabel(text: string): string {
+  const once = text.replace(QUIZ_NUMBER_RE, "").trim();
+  return once === text ? once : once.replace(QUIZ_NUMBER_RE, "").trim();
+}
+
+/** A label the model lettered itself — "a) に", "1. に", "①に". The app
+ * prints the letters, and a student should not be offered "a. b) に". */
+const QUIZ_LABEL_RE = /^(?:[a-zA-Z\d][.):、]|[①-⑩])\s*/;
+
+/** The questions inside a ```quiz fence.
+ *
+ * `closed` is whether the closing fence has arrived, and it decides whether
+ * the LAST question is shown. That is the whole reason this is not a plain
+ * loop: the parser runs on every streamed frame, so the final question is
+ * usually half-written — two of its four options on screen and the third
+ * still arriving. A student who clicks one of those two is answering a
+ * question that does not exist yet. So a question appears once something
+ * after it has begun — the next question, or the closing fence — or once it
+ * has reached its explanation, which is the last line a question has.
+ */
+function parseQuiz(body: string[], closed: boolean): QuizQuestion[] {
+  const questions: QuizQuestion[] = [];
+  let current: QuizQuestion | null = null;
+
+  const finish = () => {
+    // Two options is the floor for a choice. A "question" with fewer is the
+    // model writing prose inside the fence, and it is dropped rather than
+    // shown as an exercise with nothing to pick.
+    if (current && current.prompt && current.choices.length >= 2) questions.push(current);
+    current = null;
+  };
+
+  for (const line of body) {
+    if (!line.trim()) continue;
+
+    const choice = QUIZ_CHOICE_RE.exec(line);
+    if (choice) {
+      if (!current) current = { prompt: "", choices: [] };
+      current.choices.push({
+        text: choice[2].trim().replace(QUIZ_LABEL_RE, "").trim(),
+        correct: choice[1].toLowerCase() === "x",
+      });
+      continue;
+    }
+
+    const why = QUIZ_WHY_RE.exec(line);
+    if (why && current) {
+      current.explanation = why[1].trim();
+      continue;
+    }
+
+    // Anything else is question text: a new question when one is already
+    // under way, otherwise more of the one being written.
+    if (current && current.choices.length > 0) finish();
+    const text = stripQuestionLabel(line.trim());
+    if (!text) continue;
+    if (!current) current = { prompt: text, choices: [] };
+    else current.prompt = current.prompt ? `${current.prompt}\n${text}` : text;
+  }
+
+  if (closed || current?.explanation) finish();
+  return questions;
+}
+
 export function parseAnswer(markdown: string): AnswerBlock[] {
   const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
   const blocks: AnswerBlock[] = [];
@@ -110,14 +213,32 @@ export function parseAnswer(markdown: string): AnswerBlock[] {
     // Fenced code: models occasionally wrap a conjugation table in one. The
     // fence is not content, and an unclosed fence — every fence, mid-stream —
     // must still show the lines it has so far.
-    if (FENCE_RE.test(line)) {
+    const fence = FENCE_RE.exec(line);
+    if (fence) {
+      const isQuiz = QUIZ_FENCE_RE.test(fence[1].trim());
       i += 1;
       const body: string[] = [];
       while (i < lines.length && !FENCE_RE.test(lines[i])) {
         body.push(lines[i]);
         i += 1;
       }
+      const closed = i < lines.length;
       i += 1;
+      if (isQuiz) {
+        const questions = parseQuiz(body, closed);
+        const previous = blocks.at(-1);
+        // No complete question yet is normal mid-stream, and it must render
+        // as nothing rather than as the markup it currently is.
+        if (questions.length === 0) continue;
+        // Asked for three questions, models write three fences as often as
+        // one. Back to back they are one set — shown as three they repeat
+        // the heading, restart the numbering at 1 each time, and score each
+        // question out of one. Fences with teaching between them stay apart,
+        // which is the case the separation is actually for.
+        if (previous?.kind === "quiz") previous.questions.push(...questions);
+        else blocks.push({ kind: "quiz", questions });
+        continue;
+      }
       if (body.join("\n").trim()) blocks.push({ kind: "paragraph", text: body.join("\n") });
       continue;
     }
