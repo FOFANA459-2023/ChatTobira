@@ -353,3 +353,40 @@ describe("listenChunks", () => {
 function sentencesOf(text: string): string[] {
   return sentences(speakableText(text, LISTEN_LIMIT));
 }
+
+/** A practice question is the one block in an answer that cannot be read
+ * aloud at all. Stripped of its markup it is worse than useless: the voice
+ * reads the ticked option and the explanation, so the student hears the
+ * answer to a question they have not been asked yet. */
+describe("a practice question is not read aloud", () => {
+  const F = "```";
+  const answer = `Here are two to try.
+
+${F}quiz
+Q: 友達に写真を見せて（　）。
+- [ ] あげました
+- [x] もらいました
+E: 「もらう」 takes 〜に for the person who did you the favour.
+${F}
+
+Tell me which ones were hard.`;
+
+  it("reads the answer around it and not a word of it", () => {
+    const spoken = speakableText(answer);
+    expect(spoken).toContain("Here are two to try.");
+    expect(spoken).toContain("Tell me which ones were hard.");
+    expect(spoken).not.toContain("もらいました");
+    expect(spoken).not.toContain("x");
+    expect(spoken).not.toContain("takes");
+  });
+
+  it("reads nothing at all when the answer is only questions", () => {
+    const only = [F + "quiz", "Q: どれ", "- [x] に", "- [ ] で", F].join(String.fromCharCode(10));
+    expect(speakableText(only)).toBe("");
+  });
+
+  it("leaves a block the model never closed unread, rather than reading its key", () => {
+    const unclosed = [F + "quiz", "Q: どれ", "- [x] に", "- [ ] で"].join(String.fromCharCode(10));
+    expect(speakableText(unclosed)).toBe("");
+  });
+});

@@ -589,6 +589,19 @@ export async function POST(request: Request) {
     );
   }
 
+  // Whether the tutor may write questions the student answers on the screen
+  // — see questionRules in lib/prompt.ts. On by default, because a student
+  // asks to be tested in more ways than a pattern can list: "quiz me", "ask
+  // me five", "another one", "harder", "now in Japanese". What the questions
+  // ARE is theirs to say; this only decides whether the tutor can write them
+  // at all.
+  //
+  // Off for exactly one case. "The practice questions on p. 122" is a
+  // request for what the book prints, and invented questions in its place
+  // are indistinguishable from the real exercise to the student revising
+  // from them — the failure the page rules above exist to stop.
+  const canAskQuestions = askedPage === null;
+
   const system = `${systemPrompt(scope as StudyScope, {
     language,
     isFollowUp: query.isFollowUp,
@@ -596,6 +609,7 @@ export async function POST(request: Request) {
     hasUploads: attached.length > 0,
     fileWithoutInstruction: attachmentOnly && attached.length > 0,
     hasPastPapers: context.some((chunk) => chunk.doc_type === "past_paper"),
+    canAskQuestions,
     conversation,
     page: askedPage !== null ? { asked: askedPage, retrieved: pageInContext } : undefined,
     speaking: speaking

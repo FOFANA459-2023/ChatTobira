@@ -27,6 +27,17 @@ import type { CourseLevel } from "./uploads";
  * both gives the word twice. */
 const FURIGANA = /《[^》]{0,12}》|[（(][ぁ-ゖァ-ヶー]{1,12}[）)]/g;
 
+/** A practice question the tutor wrote for the screen.
+ *
+ * It is the one block in an answer that cannot be read aloud at all. Spoken
+ * verbatim it is "dash open bracket x close bracket", and spoken with the
+ * markup stripped it is worse — the voice reads the ticked option and the
+ * explanation, so the student hears the answer to a question they have not
+ * been asked yet. A quiz is done with the eyes and a finger; the voice skips
+ * it and reads the rest of the answer around it.
+ */
+const QUIZ_FENCE = /^[ \t]*```quiz\b[\s\S]*?(?:^[ \t]*```[ \t]*$|$(?![\s\S]))/gim;
+
 /** Markdown that is layout rather than language. */
 const TABLE_ROW = /^\s*\|.*\|\s*$/gm;
 const TABLE_RULE = /^\s*\|?[\s:|-]{4,}\|?\s*$/gm;
@@ -54,6 +65,7 @@ export const SPEAKABLE_LIMIT = 600;
 /** The answer as it should be heard. */
 export function speakableText(markdown: string, limit = SPEAKABLE_LIMIT): string {
   const spoken = markdown
+    .replace(QUIZ_FENCE, "")
     .replace(TABLE_RULE, "")
     .replace(TABLE_ROW, (row) =>
       // A table still carries words worth hearing; the pipes do not.

@@ -1,47 +1,8 @@
-import { parseAnswer, splitBold, splitHeading, type AnswerBlock } from "@/lib/answer";
-import { splitRuby } from "@/lib/ruby";
+import { QuizBlock } from "@/components/answer-quiz";
+import { RichText, langOf } from "@/components/rich-text";
+import { parseAnswer, splitHeading, type AnswerBlock } from "@/lib/answer";
 
-/** Japanese text with furigana set above the kanji and **bold** honoured.
- *
- * Exported because every piece of generated text in the app runs through it —
- * a chat answer, a test question, an explanation, the study coach. They are
- * all written by the same models in the same dialect, and a reading printed
- * as 漢字（かんじ） in one place and as ruby in another looks like two
- * different apps. */
-export function RichText({ text }: { text: string }) {
-  return (
-    <>
-      {splitBold(text).map((segment, i) => {
-        const body = splitRuby(segment.text).map((part, j) =>
-          part.reading ? (
-            <ruby key={j}>
-              {part.base}
-              <rt className="select-none text-[0.6em] font-normal text-stone-500">
-                {part.reading}
-              </rt>
-            </ruby>
-          ) : (
-            <span key={j}>{part.base}</span>
-          ),
-        );
-        return segment.bold ? (
-          <strong key={i} className="font-semibold text-stone-900">
-            {body}
-          </strong>
-        ) : (
-          <span key={i}>{body}</span>
-        );
-      })}
-    </>
-  );
-}
-
-/** Japanese content gets lang="ja" so the browser picks the Japanese face and
- * a screen reader reads it as Japanese; an English gloss in the next column
- * must not inherit that. */
-function langOf(text: string): "ja" | undefined {
-  return /[぀-ヿ一-鿿]/.test(text) ? "ja" : undefined;
-}
+export { RichText };
 
 /** A numbered two-column word list, the way the book prints 語彙: the word
  * with its reading on the left, the meaning on the right, ruled between
@@ -100,6 +61,9 @@ function Block({ block }: { block: AnswerBlock }) {
 
     case "terms":
       return <Terms items={block.items} />;
+
+    case "quiz":
+      return <QuizBlock questions={block.questions} />;
 
     case "list": {
       const List = block.ordered ? "ol" : "ul";

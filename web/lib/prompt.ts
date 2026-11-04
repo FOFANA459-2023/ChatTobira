@@ -37,6 +37,12 @@ export interface PromptOptions {
    * for reading one are omitted otherwise: a model told how to talk about
    * past papers with none in front of it starts referring to them anyway. */
   hasPastPapers?: boolean;
+  /** Whether the tutor may write questions the student answers on screen.
+   * On for an ordinary turn; off only where invented questions would be
+   * mistaken for the book's own (see `page`). What the questions are — how
+   * many, what kind, how hard, in which language — is the STUDENT's to
+   * decide, not this flag's. */
+  canAskQuestions?: boolean;
   /** What the conversation is, as opposed to what this message says: its
    * language and how firmly it is held, the terms it has been about, whether
    * this turn continues it or starts something new.
@@ -58,6 +64,7 @@ export function systemPrompt(scope: StudyScope, options: PromptOptions = {}): st
     hasUploads = false,
     fileWithoutInstruction = false,
     hasPastPapers = false,
+    canAskQuestions = true,
     speaking,
     page,
     conversation,
@@ -137,6 +144,41 @@ THE STUDENT ASKED FOR PAGE ${page.asked}, AND IT WAS NOT RETRIEVED
 - You may offer what you do have — the topic that page belongs to, the grammar it covers — as long as it is clearly labelled as that rather than as the page.`
     : "";
 
+  // Questions the student answers on the screen.
+  //
+  // A tutor writes questions all the time, and written as prose they arrive
+  // with the answers printed underneath — everything a question needs except
+  // the part that makes it one, which is not knowing yet. A fenced block is
+  // the delivery mechanism and nothing more: it says "these options are
+  // buttons and this one is the answer", and the app keeps the answer out of
+  // sight until the student has pressed something.
+  //
+  // Deliberately says nothing about how many questions, what kind, how hard,
+  // or in what language. The student says that, and an app that decides for
+  // them is an app that cannot be asked for three hard ones in Japanese.
+  const questionRules = canAskQuestions
+    ? `
+QUESTIONS THE STUDENT ANSWERS ON SCREEN
+- Whenever you write a question for the student to answer by choosing between options, put it in a \`\`\`quiz block. The app turns each option into a button, and shows whether they were right only once they have pressed one. Written as ordinary text, the answer is on the screen beside the question and there is nothing left to get right.
+
+\`\`\`quiz
+Q: 友達に写真（しゃしん）を見せて（　）。
+- [ ] あげました
+- [x] もらいました
+- [ ] くれました
+E: 「もらう」 is the one that takes 〜に for the person you received the favour FROM.
+\`\`\`
+
+- The shape is fixed, so that it works. A \`Q:\` line (several lines if the question needs a passage or a sentence above it), then the options, each written \`- [ ]\` with \`- [x]\` on the ONE that is right, then an optional \`E:\` line saying why. Do not letter or number the options yourself — the app prints the letters.
+- EVERYTHING ELSE IS THE STUDENT'S TO DECIDE, and you follow what they ask exactly: how many questions, what they are about, how hard, which language, two options or five, true/false, fill-in-the-blank, reading comprehension, kanji readings, translation. If they want them laid out like a section of their class materials, write the instruction line and the section heading as ordinary text above the block. If they want one question at a time, write one. If they ask for twenty, write twenty.
+- A block holds as many questions as you want to put in it, and an answer may have several blocks with explanation between them — which is how you teach a point and then check it.
+- THE ANSWERS APPEAR NOWHERE ELSE: no answer key after the block, no "the answer is b" in the prose, no working the questions through before the student has tried them. Write everything outside the block as though you do not know what they will pick.
+- \`E:\` is read only after they have answered, so make it teach rather than restate the answer.
+- Questions come from the source material below and from what the course has actually taught. A question on grammar they have not met yet tests nothing.
+- Only when questions are what they want. A student who asked what 〜てもらう means wants to be told, not examined.
+`
+    : "";
+
   const closingLine = canPointToBook
     ? `- If — and only if — there is more worth reading than you covered, close with ONE short, natural offer to point them at it: "I can show you where this is covered in the book if you want." Never a fixed formula, never on every answer, never more than a sentence.`
     : `- Do not offer to point at a textbook section; nothing retrieved supports one.`;
@@ -165,7 +207,7 @@ GROUNDING
 - Build the answer from the source material below. It was retrieved for this question and it is what the student owns. Do not invent grammar rules or vocabulary.
 - Prefer the passage that actually addresses the question over the one that merely shares words with it. The material is ordered with the closest first.
 - Casual conversation (greetings, thanks) needs no sources: reply briefly and warmly, and do not mention the textbook.
-${uploadRules}${fileOnlyRules}${pastPaperRules}${pageRules ? pageRules + "\n" : ""}- NEVER withhold source content the student asked for. When they ask what a passage, table or list says, reproduce it in full — complete conjugation tables, complete example lists, whole reading passages.
+${uploadRules}${fileOnlyRules}${pastPaperRules}${questionRules}${pageRules ? pageRules + "\n" : ""}- NEVER withhold source content the student asked for. When they ask what a passage, table or list says, reproduce it in full — complete conjugation tables, complete example lists, whole reading passages.
 
 WHAT NEVER APPEARS IN YOUR ANSWER
 - Anything that is not a textbook is "your class materials" and nothing more specific: never "handout", "worksheet", "review sheet", "slides", "presentation", "past paper" or "past exam".
