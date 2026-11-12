@@ -20,10 +20,13 @@ interface StartOptions {
 }
 // Typed through the generic rather than a named parameter, so the assertions
 // below can read start.mock.calls without eslint flagging an unused arg.
-const start = vi.fn<(options: StartOptions) => Promise<"live">>(async () => "live");
+const start = vi.fn<(options: StartOptions) => Promise<"live" | "fallback" | "failed">>(
+  async () => "live",
+);
 const stop = vi.fn();
 const interrupt = vi.fn();
 let active = false;
+let liveError: string | null = null;
 
 let onTurn: ((turn: { user: string; assistant: string }) => void) | null = null;
 
@@ -35,7 +38,7 @@ vi.mock("@/lib/use-live-voice", () => ({
     phase: "idle" as const,
     level: 0,
     heard: null,
-    error: null,
+    error: liveError,
     notice: null,
     secondsLeft: null,
     start,
@@ -43,6 +46,24 @@ vi.mock("@/lib/use-live-voice", () => ({
     interrupt,
     };
   },
+}));
+
+/** The loop that does not need Google, stubbed at the hook for the same
+ * reason. What is tested here is WHEN the page reaches for it. */
+const classicStart = vi.fn();
+let classicActive = false;
+vi.mock("@/lib/use-classic-voice", () => ({
+  useClassicConversation: () => ({
+    active: classicActive,
+    phase: "listening" as const,
+    level: 0,
+    heard: null,
+    error: null,
+    notice: null,
+    start: classicStart,
+    stop: vi.fn(),
+    interrupt: vi.fn(),
+  }),
 }));
 
 const BOOKS = [
@@ -53,7 +74,11 @@ const BOOKS = [
 
 beforeEach(() => {
   vi.clearAllMocks();
+  start.mockImplementation(async () => "live");
   active = false;
+  liveError = null;
+  classicActive = false;
+  sessionStorage.clear();
 });
 
 describe("speaking practice", () => {
@@ -152,5 +177,55 @@ describe("speaking practice", () => {
     expect(String(bodies[0].title)).toMatch(/^Speaking practice \d+\/\d+ \d\d:\d\d$/);
     expect(bodies[1].conversationId).toBe(81);
     vi.unstubAllGlobals();
+  });
+
+  /* The Google account ran out of credit twice in two weeks. Each time the
+   * page could offer nothing but "the server's AI service is unavailable",
+   * while the transcription and answer models behind the chat were working
+   * the whole time. */
+  describe("when the live service cannot be used", () => {
+    it("carries on in the loop that does not need it when live cannot open", async () => {
+      start.mockImplementation(async () => "fallback");
+      render(<SpeakingPractice firstName={null} books={BOOKS} />);
+      fireEvent.click(screen.getByRole("button", { name: "Start speaking" }));
+      await waitFor(() => expect(classicStart).toHaveBeenCalled());
+      expect(screen.queryByText(/could not be started/)).not.toBeInTheDocument();
+    });
+
+    it("carries on when the live call opens and is then refused for want of credit", () => {
+      // The refusal only arrives once the model is asked to speak, so the
+      // call has already started when it does.
+      liveError = "provider";
+      render(<SpeakingPractice firstName={null} books={BOOKS} />);
+      expect(classicStart).toHaveBeenCalledTimes(1);
+    });
+
+    it("goes straight to that loop next time, without spending a live minute", async () => {
+      liveError = "provider";
+      const { unmount } = render(<SpeakingPractice firstName={null} books={BOOKS} />);
+      unmount();
+      liveError = null;
+      classicStart.mockClear();
+
+      render(<SpeakingPractice firstName={null} books={BOOKS} />);
+      fireEvent.click(screen.getByRole("button", { name: "Start speaking" }));
+      expect(classicStart).toHaveBeenCalledTimes(1);
+      expect(start).not.toHaveBeenCalled();
+    });
+
+    it("still says so when the browser or microphone is the problem", async () => {
+      // Nothing the other loop can fix: it needs the same microphone.
+      start.mockImplementation(async () => "failed");
+      render(<SpeakingPractice firstName={null} books={BOOKS} />);
+      fireEvent.click(screen.getByRole("button", { name: "Start speaking" }));
+      expect(await screen.findByText(/could not be started/)).toBeInTheDocument();
+      expect(classicStart).not.toHaveBeenCalled();
+    });
+
+    it("shows the same voice screen while that loop runs", () => {
+      classicActive = true;
+      render(<SpeakingPractice firstName={null} books={BOOKS} />);
+      expect(screen.queryByRole("button", { name: "Start speaking" })).not.toBeInTheDocument();
+    });
   });
 });

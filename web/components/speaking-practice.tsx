@@ -1,12 +1,13 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { AppShell } from "@/components/app-shell";
 import { VoiceSession } from "@/components/voice-session";
 import type { ConversationLanguage } from "@/lib/conversation";
 import type { ConversationSummary } from "@/lib/history";
 import type { ShellUser } from "@/lib/shell";
+import { useClassicConversation } from "@/lib/use-classic-voice";
 import { useLiveConversation } from "@/lib/use-live-voice";
 
 interface Book {
@@ -19,6 +20,29 @@ interface Book {
  * the language of the FIRST turn only, not of the conversation, and there is
  * nothing here for the student to set. */
 const OPENING_LANGUAGE: ConversationLanguage = "en";
+
+/** Set once the live service has refused for want of credit, so the next
+ * press goes straight to the loop that works. Asking again would refuse
+ * again — and opening a live call spends a minute of the student's
+ * allowance before the refusal arrives. Per tab: a top-up should be picked
+ * up by the next visit, not remembered against it. */
+const LIVE_REFUSED_KEY = "tobira_live_refused";
+
+function liveRefused(): boolean {
+  try {
+    return sessionStorage.getItem(LIVE_REFUSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function rememberLiveRefused() {
+  try {
+    sessionStorage.setItem(LIVE_REFUSED_KEY, "1");
+  } catch {
+    /* the in-page flag still holds for this visit */
+  }
+}
 
 /** Speaking practice: read what you can ask for, press the button, say it.
  *
@@ -102,6 +126,40 @@ export function SpeakingPractice({
     },
   });
 
+  /** A saved chat the server opened for this call — the classic loop's turns
+   * go through the chat route, which saves them itself. */
+  function adopt(conversationId: number) {
+    if (conversationRef.current === conversationId) return;
+    conversationRef.current = conversationId;
+    setSavedId(conversationId);
+    setConversations((all) => [
+      { id: conversationId, title: titleRef.current, createdAt: new Date().toISOString() },
+      ...all.filter((c) => c.id !== conversationId),
+    ]);
+  }
+
+  /** The same conversation without the live service: for when Google cannot
+   * be reached or will not answer. See useClassicConversation. */
+  const classic = useClassicConversation({
+    conversationId: () => conversationRef.current,
+    title: () => titleRef.current,
+    onTurn: (turn) => setTurns((all) => [...all, turn]),
+    onConversation: adopt,
+  });
+
+  // The live call opened and was then refused — the account behind it has
+  // run out of credit, which only shows once the model is asked to speak.
+  // Carry straight on in the loop that does not need it, rather than ending
+  // the student's call on a message about the server's bill.
+  const refusedRef = useRef(false);
+  const startClassic = classic.start;
+  useEffect(() => {
+    if (live.error !== "provider" || refusedRef.current) return;
+    refusedRef.current = true;
+    rememberLiveRefused();
+    startClassic();
+  }, [live.error, startClassic]);
+
   /** Called straight from the button press: Safari will not let audio play
    * from an AudioContext created any later than the click that asked for it. */
   function start() {
@@ -112,17 +170,39 @@ export function SpeakingPractice({
     conversationRef.current = undefined;
     setSavedId(null);
     titleRef.current = speakingTitle(new Date());
+    if (refusedRef.current || liveRefused()) {
+      refusedRef.current = true;
+      setStarting(false);
+      classic.start();
+      return;
+    }
     void live
       .start({ language: OPENING_LANGUAGE, history: [], opening: true })
       .then((result) => {
-        // Anything but a live connection ends here. The chat falls back to
-        // the classic record-upload-speak loop, but that loop writes its
-        // replies into a transcript, and this page has none to write into —
-        // so a student is told plainly instead of left with a dead button.
-        if (result !== "live") setFailed(true);
+        // The live service cannot be reached: the loop that does not need it.
+        if (result === "fallback") classic.start();
+        // The browser or the microphone said no; nothing else will do better.
+        else if (result !== "live") setFailed(true);
       })
       .catch(() => setFailed(true))
       .finally(() => setStarting(false));
+  }
+
+  if (classic.active) {
+    return (
+      <div className="flex min-h-viewport flex-col">
+        <VoiceSession
+          phase={classic.phase}
+          level={classic.level}
+          language={OPENING_LANGUAGE}
+          heard={classic.heard}
+          error={classic.error}
+          errorDetail={classic.notice}
+          onEnd={classic.stop}
+          onInterrupt={classic.interrupt}
+        />
+      </div>
+    );
   }
 
   if (live.active) {
