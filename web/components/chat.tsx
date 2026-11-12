@@ -475,6 +475,21 @@ export function Chat({
     },
   });
 
+  // The live call opened and was then refused — the Google account behind it
+  // cannot pay, which only shows once the model is asked to speak. Carry on
+  // in the classic loop, which does not need it, rather than leaving the
+  // student on a message about the server's bill.
+  // Derived rather than stored: the refusal stays on the live hook until the
+  // next call starts, which is exactly as long as this should hold.
+  const liveRefused = voiceLive && voiceEngine === "live" && live.error === "provider";
+  const engine = liveRefused ? "classic" : voiceEngine;
+  const startClassicVoice = voice.start;
+  useEffect(() => {
+    if (!liveRefused) return;
+    console.warn("live voice refused by the provider; using the classic voice loop");
+    void startClassicVoice();
+  }, [liveRefused, startClassicVoice]);
+
   /** Start talking. Live first; the classic loop if live cannot open. Called
    * straight from the button's click so the audio can start on Safari. */
   function startVoice() {
@@ -649,16 +664,16 @@ export function Chat({
           same conversation — and comes back whole when the student finishes. */}
       {voiceLive ? (
         <VoiceSession
-          phase={voiceEngine === "live" ? live.phase : phase}
-          level={voiceEngine === "live" ? live.level : voice.level}
+          phase={engine === "live" ? live.phase : phase}
+          level={engine === "live" ? live.level : voice.level}
           language={language}
-          heard={voiceEngine === "live" ? live.heard : heard}
-          error={voiceEngine === "live" ? live.error : voice.error}
-          realtime={voiceEngine === "live"}
-          secondsLeft={voiceEngine === "live" ? live.secondsLeft : null}
-          errorDetail={voiceEngine === "live" ? live.notice : null}
+          heard={engine === "live" ? live.heard : heard}
+          error={engine === "live" ? live.error : voice.error}
+          realtime={engine === "live"}
+          secondsLeft={engine === "live" ? live.secondsLeft : null}
+          errorDetail={engine === "live" ? live.notice : null}
           onEnd={endVoice}
-          onInterrupt={voiceEngine === "live" ? live.interrupt : tts.stop}
+          onInterrupt={engine === "live" ? live.interrupt : tts.stop}
         />
       ) : (
       <div ref={scroll.ref} className="relative flex-1 space-y-4 overflow-y-auto px-4 py-6">

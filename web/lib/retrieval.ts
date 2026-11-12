@@ -326,6 +326,99 @@ export async function retrieve(
   return (data ?? []) as RetrievedChunk[];
 }
 
+/** A chunk found by its words alone, with what is known about its book. */
+interface KeywordRow {
+  id: number;
+  document_id: number;
+  pdf_page: number;
+  book_page: string | null;
+  content: string;
+  metadata: Record<string, unknown> | null;
+  documents?: {
+    title: string;
+    doc_type: string;
+    is_citable: boolean;
+    level?: string | null;
+    topic?: string | null;
+  } | null;
+}
+
+/** Order keyword hits by how much of the question they actually contain.
+ *
+ * The database can say which pages contain ANY of the words; it cannot rank
+ * them through PostgREST, and the first sixty rows back are in whatever order
+ * the index found them. A page with four of the student's words beats one
+ * with a stray particle, a textbook beats a handout (it is what the student
+ * owns), and the book they are studying beats the others.
+ */
+export function rankKeywordRows<T extends KeywordRow>(
+  rows: T[],
+  terms: string[],
+  scope: StudyScope,
+): T[] {
+  const lowered = terms.map((term) => term.toLowerCase());
+  const score = (row: T) => {
+    const text = row.content.toLowerCase();
+    const hits = lowered.filter((term) => text.includes(term)).length;
+    const doc = row.documents;
+    const inScope =
+      (scope.level && doc?.level === scope.level ? 1 : 0) +
+      (scope.topic && doc?.topic === scope.topic ? 2 : 0);
+    return hits * 3 + (doc?.is_citable ? 1 : 0) + inScope;
+  };
+  return rows
+    .map((row, at) => ({ row, at, score: score(row) }))
+    .sort((a, b) => b.score - a.score || a.at - b.at)
+    .map(({ row }) => row);
+}
+
+/** The corpus searched by its words, for when it cannot be searched by
+ * meaning.
+ *
+ * The ranked search needs the question embedded first, and only Google can
+ * embed it — the corpus was indexed with Google's model, and a vector from
+ * anyone else's lands somewhere meaningless. So when the Google account
+ * cannot pay, every course question used to stop dead at the first step,
+ * with a working answer model sitting idle behind it.
+ *
+ * This is the lexical half of the hybrid search on its own: the same tokens
+ * the ranked search sends, matched against the same index. It finds what a
+ * question literally says rather than what it means, which is a worse search
+ * and a far better answer than an error. Never marked `exact` — a page that
+ * merely shares a word with the question is not a page to cite as its source.
+ */
+export async function retrieveByKeywords(
+  supabase: SupabaseClient,
+  tokens: string[],
+  scope: StudyScope,
+  count = 14,
+): Promise<RetrievedChunk[]> {
+  // websearch syntax never throws on what a student typed; quotes keep each
+  // token whole, so the characters it treats as operators are taken out.
+  const terms = [
+    ...new Set(tokens.map((token) => token.replace(/["'()|&!:<>*\\-]/g, "").trim()).filter(Boolean)),
+  ].slice(0, 12);
+  if (terms.length === 0) return [];
+
+  const { data, error } = await supabase
+    .from("chunks")
+    .select(
+      "id, document_id, pdf_page, book_page, content, metadata, documents!inner(title, doc_type, is_citable, level, topic)",
+    )
+    .textSearch("tokens", terms.map((term) => `"${term}"`).join(" or "), {
+      config: "simple",
+      type: "websearch",
+    })
+    .limit(60);
+  if (error) throw new Error(`keyword search: ${error.message}`);
+
+  // The generated types read the join as an array; `!inner` on a many-to-one
+  // returns one object, which is what retrieveExact relies on too.
+  return rankKeywordRows((data ?? []) as unknown as KeywordRow[], terms, scope)
+    .slice(0, count)
+    .map((row) => ({ ...toRetrieved(row), exact: false }));
+}
+
 /** Below this cosine similarity a chunk is not about the question. It is a
  * looser bar than a citation's, because a passage can be worth showing the
  * model without being worth pointing a student at. */

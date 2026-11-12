@@ -41,6 +41,7 @@ import {
   resolveQuery,
   retrieve,
   retrieveByTopic,
+  retrieveByKeywords,
   retrieveByPage,
   retrieveExact,
   selectContext,
@@ -70,6 +71,10 @@ const BodySchema = z.object({
     })
     .default({}),
   conversationId: z.number().int().positive().optional(),
+  // What to call the chat if this turn starts one. Speaking practice names
+  // each call for when it happened ("Speaking practice 11/12 14:05"); left
+  // out, a chat is named for its first question as it always was.
+  title: z.string().trim().min(1).max(60).optional(),
   // Files the student attached to this turn. Their extracted text becomes
   // context; the files themselves never leave Storage.
   uploadIds: z.array(z.number().int().positive()).max(4).optional(),
@@ -181,24 +186,6 @@ export async function POST(request: Request) {
     console.error("chat embed failed:", embedFailure);
     return null;
   };
-  /** The 502 for a question that could not be embedded.
-   *
-   * Both halves are the same HTTP failure and used to carry the same four
-   * words — "Something went wrong answering that" — whether the provider was
-   * refusing every request on the account or a single call had timed out.
-   * Only one of those is worth retrying, so only one of them says to. */
-  const embeddingUnavailable = () =>
-    Response.json(
-      isPermanentRefusal(embedFailure)
-        ? { error: "provider_refused", message: PROVIDER_REFUSED_TEXT }
-        : {
-            error: "embedding_failed",
-            message:
-              "The textbook search did not answer just now. Please send your question again.",
-          },
-      { status: 502 },
-    );
-
   // In flight while the auth round trip below happens. Nothing about an
   // embedding depends on who is asking; the only cost of starting early is
   // one wasted embed when a trial visitor turns out to be past their limit,
@@ -208,9 +195,8 @@ export async function POST(request: Request) {
   // A file sent on its own is embedded once its text is in hand, below.
   //
   // The failure is swallowed so a dead embedding cannot take the request down
-  // with it, but the REASON is kept: a provider that is out of credit refuses
-  // every retry, and saying "please try again" to that is a lie the student
-  // can do nothing with. See embeddingUnavailable below.
+  // with it: the corpus is then searched by its words instead (see
+  // keywordOnly below). The reason is kept for the log.
   const embedding = trivial || attachmentOnly
     ? Promise.resolve(null)
     : clock.time("embed", embedQuery(query.text).catch(noteEmbedFailure));
@@ -299,7 +285,7 @@ export async function POST(request: Request) {
     if (!user || conversationId) return conversationId;
     const { data: conversation } = await supabase
       .from("conversations")
-      .insert({ user_id: user.id, scope, title: question.slice(0, 60) })
+      .insert({ user_id: user.id, scope, title: parsed.data.title ?? question.slice(0, 60) })
       .select("id")
       .single();
     return (conversation as { id: number } | null)?.id;
@@ -394,12 +380,25 @@ export async function POST(request: Request) {
 
   let vectorLiteral: string | null = null;
   let chunks: RetrievedChunk[] = [];
+  /** The question could not be embedded, so the corpus is searched by its
+   * words alone. Only Google can embed a question against this index, and a
+   * Google account that cannot pay used to take every course question down
+   * with it — "the server's AI service is unavailable" — while the model
+   * that writes the answer was working the whole time. A keyword search is a
+   * worse search and a far better reply than that. */
+  let keywordOnly = false;
 
   if (!trivial && db) {
-    if (!queryVector) {
-      return embeddingUnavailable();
+    if (queryVector) {
+      vectorLiteral = `[${queryVector.join(",")}]`;
+    } else {
+      keywordOnly = true;
+      console.warn(
+        `chat: answering from keyword search — ${
+          isPermanentRefusal(embedFailure) ? "the embedding provider refused" : "embedding failed"
+        }: ${(embedFailure ?? "no reason").slice(0, 200)}`,
+      );
     }
-    vectorLiteral = `[${queryVector.join(",")}]`;
 
     // Cache probe and vector retrieval both need only the embedding, so they
     // run together: a hit discards the retrieval, a miss — the common case as
@@ -438,7 +437,9 @@ export async function POST(request: Request) {
     const [{ data: cached }, retrieval, exact, byTopic, byPage] = await clock.time(
       "retrieve",
       Promise.all([
-      cacheable
+      // The cache is keyed by the question's embedding; without one there is
+      // nothing to look up, and nothing will be written back either.
+      cacheable && vectorLiteral
         ? db.rpc("cache_get", {
             query_embedding: vectorLiteral,
             query_scope: scope,
@@ -447,7 +448,10 @@ export async function POST(request: Request) {
       // More candidates than the prompt can hold, because selectContext
       // below drops what is not about the question and keeps one page per
       // passage. Same round trip either way.
-      retrieve(db, queryVector, tokensForQuery(query.text), scope, 14).then(
+      (queryVector
+        ? retrieve(db, queryVector, tokensForQuery(query.text), scope, 14)
+        : retrieveByKeywords(db, tokensForQuery(query.text), scope, 14)
+      ).then(
         (rows) => ({ ok: true as const, rows }),
         () => ({ ok: false as const, rows: [] as RetrievedChunk[] }),
       ),
@@ -496,7 +500,9 @@ export async function POST(request: Request) {
     // in the corpus and tell the student to go and open the book themselves.
     // Instead, ask again in the corpus's own words before drawing any
     // conclusion — one embedding, on the minority of turns that need it.
-    if (!byPage.length && isThinResult(chunks)) {
+    // Not without an embedding: the second ask is a second embed, and the
+    // provider that refused the first will refuse it too.
+    if (!keywordOnly && !byPage.length && isThinResult(chunks)) {
       const broadened = broadenQuery(query.text, divisions, aspect);
       if (broadened && broadened !== query.text) {
         const retry = await clock.time(
@@ -547,6 +553,10 @@ export async function POST(request: Request) {
     // Foundation 3" is just as much a one-book question without naming a
     // topic at all; only a general question benefits from the spread.
     perDocument: demand.divisions > 0 ? Math.max(4, contextLimit) : demand.exhaustive ? 8 : 3,
+    // Keyword hits carry no similarity at all, so the floor that keeps
+    // off-topic passages out would keep every one of them out. Their order
+    // already says how much of the question each contains.
+    ...(keywordOnly ? { minSimilarity: 0 } : {}),
   });
   const citations = buildCitations(context);
 
