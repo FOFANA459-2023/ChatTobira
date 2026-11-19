@@ -250,13 +250,25 @@ export function LiveTranslation({
   const hasText = live.segments.length > 0 || live.pending !== null;
   const field =
     "rounded-lg border border-stone-300 bg-white px-3 py-2 text-stone-900 placeholder:text-stone-400 focus-visible:border-stone-500 focus-visible:outline-none disabled:bg-stone-100 disabled:text-stone-500";
+  /** The pair being translated, for the one line that stands in for the
+   * pickers on a phone once a session is running. */
+  const languageName = (code: string) => LANGUAGES.find((l) => l.code === code)?.label ?? code;
+  const pair = `${source === "auto" ? "Detected language" : languageName(source)} → ${languageName(target)}`;
 
   return (
     <AppShell page="translate" user={user} conversations={conversations} fullHeight>
-      <div className="flex h-full min-h-0 flex-col gap-4 p-4 sm:p-6">
+      {/* On a phone this page is one screen tall, and the transcript gets
+          whatever height the setup above it leaves. Stacked for a narrow
+          screen, the setup left it almost none — the translation, the one
+          thing this page is for, was a sliver at the bottom. So on a phone:
+          the setup folds away while a session runs (the pickers are locked
+          then anyway), the transcript can never shrink below a readable
+          height, and the page scrolls rather than squeezing it if the screen
+          is shorter still. */}
+      <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3 sm:gap-4 sm:overflow-visible sm:p-6">
         <header className="shrink-0">
           <h1 className="text-xl font-semibold text-stone-900">Live translation</h1>
-          <p className="mt-1 text-sm text-stone-600">
+          <p className={`mt-1 text-sm text-stone-600 ${started ? "hidden sm:block" : ""}`}>
             Point your microphone at the class. The translation appears as the teacher
             speaks, and is saved to your chats when you finish.
           </p>
@@ -265,16 +277,20 @@ export function LiveTranslation({
         {/* The pickers are disabled once a session is under way: the language
             is locked into the token the server minted, so changing it here
             would be a promise the connection cannot keep. */}
-        <div className="flex shrink-0 flex-wrap items-end gap-3">
-          <label className="flex flex-col gap-1 text-sm">
+        <div
+          className={`shrink-0 grid-cols-2 items-end gap-3 sm:flex sm:flex-wrap ${
+            started ? "hidden" : "grid"
+          }`}
+        >
+          <label className="flex min-w-0 flex-col gap-1 text-sm">
             <span className="font-medium text-stone-600">From</span>
             <select
-              className={`min-w-36 ${field}`}
+              className={`w-full sm:w-auto sm:min-w-36 ${field}`}
               value={source}
               disabled={started}
               onChange={(e) => setSource(e.target.value as SourceLanguage)}
             >
-              <option value="auto">Detect automatically</option>
+              <option value="auto">Auto-detect</option>
               {LANGUAGES.map((l) => (
                 <option key={l.code} value={l.code}>
                   {l.label} — {l.native}
@@ -283,10 +299,10 @@ export function LiveTranslation({
             </select>
           </label>
 
-          <label className="flex flex-col gap-1 text-sm">
+          <label className="flex min-w-0 flex-col gap-1 text-sm">
             <span className="font-medium text-stone-600">Into</span>
             <select
-              className={`min-w-36 ${field}`}
+              className={`w-full sm:w-auto sm:min-w-36 ${field}`}
               value={target}
               disabled={started}
               onChange={(e) => setTarget(e.target.value as LanguageCode)}
@@ -299,7 +315,7 @@ export function LiveTranslation({
             </select>
           </label>
 
-          <label className="flex min-w-48 flex-1 flex-col gap-1 text-sm">
+          <label className="col-span-2 flex flex-col gap-1 text-sm sm:min-w-48 sm:flex-1">
             <span className="font-medium text-stone-600">
               What the class is about <span className="font-normal text-stone-400">(optional)</span>
             </span>
@@ -318,6 +334,8 @@ export function LiveTranslation({
             rather than three links adrift on the page. */}
         <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-3 rounded-xl border border-stone-200 bg-white px-3 py-3 shadow-sm">
           <StatusChip phase={live.phase} />
+
+          {started && <span className="text-sm text-stone-500 sm:hidden">{pair}</span>}
 
           {live.remainingSeconds !== null && running && (
             <span className="text-sm text-stone-500">{minutes(live.remainingSeconds)} left</span>
@@ -367,7 +385,7 @@ export function LiveTranslation({
         <div
           ref={scrollerRef}
           onScroll={onScroll}
-          className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-stone-200 bg-white p-4"
+          className="min-h-64 flex-1 overflow-y-auto rounded-xl border border-stone-200 bg-white p-3 sm:min-h-0 sm:p-4"
         >
           {!hasText && (
             <p className="text-sm text-stone-500">
